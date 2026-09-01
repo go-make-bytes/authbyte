@@ -193,8 +193,8 @@ sequenceDiagram
     AC-->>SPA: 401 use_dpop_nonce + DPoP-Nonce (first hop only)
     SPA->>AC: POST /token (+ server nonce, code_verifier)
     AC->>AC: verify DPoP + nonce + jti replay
-    AC->>RD: GETDEL code:{appCode}; verify PKCE + client/redirect echo
-    AC->>RD: bind session to DPoP thumbprint; save
+    AC->>RD: GETDEL code:{appCode}<br/> verify PKCE + client/redirect echo
+    AC->>RD: bind session to DPoP thumbprint<br/> save
     AC->>AC: issuer.IssueUser (cnf.jkt = thumbprint)
     AC-->>SPA: {access_token (DPoP), refresh_token = session id, capabilities?}
 ```
