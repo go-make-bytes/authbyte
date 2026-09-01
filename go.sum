@@ -39,8 +39,8 @@ github.com/gmb-lib/go-authbyte v0.20.2 h1:Xcx0DFK0sbUbcwvXu+rhXbnjBBLE3eoD8vwyoE
 github.com/gmb-lib/go-authbyte v0.20.2/go.mod h1:L1nVmHM8/Dd0Eod4PzR2vLYFFvaeFf9X2pfcuQt/tWs=
 github.com/gmb-lib/go-gdpr-audit v1.1.4 h1:gklQRLdUy/Y32lmbOadsMS30c1SZt9tVRF1Hv+tivFM=
 github.com/gmb-lib/go-gdpr-audit v1.1.4/go.mod h1:2EGlzTfk7OkDpaqcu1xi4KYlYr//NXIDIiyPcEqXBL0=
-github.com/gmb-lib/go-platform-kit v1.10.0 h1:zh+YyqLcFf1cTnE+n1M0z4Qu+eEX8c0+q1eOb8uY4sI=
-github.com/gmb-lib/go-platform-kit v1.10.0/go.mod h1:/ZCrZUjDBF+CniHa5xah3IfG0P7o6TqMYXK5ojvNkwU=
+github.com/gmb-lib/go-platform-kit v1.11.1 h1:UG2VTTLByAyH7X1q6cP/RECurFS6wGs9azPxIiUzZtY=
+github.com/gmb-lib/go-platform-kit v1.11.1/go.mod h1:/ZCrZUjDBF+CniHa5xah3IfG0P7o6TqMYXK5ojvNkwU=
 github.com/gmb-lib/go-sec-events v1.1.4 h1:CWAAG94+YTR+4BVYH9xpp3SclyL34BEsv6U+Mh+1wa4=
 github.com/gmb-lib/go-sec-events v1.1.4/go.mod h1:37KRMAxICBrjH517lKTcd8pL3yU0yjAR3Eq7+nJqAew=
 github.com/go-jose/go-jose/v4 v4.1.4 h1:moDMcTHmvE6Groj34emNPLs/qtYXRVcd6S7NHbHz3kA=
