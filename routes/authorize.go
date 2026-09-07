@@ -82,6 +82,14 @@ func (r *router) authorize(ctx *azugo.Context) {
 		spaState = *s
 	}
 
+	// The organisation the person asks to act under, when they belong to more
+	// than one. Optional; it is checked against their memberships at the token
+	// issue, never trusted on its own.
+	tenant := ""
+	if t := ctx.Query.StringOptional("tenant"); t != nil {
+		tenant = *t
+	}
+
 	entrustRedirect := r.entrustRedirectURI()
 	if entrustRedirect == "" {
 		ctx.Error(corehttp.NotFoundError{Resource: "eParaksts redirect uri"})
@@ -97,6 +105,7 @@ func (r *router) authorize(ctx *azugo.Context) {
 		SPAState:            spaState,
 		EntrustRedirectURI:  entrustRedirect,
 		ClientID:            clientID,
+		Tenant:              tenant,
 	}
 
 	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
@@ -239,6 +248,7 @@ func (r *router) callback(ctx *azugo.Context) {
 		CodeChallengeMethod: flow.CodeChallengeMethod,
 		ClientID:            flow.ClientID,
 		RedirectURI:         flow.AppRedirectURI,
+		Tenant:              flow.Tenant,
 	}, appCodeTTL); err != nil {
 		ctx.Error(err)
 

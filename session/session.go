@@ -39,6 +39,10 @@ type Flow struct {
 	// service owns it; the engine's stateless /auth/validate checks the token
 	// against it). Empty for the eParaksts redirect flow.
 	WebEIDNonce string `json:"webeid_nonce,omitempty"`
+	// Tenant is the organisation the person asked to act under when the login
+	// began (`/authorize?tenant=`). Carried to the token issue so that, when the
+	// person holds several memberships, the choice is theirs — never guessed.
+	Tenant string `json:"tenant,omitempty"`
 }
 
 // AppCode binds an issued application authorization code (Auth→SPA) to the
@@ -50,6 +54,8 @@ type AppCode struct {
 	// ClientID and RedirectURI are echo-checked at /token ([RFC 6749 §4.1.3]).
 	ClientID    string `json:"client_id"`
 	RedirectURI string `json:"redirect_uri"`
+	// Tenant is the organisation named when the login began, if any.
+	Tenant string `json:"tenant,omitempty"`
 }
 
 // Session is the server-side user session.
@@ -62,6 +68,14 @@ type Session struct {
 	LoA          string   `json:"loa"`
 	LoginMethod  string   `json:"login_method"`
 	Scopes       []string `json:"scopes"`
+	// ClientID is the public client the session's tokens are issued to. Its
+	// registration says whether the people logging in through it need a
+	// membership in the register.
+	ClientID string `json:"client_id,omitempty"`
+	// Tenant is the membership the session's tokens are minted for — the person's
+	// single membership, or the one they chose. Re-resolved at every refresh, so a
+	// revoked membership dies with the next token.
+	Tenant string `json:"tenant,omitempty"`
 	// Thumbprint is the SPA's DPoP key thumbprint the session's tokens bind to.
 	Thumbprint string `json:"thumbprint"`
 	// Capabilities is the signing-capability catalog captured at login, when

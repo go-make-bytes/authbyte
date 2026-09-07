@@ -100,7 +100,7 @@ func TestServiceTokenIssued(t *testing.T) {
 	rec := audit.New(secevents.NewEmitter(sink), nil, zap.NewNop())
 
 	withCtx(t, func(ctx *azugo.Context) {
-		rec.ServiceTokenIssued(ctx, "eparaksts-signer", "svc:access-audit", []string{"access-audit:write"})
+		rec.ServiceTokenIssued(ctx, "eparaksts-signer", "svc:access-audit", "", []string{"access-audit:write"})
 	})
 
 	ev := sink.latest()
@@ -109,6 +109,46 @@ func TestServiceTokenIssued(t *testing.T) {
 	qt.Check(t, qt.Equals(str(ev.Attributes[secevents.AttrKind]), secevents.TokenKindIssuance))
 	qt.Assert(t, qt.IsNotNil(ev.Actor))
 	qt.Check(t, qt.Equals(ev.Actor.Type, "service"))
+	// A platform service acting as itself names no organisation.
+	_, hasTenant := ev.Attributes["tenant"]
+	qt.Check(t, qt.IsFalse(hasTenant))
+}
+
+// A service account's token names the organisation it acts for, so the record
+// can answer which machines minted for a tenant, and when.
+func TestServiceTokenIssuedRecordsTenant(t *testing.T) {
+	sink := &captureSink{}
+	rec := audit.New(secevents.NewEmitter(sink), nil, zap.NewNop())
+
+	withCtx(t, func(ctx *azugo.Context) {
+		rec.ServiceTokenIssued(ctx, "svc:acme-dms", "svc:signbyte-integration-api", "01TENANTACME", []string{"signing-requests:write"})
+	})
+
+	ev := sink.latest()
+	qt.Assert(t, qt.IsNotNil(ev))
+	qt.Check(t, qt.Equals(str(ev.Attributes["tenant"]), "01TENANTACME"))
+	qt.Check(t, qt.Equals(ev.Actor.ID, "svc:acme-dms"))
+}
+
+// A refused delegation is an authorization denial, attributed to the client
+// that asked and naming the subject it asked for.
+func TestDelegationRefused(t *testing.T) {
+	sink := &captureSink{}
+	rec := audit.New(secevents.NewEmitter(sink), nil, zap.NewNop())
+
+	withCtx(t, func(ctx *azugo.Context) {
+		rec.DelegationRefused(ctx, "svc:signbyte-integration-api", "svc:signflow", "a platform service acting as itself cannot be acted for")
+	})
+
+	ev := sink.latest()
+	qt.Assert(t, qt.IsNotNil(ev))
+	qt.Check(t, qt.Equals(ev.EventType, secevents.EventAuthZDenied))
+	qt.Check(t, qt.Equals(ev.Outcome, broker.OutcomeFailure))
+	qt.Check(t, qt.Equals(str(ev.Attributes[secevents.AttrKind]), "delegation"))
+	qt.Check(t, qt.Equals(str(ev.Attributes["on_behalf_of"]), "svc:signflow"))
+	qt.Check(t, qt.Equals(str(ev.Attributes[secevents.AttrSeverity]), string(secevents.SeverityWarning)))
+	qt.Assert(t, qt.IsNotNil(ev.Actor))
+	qt.Check(t, qt.Equals(ev.Actor.ID, "svc:signbyte-integration-api"))
 }
 
 // IdentityWritten must be a safe no-op when the GDPR client is not configured.

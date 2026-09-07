@@ -190,6 +190,7 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		CodeChallengeMethod: flow.CodeChallengeMethod,
 		ClientID:            flow.ClientID,
 		RedirectURI:         flow.AppRedirectURI,
+		Tenant:              flow.Tenant,
 	}, appCodeTTL); err != nil {
 		ctx.Error(err)
 

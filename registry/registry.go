@@ -43,6 +43,13 @@ type PublicClient struct {
 	ClientID            string   `yaml:"client_id"`
 	Enabled             bool     `yaml:"enabled"`
 	AllowedRedirectURIs []string `yaml:"allowed_redirect_uris"`
+	// MembershipRequired says whether the people who log in through this client
+	// must hold a membership in the register: true for a product whose
+	// organisations decide who belongs (a person without a membership is refused
+	// a token), false for a public portal that admits whoever can authenticate
+	// (its people are minted the baseline and never consulted in the register).
+	// Unset means "required whenever a register is wired" — the safe default.
+	MembershipRequired *bool `yaml:"membership_required"`
 }
 
 // Document is the parsed registry document.
@@ -204,6 +211,33 @@ func (r *Registry) AllowedScopes(clientID, audience string, requested []string) 
 	}
 
 	return out, nil
+}
+
+// MembershipRequired reports whether the people who log in through the public
+// client clientID need a membership in the register. A client that leaves it
+// unset — and an unknown client — follows registerWired: required whenever a
+// register is configured, never when there is none (fail closed toward the
+// register, not toward the baseline).
+func (r *Registry) MembershipRequired(clientID string, registerWired bool) bool {
+	if c, ok := r.pubClients[clientID]; ok && c.MembershipRequired != nil {
+		return *c.MembershipRequired
+	}
+
+	return registerWired
+}
+
+// RequiresMembershipSomewhere reports whether any enabled public client
+// explicitly requires a membership. A deployment with no register configured
+// refuses to start with such a client rather than silently minting it the
+// baseline.
+func (r *Registry) RequiresMembershipSomewhere() bool {
+	for _, c := range r.pubClients {
+		if c.Enabled && c.MembershipRequired != nil && *c.MembershipRequired {
+			return true
+		}
+	}
+
+	return false
 }
 
 // ValidateRedirectURI confirms that clientID is a known, enabled public client
