@@ -150,6 +150,9 @@ func (a *App) init() error {
 	if err != nil {
 		return err
 	}
+	if err := refuseDevelopmentOnlyFields(reg, a.Env()); err != nil {
+		return err
+	}
 	a.registry = reg
 
 	// Upstream OIDC provider + identity resolution. The provider is built from

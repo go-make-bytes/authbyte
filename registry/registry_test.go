@@ -176,3 +176,60 @@ func TestLoadEmpty(t *testing.T) {
 		t.Fatalf("expected ErrUnknownClient, got %v", err)
 	}
 }
+
+const exchangeDoc = `
+service_clients:
+  - client_id: svc:api
+    secret_ref: env:API
+    enabled: true
+    grants:
+      - audience: svc:document
+        scopes: [documents:write]
+  - client_id: svc:acme-dms
+    secret_ref: env:ACME
+    enabled: true
+    exchange_as_subject: true
+    grants:
+      - audience: svc:api
+        scopes: [signing-requests:write]
+  - client_id: svc:retired-dms
+    secret_ref: env:RETIRED
+    enabled: false
+    exchange_as_subject: true
+    grants: []
+`
+
+// Only an enabled client whose row carries exchange_as_subject may be the subject of a
+// token exchange; a client without the field, a disabled one with it, and an unknown id
+// are all refused — the default "a service cannot be impersonated" holds everywhere else.
+func TestMayBeExchangedAsSubject(t *testing.T) {
+	r, err := Load([]byte(exchangeDoc), nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if !r.MayBeExchangedAsSubject("svc:acme-dms") {
+		t.Error("enabled client with the field: want true")
+	}
+	if r.MayBeExchangedAsSubject("svc:api") {
+		t.Error("client without the field: want false")
+	}
+	if r.MayBeExchangedAsSubject("svc:retired-dms") {
+		t.Error("disabled client with the field: want false")
+	}
+	if r.MayBeExchangedAsSubject("svc:nobody") {
+		t.Error("unknown client: want false")
+	}
+
+	// The development-only listing names every row carrying the field, enabled or not,
+	// so a fence can refuse a document that merely carries it.
+	got := r.DevelopmentOnlyClients()
+	if len(got) != 2 || got[0] != "svc:acme-dms" || got[1] != "svc:retired-dms" {
+		t.Errorf("DevelopmentOnlyClients = %v, want [svc:acme-dms svc:retired-dms]", got)
+	}
+
+	plain := load(t)
+	if n := len(plain.DevelopmentOnlyClients()); n != 0 {
+		t.Errorf("a document without the field lists %d development-only clients, want 0", n)
+	}
+}

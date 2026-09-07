@@ -14,6 +14,7 @@ import (
 	"azugo.io/azugo"
 	corehttp "azugo.io/core/http"
 	"github.com/valyala/fasthttp"
+	"go.uber.org/zap"
 )
 
 // userScopes answers the scopes and tenant a user token should carry: the
@@ -425,10 +426,18 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 	// Only a user (or an already-delegated token, which still names a user) may
 	// be acted for — a service cannot be impersonated. This keeps "service acts
 	// as itself" (client_credentials) distinct from "service acts for a user".
+	// The one exception is a registered client whose row says its own tokens may
+	// be exchanged — a development-only concession for a stand-in integrator (the
+	// registry refuses to load such a row outside development); it is logged so
+	// the concession is never silent.
 	if subject.IsService() {
-		ctx.Error(corehttp.ForbiddenError{})
+		if !r.Registry().MayBeExchangedAsSubject(subject.Subject) {
+			ctx.Error(corehttp.ForbiddenError{})
 
-		return
+			return
+		}
+		ctx.Log().Warn("token exchange acting for a service subject under the development-only registry concession",
+			zap.String("subject", subject.Subject), zap.String("client_id", clientID))
 	}
 
 	// The target audience + scopes are authorized against the same grant matrix
