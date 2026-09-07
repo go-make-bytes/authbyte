@@ -8,7 +8,6 @@ package registry
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	yaml "go.yaml.in/yaml/v3"
@@ -36,15 +35,6 @@ type Client struct {
 	SecretRef string  `yaml:"secret_ref"`
 	Enabled   bool    `yaml:"enabled"`
 	Grants    []Grant `yaml:"grants"`
-
-	// ExchangeAsSubject admits this client's OWN tokens as the subject of a token
-	// exchange — another client may then act on its behalf. Token exchange refuses a
-	// service-shaped subject by default (a service acts for a person, never for another
-	// service); this field is a DEVELOPMENT-ONLY concession for a stand-in integrator,
-	// honoured only when the environment is development — a registry document carrying
-	// it anywhere else stops the service at start (see DevelopmentOnlyClients). It is
-	// retired when tenant service accounts land and a membership decides instead.
-	ExchangeAsSubject bool `yaml:"exchange_as_subject"`
 }
 
 // PublicClient is a registered browser/native client (no secret; protected by
@@ -214,32 +204,6 @@ func (r *Registry) AllowedScopes(clientID, audience string, requested []string) 
 	}
 
 	return out, nil
-}
-
-// MayBeExchangedAsSubject reports whether tokens issued to clientID may be the subject
-// of a token exchange: the client is registered, enabled and carries the development-only
-// exchange_as_subject field. Anything else — unknown, disabled, or without the field — is
-// false, so the default stays "a service cannot be impersonated".
-func (r *Registry) MayBeExchangedAsSubject(clientID string) bool {
-	c, ok := r.clients[clientID]
-
-	return ok && c.Enabled && c.ExchangeAsSubject
-}
-
-// DevelopmentOnlyClients lists the client ids whose rows carry a field that must not
-// exist outside a development environment (today: exchange_as_subject), enabled or not —
-// the caller refuses to start on a non-empty list anywhere but development. Sorted, so a
-// refusal message is stable.
-func (r *Registry) DevelopmentOnlyClients() []string {
-	var out []string
-	for id, c := range r.clients {
-		if c.ExchangeAsSubject {
-			out = append(out, id)
-		}
-	}
-	sort.Strings(out)
-
-	return out
 }
 
 // ValidateRedirectURI confirms that clientID is a known, enabled public client
