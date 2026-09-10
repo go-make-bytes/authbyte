@@ -95,8 +95,9 @@ consulted at every token issue that needs a membership (first issue and refresh 
 whose client requires one; every tenant-named service issue). The register and this service
 ship separately, so this boundary is a published contract:
 
-- **Question:** a typed subject key — a person's identity code (`pno:<code>`) or a service
-  account's client id (`svc:<name>`, the same name it authenticates with).
+- **Question:** a typed subject key — a person's identity code in its canonical spelling
+  (`pno:PNOLV-01018015097`) or a service account's client id (`svc:<name>`, the same name it
+  authenticates with).
 - **Answer:** the subject's active memberships — each organisation with the `group:level`
   scopes the subject's roles grant there. The register attaches any pending invitation first,
   so a subject's very first token already carries the invited roles.
@@ -284,7 +285,7 @@ Token exchange lets a confidential client obtain an on-behalf-of token toward an
 
 **The service never touches database tables.** PostgreSQL access in [`store/postgres.go`](store/postgres.go) goes exclusively through `SECURITY DEFINER` stored procedures called with a uniform JSONB envelope (`CALL proc($1::jsonb, NULL::jsonb)` → `po_data`); the service connects with an `EXECUTE`-only role (`authbyte_public`) that has no direct table grants. The schema and the procedure logic are owned by the platform's separate `database` migration repo (one authored home per schema, shipped as one migration image) — this package only knows procedure *names* (`identity.upsert`, `identity.get`). A procedure that fails after a write re-raises a structured error (SQLSTATE `P0001`) whose message is the same envelope, so a validation failure and a post-write rollback surface identically.
 
-The person is keyed on the eIDAS national identity code (`serial_number`, e.g. `PNOLV-...`): the same human across different auth methods — different upstream subjects — resolves to one internal subject. `identity.upsert` reports whether the person was *created* on this call (first-ever login) so the caller emits the correct GDPR event (created vs updated); linking a new method to a known person is an update.
+The person is keyed on the eIDAS national identity code (`serial_number`), in **one canonical spelling** — the identity type, the country, a hyphen, and the national code with its separators removed (`PNOLV-01018015097`). Every spelling a card or a provider writes is reduced to it before it is stored or compared, so the same human across different auth methods — different upstream subjects, and different ways of writing the same code — resolves to one internal subject. The country is never guessed: a code that names one keeps it, otherwise it comes from the card certificate's own country attribute or from `OIDC_UPSTREAM_COUNTRY`, and a code with none available refuses the login. `identity.upsert` reports whether the person was *created* on this call (first-ever login) so the caller emits the correct GDPR event (created vs updated); linking a new method to a known person is an update.
 
 Redis holds only short-lived auth-flow and session state (`session/`), every key TTL-bounded:
 
@@ -342,6 +343,7 @@ Setting both selects the generic provider.
 | `OIDC_UPSTREAM_SCOPES` | `openid profile` | Scopes requested at authorization (space/comma separated) |
 | `OIDC_UPSTREAM_AUTHORIZE_URL` / `_TOKEN_URL` / `_USERINFO_URL` / `_END_SESSION_URL` | — (⇒ discovery) | Absolute endpoint overrides for a provider with fixed or non-standard paths; setting the first three skips discovery |
 | `OIDC_UPSTREAM_CLAIM_SERIAL` | `serial_number` | Userinfo claim carrying the person's identity code |
+| `OIDC_UPSTREAM_COUNTRY` | — | Two-letter country whose register issues this provider's identity codes; consulted only when the claim carries no country of its own. A provider that sends a bare national code and has none set delivers logins this service refuses |
 | `OIDC_UPSTREAM_METHOD_POLICY` | — (⇒ profile default) | `acr`/`amr` token → login-method vocabulary (`substr=method,…`, longest token wins) |
 | `OIDC_UPSTREAM_METHOD_DEFAULT` | `upstream` (generic) | Login method when no vocabulary token matches |
 | `OIDC_UPSTREAM_METHODS_ALLOWED` | — (⇒ the default method) | Comma-separated set a callback may resolve to; anything else is refused (fail closed) |

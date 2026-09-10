@@ -116,6 +116,45 @@ default) — so if nothing scrapes this service, there is nothing to do. The cha
 web framework this service is built on rather than from a change of its own, carried in with the
 shared libraries below.
 
+### Changed — one identity code per person, whichever way the card or the provider writes it
+
+A person's identity code now reaches every store and every token in **one spelling**: the identity
+type, the country, a hyphen, and the national code with its separators removed —
+`PNOLV-01018015097`. The same person's card certificate may write `PNOLV-010180-15097` and a
+provider may send `010180-15097`; compared as text those were three different people, and documents
+signed under one spelling were unreachable from another.
+
+What an integrator sees: the `serial_number` claim in an issued token, and the identity code the
+signer-slot match compares against, are now that one spelling.
+
+```http
+POST /token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code&code=…&client_id=portal-spa&code_verifier=…
+```
+
+```json
+{ "sub": "01J…", "serial_number": "PNOLV-01018015097", "scope": "…", "tenant": "…" }
+```
+
+Nothing is guessed. A code that already names its country keeps it — a Lithuanian person
+authenticating through a Latvian provider stays Lithuanian. A code that names none is keyed under
+the country of the **card certificate** it was read from, or the country configured for the
+**provider** it came from. A code with no country available anywhere, or with an identity type this
+platform does not recognise, **refuses the login** (`401`) and records why, rather than filing the
+person under a guess: a wrong identity key is the wrong person's documents.
+
+### Added — `OIDC_UPSTREAM_COUNTRY`, for a provider that sends a bare national code
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OIDC_UPSTREAM_COUNTRY` | — | Two-letter country whose register issues this provider's identity codes; used only when the claim carries no country of its own |
+
+Set it for a generic OIDC provider whose identity-code claim is a bare national code — without it,
+those logins are refused. A provider whose claim carries `PNO<CC>-` needs nothing: the value wins
+either way. The eParaksts profile already carries `LV`, so eParaksts deployments need no change.
+
 ### Notes
 
 - The shared libraries moved to their current releases — the auth client at v0.21.0 and the

@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,11 +22,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gmb-lib/go-authbyte/identitycode"
 	"github.com/gmb-lib/go-platform-kit/observability"
 	"github.com/go-make-bytes/authbyte/identity"
 
 	"go.uber.org/zap"
 )
+
+// ErrIdentityCode is returned when the provider's identity-code claim cannot be
+// reduced to the platform's canonical spelling — an identity type this platform
+// does not recognise, or a bare national code from a provider with no Country
+// configured. A login that produced it is refused: an identity code that cannot
+// be keyed the one way would key the person a second way instead, and the
+// documents they signed under the first would be unreachable from the second.
+//
+// It wraps the reason, which never carries the offending value: an identity code
+// is personal data and this error is written to service logs.
+var ErrIdentityCode = errors.New("oidc: the identity code from the provider cannot be canonicalised")
 
 // Config describes one upstream OIDC provider completely. Zero-value fields
 // fall back to standard OIDC behaviour; the eParaksts profile pre-fills the
@@ -58,6 +71,18 @@ type Config struct {
 	// ClaimSerial names the userinfo claim carrying the person's identity
 	// code (default "serial_number").
 	ClaimSerial string
+
+	// Country is the two-letter country whose register issues the identity
+	// codes this provider authenticates people from — the country of the
+	// people it serves, not the country the deployment runs in.
+	//
+	// It is consulted ONLY when the claim carries no country of its own: a
+	// value that states one ("PNOLT-...") keeps it, even here. A provider that
+	// sends a bare national code and has no country set delivers a login this
+	// service refuses, which is the intended outcome — the alternative is
+	// filing a person under a guessed nationality, and a wrong identity key is
+	// the wrong person's documents.
+	Country string
 
 	// SignIdentityURL is the base URL (trailing slash included) of the
 	// provider's per-identity certificate endpoint: GET {SignIdentityURL}{id}
@@ -311,7 +336,25 @@ func (p *Provider) UserInfo(ctx context.Context, accessToken string) (identity.U
 	info.FamilyName = raw.FamilyName
 	info.Name = raw.Name
 	info.EIPS = raw.EIPS
+	// The identity code, reduced to the one spelling the platform stores and
+	// compares. A provider writes it its own way — with the identity type and
+	// country ("PNOLV-123456-78901"), with the separator dropped, or as a bare
+	// national code — and compared as text those are different people. The
+	// country in the value wins; Config.Country answers for a provider that
+	// sends none.
+	//
+	// An empty claim is left empty rather than refused here: a login carrying
+	// no identity code at all is a wiring fault the identity store and the
+	// token issue each name in their own terms, and moving that refusal here
+	// would only rename it.
 	info.SerialNumber = stringClaim(body, p.cfg.ClaimSerial)
+	if info.SerialNumber != "" {
+		canonical, cerr := identitycode.Canonical(info.SerialNumber, p.cfg.Country)
+		if cerr != nil {
+			return info, fmt.Errorf("%w: %w", ErrIdentityCode, cerr)
+		}
+		info.SerialNumber = canonical
+	}
 
 	// The sign-identity catalog rides the same userinfo response when the
 	// profile scope was granted. nil stays nil (no catalog in the response);

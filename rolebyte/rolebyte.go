@@ -24,6 +24,7 @@ import (
 	"azugo.io/azugo"
 
 	"github.com/gmb-lib/go-authbyte/authclient"
+	"github.com/gmb-lib/go-authbyte/identitycode"
 )
 
 // Scopes the membership service's API demands per call — its contract, not
@@ -33,14 +34,20 @@ const (
 	scopeResolve = "membership:resolve"
 )
 
-// personKeyPrefix types the register's person key: the value after the
-// prefix is the eIDAS identity code from the login, verbatim.
+// personKeyPrefix types the register's person key. The prefix is lower-case and
+// the register matches it exactly, so it is written here once and never
+// assembled at a call site.
 const personKeyPrefix = "pno:"
 
 // PersonKey is the register key of a person: the identity code from their
-// login, typed.
+// login, in the one spelling the platform stores and compares, typed.
+//
+// The code is canonicalised on the way in even though a session's code already
+// is: this key is what an invitation is addressed to and what a login claims,
+// and those two are written by different services. A key built from a raw
+// spelling would address a membership nobody can claim.
 func PersonKey(serialNumber string) string {
-	return personKeyPrefix + serialNumber
+	return personKeyPrefix + identitycode.Key(serialNumber)
 }
 
 // Membership is one organisation a subject may act under, with the

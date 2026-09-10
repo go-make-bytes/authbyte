@@ -191,6 +191,16 @@ func (r *router) callback(ctx *azugo.Context) {
 
 	info, err := r.Upstream().UserInfo(ctx, idpToken)
 	if err != nil {
+		// An identity code the platform cannot key is a refused login, not a
+		// service fault: the person exists, but storing their code under a
+		// second spelling would make them a second person. Everything else
+		// from the provider stays a plain error.
+		if errors.Is(err, upstream.ErrIdentityCode) {
+			r.Audit().LoginFailure(ctx, "upstream identity code: "+err.Error())
+			ctx.Error(corehttp.UnauthorizedError{})
+
+			return
+		}
 		ctx.Error(err)
 
 		return

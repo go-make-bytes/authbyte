@@ -49,9 +49,10 @@ func (s *Store) Ping(ctx context.Context) error {
 }
 
 // Profile is the minimal profile stored alongside the mapping. SerialNumber is
-// the eIDAS national id (e.g. PNOLV-XXXXXX-XXXXX) — the key the person is deduped
-// on across auth methods. LoginMethod records which auth method produced this
-// credential (eparakstsMobile, webEid, …) and is stored on the credential row.
+// the eIDAS national id in its canonical spelling (e.g. PNOLV-XXXXXXXXXXX) — the
+// key the person is deduped on across auth methods. LoginMethod records which
+// auth method produced this credential (eparakstsMobile, webEid, …) and is
+// stored on the credential row.
 type Profile struct {
 	Name         string
 	GivenName    string
