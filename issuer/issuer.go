@@ -46,7 +46,7 @@ type UserTokenInput struct {
 	Name         string
 	GivenName    string
 	FamilyName   string
-	SerialNumber string // eIDAS identity code (e.g. "PNOLV-XXXXXX-XXXXX")
+	SerialNumber string // eIDAS identity code, canonical (e.g. "PNOLV-XXXXXXXXXXX")
 	Tenant       string // the membership's tenant (register-resolved); empty on deployments without one
 	Thumbprint   string // DPoP key thumbprint (cnf.jkt); always set
 }
