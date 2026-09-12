@@ -47,42 +47,71 @@ Division of labour: `portal-api` owns the browser session cookie and proxies the
 
 ---
 
-## Two supported modes
+## Supported configurations
 
-The service runs in one of two modes, selected by a single knob (`ROLEBYTE_URL`). Both are
-first-class, supported configurations; neither is a degraded form of the other.
+Two knobs decide who is asked about membership: whether a **membership register** is wired
+(`ROLEBYTE_URL`), and — per browser client — whether the people who log in through it
+**must belong** to an organisation (`membership_required` on the client's registry row). Every
+combination below is a first-class configuration; none is a degraded form of another.
 
 - **Standalone** (default — `ROLEBYTE_URL` empty): every authenticated person is minted the
   **static baseline scope set** and no `tenant` claim. Authentication is access: whoever the
-  identity provider vouches for gets the baseline capabilities.
-- **Register-backed** (`ROLEBYTE_URL` set): scopes and the `tenant` claim are resolved from the
-  **membership register** at every user-token issue, and a person with **no membership is
-  refused at token issue** — the register, not the login, grants access.
+  identity provider vouches for gets the baseline capabilities. No service account can obtain
+  a tenant-named token here, because there is no register to hold its membership.
+- **Register wired, client requires membership** (`ROLEBYTE_URL` set; the client's row says
+  `membership_required: true`, or leaves it unset — required is the default whenever a register
+  is wired): the person is resolved from the register at every user-token issue. **No membership
+  is refused** (`403 err:membership:notMember` — the register, not the login, grants access);
+  **one** is minted — its `group:level` scopes and its `tenant`; **several** are the person's to
+  choose from (below). A product whose organisations decide who belongs runs this way.
+- **Register wired, client admits anyone** (`membership_required: false` on the client's row):
+  the client's people are minted the baseline and **the register is never asked about them** —
+  a public portal in a deployment whose register exists for its machine members. Signing in
+  and signing do not depend on the register's availability.
+- **Service accounts** (any configuration with a register): a client that names a `tenant` at
+  `client_credentials` is a machine that is a **member** of that organisation. Its membership is
+  checked in the register, the tenant is minted into its token, and its scopes are what the
+  registry grant allows **and** the membership grants. A client that names no tenant is a
+  platform service acting as itself: the registry alone decides, as before.
 
-Choosing a mode is choosing that access-control behaviour. A single-product deployment that
-admits anyone who can authenticate runs standalone; a multi-tenant deployment where an
-organisation decides who belongs runs register-backed.
+A client row that requires a membership in a deployment with no register is a configuration
+error: the service refuses to start rather than mint such a client's people the baseline.
+
+### Choosing an organisation
+
+A person who belongs to several organisations and names none is issued a token that carries
+**no tenant and no scopes** — never the union, which would mint one organisation's roles while
+acting in another — and the token response lists the organisations in `tenants`. The client
+shows the choice and repeats the login with **`/authorize?tenant=<id>`**; the choice rides the
+login into the token issue, where it is checked against the person's memberships (an
+organisation they do not belong to is refused `403 err:membership:notMember`) and the chosen
+organisation's token is minted. The choice is remembered by the session, so a refresh
+re-resolves the same organisation — and a revoked membership still dies at the next refresh.
 
 ### The register boundary (`ScopeResolver` contract)
 
 The seam between this authorization server and the membership register is one interface,
-consulted at every user-token issue (first issue and refresh). The register and this service
+consulted at every token issue that needs a membership (first issue and refresh of a person
+whose client requires one; every tenant-named service issue). The register and this service
 ship separately, so this boundary is a published contract:
 
-- **Question:** the authenticated person's identity code (serial number).
-- **Answer:** the person's `group:level` scopes and their single tenant, both minted into the
-  token verbatim.
-- **Refusals are the register's to make and this service honours them:** no membership → the
-  issue is refused with `403` `err:membership:notMember`; several memberships → refused with
-  `409` `err:membership:ambiguous`, never guessed.
+- **Question:** a typed subject key — a person's identity code in its canonical spelling
+  (`pno:PNOLV-01018015097`) or a service account's client id (`svc:<name>`, the same name it
+  authenticates with).
+- **Answer:** the subject's active memberships — each organisation with the `group:level`
+  scopes the subject's roles grant there. The register attaches any pending invitation first,
+  so a subject's very first token already carries the invited roles.
+- **Refusals are this service's to make from that answer:** no membership → `403`
+  `err:membership:notMember`; a named organisation the subject is not a member of → the same
+  `403`; several memberships and none named → the choice above, never a guess.
 - **Unreachable register fails the issue closed** — `502` `err:upstream:unavailable`. An
   empty-scope or guessed-scope token is never minted.
 - **Compatibility:** the contract evolves additively. A register that answers this contract
   keeps working across releases of either side; a change that would refuse tokens this
   contract allows is a breaking change and is versioned, not slipped in.
 
-Every case above is pinned by a test (`routes/token_rolebyte_test.go`), including both modes'
-happy paths.
+Every case above is pinned by a test (`routes/token_rolebyte_test.go`), including each
+configuration's happy path.
 
 ---
 
@@ -92,10 +121,10 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 
 | Method + path | Purpose | Auth |
 |---|---|---|
-| `GET /authorize` | Begin user login (Authorization Code + PKCE, RFC 7636). Validates `redirect_uri` against the registered allowlist, saves flow state, redirects to the identity provider | anonymous |
+| `GET /authorize` | Begin user login (Authorization Code + PKCE, RFC 7636). Validates `redirect_uri` against the registered allowlist, saves flow state, redirects to the identity provider. Optional `tenant=<id>`: the organisation a person with several memberships chooses to act under (checked at the token issue) | anonymous |
 | `GET /callback` | Handle the identity-provider redirect: exchange the code, read claims, resolve the person, establish a session, mint a single-use app authorization code | state-verified (path configurable) |
 | `GET /logout` | Front-channel logout: delete the server session and, for federated logins, bounce the browser through the identity provider's logout so its SSO cookie is cleared, then to `redirect_uri` | anonymous (`redirect_uri` allowlisted) |
-| `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` \| `refresh_token` \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof | PKCE / client secret / session / subject token — all + DPoP |
+| `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof | PKCE / client secret / session / subject token — all + DPoP |
 | `POST /step-up` | Re-authenticate with a stronger or different login method to satisfy a signing-flow binding; returns a redirect (federated methods) or a Web eID challenge | existing session |
 | `GET /identity` | The internal identity plus `loa`, `login_method`, and the signing flows that method permits | valid user token (DPoP) |
 | `GET /webeid/challenge` | Issue a Web eID challenge nonce and persist the flow (card login) | anonymous — **only if `WEBEID_ENGINE_URL` set** |
@@ -243,12 +272,12 @@ All tokens are ES256 JWTs (RFC 7519) minted in `issuer/`, DPoP sender-constraine
 | Token | Grant | Subject | Carries |
 |---|---|---|---|
 | **User** | `authorization_code` / `refresh_token` | internal person subject | `scope`, `loa`, `login_method`, name parts, `serial_number`, `tenant` (membership deployments only), `cnf.jkt` |
-| **Service** | `client_credentials` | client id | `client_id`, `scope`, `cnf.jkt` — scoped to one audience by the registry |
+| **Service** | `client_credentials` | client id | `client_id`, `scope`, `cnf.jkt` — scoped to one audience by the registry; plus `tenant` when the client named the organisation it is a member of (a service account) |
 | **Delegated** | `token-exchange` (RFC 8693) | the end user named in the subject token | `scope`, `loa`, `login_method`, `serial_number`, `tenant` (carried forward), `act` (acting client), `cnf.jkt` |
 
-In register-backed mode (`ROLEBYTE_URL` set), user tokens also carry the **`tenant`** claim — the single membership's organisation, resolved at every issue alongside the scopes. Multi-tenant resource services scope every operation by the token's tenant, never by request data, and token exchange carries it forward so delegation cannot strip it. Standalone deployments mint no tenant claim.
+With a register wired (`ROLEBYTE_URL` set), the tokens of people whose client requires a membership carry the **`tenant`** claim — the organisation of their single membership, or the one they chose — resolved at every issue alongside the scopes; a service account's token carries the tenant it named at issue. Multi-tenant resource services scope every operation by the token's tenant, never by request data, and token exchange carries it forward so delegation cannot strip it. Standalone deployments, and the people of a client that admits anyone, are minted no tenant claim.
 
-Token exchange lets a confidential client obtain an on-behalf-of token toward another service: the presented subject token must be one this issuer minted and still valid; a **service** subject cannot be impersonated (a service acting for a user stays distinct from a service acting as itself); the minted token names the user as `sub` (so downstream owner-filtering is identical to a direct user call) while recording the acting client in the `act` chain, and carries `login_method` + `loa` forward so the login-to-signing binding still applies downstream. The exchange audience and scopes are authorised against the same registry grant matrix as `client_credentials`.
+Token exchange lets a confidential client obtain an on-behalf-of token toward another service: the presented subject token must be one this issuer minted and still valid; a **service** subject may be acted for only when its token carries a `tenant` — a service account's token, which nothing but a verified membership mints — while a platform service acting as itself (no tenant) cannot be impersonated, and the refusal is recorded as an authorization denial; the minted token names the user as `sub` (so downstream owner-filtering is identical to a direct user call) while recording the acting client in the `act` chain, and carries `login_method` + `loa` forward so the login-to-signing binding still applies downstream. The exchange audience and scopes are authorised against the same registry grant matrix as `client_credentials`.
 
 ---
 
@@ -256,7 +285,7 @@ Token exchange lets a confidential client obtain an on-behalf-of token toward an
 
 **The service never touches database tables.** PostgreSQL access in [`store/postgres.go`](store/postgres.go) goes exclusively through `SECURITY DEFINER` stored procedures called with a uniform JSONB envelope (`CALL proc($1::jsonb, NULL::jsonb)` → `po_data`); the service connects with an `EXECUTE`-only role (`authbyte_public`) that has no direct table grants. The schema and the procedure logic are owned by the platform's separate `database` migration repo (one authored home per schema, shipped as one migration image) — this package only knows procedure *names* (`identity.upsert`, `identity.get`). A procedure that fails after a write re-raises a structured error (SQLSTATE `P0001`) whose message is the same envelope, so a validation failure and a post-write rollback surface identically.
 
-The person is keyed on the eIDAS national identity code (`serial_number`, e.g. `PNOLV-...`): the same human across different auth methods — different upstream subjects — resolves to one internal subject. `identity.upsert` reports whether the person was *created* on this call (first-ever login) so the caller emits the correct GDPR event (created vs updated); linking a new method to a known person is an update.
+The person is keyed on the eIDAS national identity code (`serial_number`), in **one canonical spelling** — the identity type, the country, a hyphen, and the national code with its separators removed (`PNOLV-01018015097`). Every spelling a card or a provider writes is reduced to it before it is stored or compared, so the same human across different auth methods — different upstream subjects, and different ways of writing the same code — resolves to one internal subject. The country is never guessed: a code that names one keeps it, otherwise it comes from the card certificate's own country attribute or from `OIDC_UPSTREAM_COUNTRY`, and a code with none available refuses the login. `identity.upsert` reports whether the person was *created* on this call (first-ever login) so the caller emits the correct GDPR event (created vs updated); linking a new method to a known person is an update.
 
 Redis holds only short-lived auth-flow and session state (`session/`), every key TTL-bounded:
 
@@ -314,6 +343,7 @@ Setting both selects the generic provider.
 | `OIDC_UPSTREAM_SCOPES` | `openid profile` | Scopes requested at authorization (space/comma separated) |
 | `OIDC_UPSTREAM_AUTHORIZE_URL` / `_TOKEN_URL` / `_USERINFO_URL` / `_END_SESSION_URL` | — (⇒ discovery) | Absolute endpoint overrides for a provider with fixed or non-standard paths; setting the first three skips discovery |
 | `OIDC_UPSTREAM_CLAIM_SERIAL` | `serial_number` | Userinfo claim carrying the person's identity code |
+| `OIDC_UPSTREAM_COUNTRY` | — | Two-letter country whose register issues this provider's identity codes; consulted only when the claim carries no country of its own. A provider that sends a bare national code and has none set delivers logins this service refuses |
 | `OIDC_UPSTREAM_METHOD_POLICY` | — (⇒ profile default) | `acr`/`amr` token → login-method vocabulary (`substr=method,…`, longest token wins) |
 | `OIDC_UPSTREAM_METHOD_DEFAULT` | `upstream` (generic) | Login method when no vocabulary token matches |
 | `OIDC_UPSTREAM_METHODS_ALLOWED` | — (⇒ the default method) | Comma-separated set a callback may resolve to; anything else is refused (fail closed) |
@@ -367,7 +397,7 @@ Setting both selects the generic provider.
 | `AUDIT_ISSUER_URL` | — (⇒ `AUTH_ISSUER_URL`) | Issuer base for the outbound token mint (set to an in-cluster URL when the public issuer is unreachable) |
 | `WEBEID_ENGINE_URL` | — (empty ⇒ `/webeid/*` not registered) | web-eid engine base; `/auth/validate` is called server-to-server with a service token |
 | `WEBEID_AUDIENCE` / `WEBEID_SCOPE` | `svc:web-eid` / `webeid:validate` | Audience/scope for the engine call |
-| `ROLEBYTE_URL` | — (empty ⇒ standalone mode: static baseline scopes) | Membership register base — setting it selects register-backed mode (see "Two supported modes"). When set, EVERY user-token issue (first issue and refresh) claims the person's pending invitations and mints their register-resolved `group:level` scopes instead of the static set; a person with no membership is **refused** (403 `err:membership:notMember`), several memberships are refused rather than guessed (409), and an unreachable register fails the issuance closed (502) — never an empty-scope token. Uses the same outbound client identity as the audit poster (`AUDIT_CLIENT_ID`/`AUDIT_CLIENT_SECRET`), which then also needs registry grants for `membership:claim` + `membership:resolve` toward the rolebyte audience |
+| `ROLEBYTE_URL` | — (empty ⇒ standalone: static baseline scopes, no service accounts) | Membership register base — setting it wires the register (see "Supported configurations"). When set, every token issue of a person whose client requires a membership (first issue and refresh) claims the person's pending invitations and mints their register-resolved `group:level` scopes and tenant instead of the static set — no membership is **refused** (403 `err:membership:notMember`), several are the person's to choose from (the token response's `tenants`), and an unreachable register fails the issuance closed (502), never an empty-scope token; a client whose row says `membership_required: false` keeps its people on the baseline and never touches the register. Every tenant-named `client_credentials` issue is resolved here too. Uses the same outbound client identity as the audit poster (`AUDIT_CLIENT_ID`/`AUDIT_CLIENT_SECRET`), which then also needs registry grants for `membership:claim` + `membership:resolve` toward the rolebyte audience |
 | `ROLEBYTE_AUDIENCE` | `svc:rolebyte` | Audience for the membership calls |
 | `DEMO_DIR` | — | Serve a static demo SPA under `/demo` — development |
 
