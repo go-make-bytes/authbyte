@@ -75,23 +75,27 @@ type App struct {
 	scopeResolver ScopeResolver
 }
 
-// ScopeResolver derives an authenticated person's scopes AND tenant from the
-// membership register at token issue. It is the boundary between the two
-// supported modes of this service:
+// ScopeResolver answers membership questions from the register at token
+// issue: which organisations a subject belongs to, and which group:level scopes
+// its roles grant in each. It is the boundary between the supported
+// configurations of this service:
 //
-//   - standalone (nil resolver, the default): every authenticated person is
-//     minted the static baseline scope set and no tenant claim —
-//     authentication is access.
-//   - register-backed (resolver wired): scopes and tenant come from the
-//     membership register at every issue, and a person with no membership is
-//     refused at token issue — the register, not the login, grants access.
+//   - standalone (nil resolver, the default — no register configured): every
+//     authenticated person is minted the static baseline scope set and no
+//     tenant claim; no service account can obtain a tenant-named token.
+//   - register wired (ROLEBYTE_URL set): a public client whose registration
+//     requires a membership has its people resolved here at every issue — no
+//     membership is refused, several make the person choose; a public client
+//     registered without that requirement keeps its people on the baseline and
+//     never consults the register. Service accounts that name a tenant at
+//     client_credentials are always resolved here.
 //
-// Choosing a mode is choosing that access-control behaviour; neither mode is
-// a degraded form of the other. Implemented by rolebyte.Resolver; the full
+// The subject is a typed key: a person's identity code (`pno:…`) or a service
+// account's client id (`svc:…`). Implemented by rolebyte.Resolver; the full
 // contract (answers, refusals, unreachability, compatibility) is in the
-// README's "Two supported modes" section.
+// README's "Supported configurations" section.
 type ScopeResolver interface {
-	UserScopes(ctx *azugo.Context, serialNumber string) ([]string, string, error)
+	Memberships(ctx *azugo.Context, subjectKey string) ([]rolebyte.Membership, error)
 }
 
 // New constructs the Identity/Auth application.
@@ -149,6 +153,12 @@ func (a *App) init() error {
 	reg, err := registry.Load([]byte(cfg.ServiceClientRegistry), clientSecretResolver)
 	if err != nil {
 		return err
+	}
+	// A public client that requires its people to hold a membership needs a
+	// register to ask. Without one the requirement could only be met by
+	// minting the baseline instead — refuse to start rather than do that.
+	if reg.RequiresMembershipSomewhere() && !cfg.RolebyteEnabled() {
+		return fmt.Errorf("registry: a public client requires a membership but no membership register is configured (ROLEBYTE_URL)")
 	}
 	a.registry = reg
 

@@ -154,3 +154,46 @@ func TestWrongAudienceRejected(t *testing.T) {
 		t.Fatal("expected token bound to svc:document to be rejected for svc:envelope")
 	}
 }
+
+// A service account's token names the organisation it acts for; a platform
+// service's token names none. The tenant is what lets the token be acted for
+// downstream, so the issuer writes exactly what it is given.
+func TestIssueServiceTokenCarriesTenant(t *testing.T) {
+	iss, _, parse := newStack(t)
+
+	tok, _, err := iss.IssueService(issuer.ServiceTokenInput{
+		ClientID:   "svc:acme-dms",
+		Audience:   "svc:signbyte-integration-api",
+		Scopes:     []string{"signing-requests:write"},
+		Tenant:     "01TENANTACME",
+		Thumbprint: "thumb-abc",
+	})
+	if err != nil {
+		t.Fatalf("IssueService: %v", err)
+	}
+
+	c, err := parse(tok)
+	if err != nil {
+		t.Fatalf("token did not validate against JWKS: %v", err)
+	}
+	if c.Tenant != "01TENANTACME" {
+		t.Fatalf("tenant = %q, want the named organisation", c.Tenant)
+	}
+	if !c.IsService() {
+		t.Fatal("a service account is still a service subject")
+	}
+
+	plain, _, err := iss.IssueService(issuer.ServiceTokenInput{
+		ClientID: "svc:signflow", Audience: "svc:document", Scopes: []string{"documents:read"}, Thumbprint: "thumb-abc",
+	})
+	if err != nil {
+		t.Fatalf("IssueService: %v", err)
+	}
+	pc, err := parse(plain)
+	if err != nil {
+		t.Fatalf("token did not validate against JWKS: %v", err)
+	}
+	if pc.Tenant != "" {
+		t.Fatalf("a platform service's token must carry no tenant, got %q", pc.Tenant)
+	}
+}

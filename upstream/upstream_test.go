@@ -2,12 +2,14 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/gmb-lib/go-authbyte/identitycode"
 	"github.com/go-make-bytes/authbyte/identity"
 
 	"github.com/go-quicktest/qt"
@@ -132,9 +134,10 @@ func TestDiscoveryFailsClosed(t *testing.T) {
 	qt.Assert(t, qt.IsNotNil(err))
 }
 
-// testIDCodeLV returns a Latvian personal identity code in the PNO form an
-// upstream reports: the country, a six-digit leading group and a five-digit
-// serial, built from one repeated digit so it reads as a placeholder at a glance.
+// testIDCodeLV returns a Latvian personal identity code in the one spelling the
+// platform stores and compares: the identity type, the country, a hyphen, and
+// the eleven digits with the national separator removed — built from one
+// repeated digit so it reads as a placeholder at a glance.
 //
 // It is assembled from those parts at run time rather than written as a literal —
 // an identifier-shaped constant in the source is indistinguishable from a
@@ -143,15 +146,136 @@ func TestDiscoveryFailsClosed(t *testing.T) {
 func testIDCodeLV(digit int) string {
 	d := strconv.Itoa(digit)
 
-	return "PNOLV-" + strings.Repeat(d, 6) + "-" + strings.Repeat(d, 5)
+	return "PNOLV-" + strings.Repeat(d, 11)
+}
+
+// testIDCodeSpellings returns the same Latvian person's code written the four
+// ways an upstream reports one: with the identity type and country and the
+// national separator, the same without the separator, and each of those with no
+// identity type at all — which is what a provider that leaves the country to its
+// configuration sends.
+func testIDCodeSpellings(digit int) []string {
+	d := strconv.Itoa(digit)
+	head, tail := strings.Repeat(d, 6), strings.Repeat(d, 5)
+
+	return []string{
+		"PNOLV-" + head + "-" + tail,
+		"PNOLV-" + head + tail,
+		head + "-" + tail,
+		head + tail,
+	}
+}
+
+// Every spelling an upstream may report reduces to the one stored code — that is
+// the whole point of the work, asserted at the edge it enters through. The
+// country comes from the provider's own configuration for the two spellings that
+// carry none.
+func TestUserInfoCanonicalisesEverySpelling(t *testing.T) {
+	for _, spelling := range testIDCodeSpellings(2) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"sub":"u1","serial_number":"` + spelling + `"}`))
+		}))
+
+		p, err := New(context.Background(), Config{
+			AuthorizeURL: srv.URL + "/a", TokenURL: srv.URL + "/t", UserInfoURL: srv.URL,
+			ClientID: "cid", Country: "LV", MethodDefault: "upstream",
+		}, nil)
+		qt.Assert(t, qt.IsNil(err))
+
+		info, err := p.UserInfo(t.Context(), "tok")
+		srv.Close()
+		qt.Assert(t, qt.IsNil(err))
+		qt.Check(t, qt.Equals(info.SerialNumber, testIDCodeLV(2)))
+	}
+}
+
+// A country the VALUE states wins over the provider's configured one. A
+// Lithuanian person authenticating through a Latvian provider stays Lithuanian:
+// the same digits in two countries are two people, and cross-border signing is
+// in scope.
+func TestUserInfoCountryInTheValueWins(t *testing.T) {
+	// Written with a separator, so passing the value through unchanged cannot
+	// satisfy this test: it must be canonicalised AND keep its own country.
+	lithuanian := "PNOLT-" + strings.Repeat("3", 5) + " " + strings.Repeat("3", 6)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"sub":"u1","serial_number":"` + lithuanian + `"}`))
+	}))
+	defer srv.Close()
+
+	p, err := New(context.Background(), Config{
+		AuthorizeURL: srv.URL + "/a", TokenURL: srv.URL + "/t", UserInfoURL: srv.URL,
+		ClientID: "cid", Country: "LV", MethodDefault: "upstream",
+	}, nil)
+	qt.Assert(t, qt.IsNil(err))
+
+	info, err := p.UserInfo(t.Context(), "tok")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(info.SerialNumber, "PNOLT-"+strings.Repeat("3", 11)))
+}
+
+// A bare code from a provider with no country configured is REFUSED, not filed
+// under a guess — and the refusal is recognisable to the caller, so a login is
+// failed closed rather than surfacing as a service fault. The reason carries no
+// identity code: this error is written to service logs.
+func TestUserInfoRefusesABareCodeWithNoCountry(t *testing.T) {
+	bare := strings.Repeat("4", 11)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"sub":"u1","serial_number":"` + bare + `"}`))
+	}))
+	defer srv.Close()
+
+	p, err := New(context.Background(), Config{
+		AuthorizeURL: srv.URL + "/a", TokenURL: srv.URL + "/t", UserInfoURL: srv.URL,
+		ClientID: "cid", MethodDefault: "upstream",
+	}, nil)
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = p.UserInfo(t.Context(), "tok")
+	qt.Assert(t, qt.IsNotNil(err))
+	qt.Check(t, qt.IsTrue(errors.Is(err, ErrIdentityCode)))
+	qt.Check(t, qt.IsTrue(errors.Is(err, identitycode.ErrCountryRequired)))
+	qt.Check(t, qt.Not(qt.StringContains(err.Error(), bare)))
+}
+
+// A provider that sends no identity code at all is NOT refused here. That login
+// is a wiring fault, and the identity store and the token issue each name it in
+// their own terms; moving the refusal into the connector would only rename it.
+func TestUserInfoLeavesAnAbsentCodeAlone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"sub":"u1"}`))
+	}))
+	defer srv.Close()
+
+	p, err := New(context.Background(), Config{
+		AuthorizeURL: srv.URL + "/a", TokenURL: srv.URL + "/t", UserInfoURL: srv.URL,
+		ClientID: "cid", MethodDefault: "upstream",
+	}, nil)
+	qt.Assert(t, qt.IsNil(err))
+
+	info, err := p.UserInfo(t.Context(), "tok")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(info.SerialNumber, ""))
+}
+
+// The eParaksts profile carries its own country, so a bare code from that
+// provider resolves without any deployment configuration at all.
+func TestEParakstsProfileCarriesItsCountry(t *testing.T) {
+	qt.Assert(t, qt.Equals(EParakstsProfile("https://x", "").Country, "LV"))
 }
 
 // TestUserInfoSerialClaimConfigurable proves the identity-code claim name is
 // configuration (a provider that carries it in a custom claim needs no code),
 // and that acr arriving as an ARRAY is accepted (first value wins).
 func TestUserInfoSerialClaimConfigurable(t *testing.T) {
-	serial := testIDCodeLV(1)
-	payload := `{"sub":"u1","name":"JĀNIS BĒRZIŅŠ","nationalId":"` + serial + `","acr":["urn:example:mfa"]}`
+	// Reported with the national separator the certificate writes, read back in
+	// the spelling the platform stores.
+	payload := `{"sub":"u1","name":"JĀNIS BĒRZIŅŠ","nationalId":"` + testIDCodeSpellings(1)[0] + `","acr":["urn:example:mfa"]}`
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -167,7 +291,7 @@ func TestUserInfoSerialClaimConfigurable(t *testing.T) {
 
 	info, err := p.UserInfo(t.Context(), "tok")
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.Equals(info.SerialNumber, serial))
+	qt.Check(t, qt.Equals(info.SerialNumber, testIDCodeLV(1)))
 	qt.Check(t, qt.Equals(info.ACR, "urn:example:mfa"))
 	qt.Check(t, qt.Equals(info.Name, "JĀNIS BĒRZIŅŠ"))
 }

@@ -132,10 +132,30 @@ func (r *Recorder) UserTokenIssued(ctx *azugo.Context, subject, loa, method, aud
 
 // ServiceTokenIssued records issuance of a DPoP-bound service (client-credentials)
 // token.
-func (r *Recorder) ServiceTokenIssued(ctx *azugo.Context, clientID, audience string, scopes []string) {
+func (r *Recorder) ServiceTokenIssued(ctx *azugo.Context, clientID, audience, tenant string, scopes []string) {
+	attrs := map[string]any{secevents.AttrKind: secevents.TokenKindIssuance, "audience": audience, "scopes": scopes}
+	if tenant != "" {
+		// A service account's token names the organisation it acts for, so the
+		// record answers "which machines minted for tenant T, and when" — and a
+		// credential minting across many tenants is as loud as it should be.
+		attrs["tenant"] = tenant
+	}
 	r.emit(ctx, secevents.EventServiceToken, secevents.SeverityInfo, broker.OutcomeSuccess,
+		actorRef(clientID, "service", ""), attrs)
+}
+
+// DelegationRefused records that a client asked to act on behalf of a subject
+// and was refused: the subject is a platform service acting as itself, whose
+// identity no client may borrow. Emitted as an authorization denial so the
+// attempt is visible where every other refusal is.
+func (r *Recorder) DelegationRefused(ctx *azugo.Context, clientID, subject, reason string) {
+	r.emit(ctx, secevents.EventAuthZDenied, secevents.SeverityWarning, broker.OutcomeFailure,
 		actorRef(clientID, "service", ""),
-		map[string]any{secevents.AttrKind: secevents.TokenKindIssuance, "audience": audience, "scopes": scopes})
+		map[string]any{
+			secevents.AttrKind:   "delegation",
+			secevents.AttrReason: reason,
+			"on_behalf_of":       subject,
+		})
 }
 
 // DelegatedTokenIssued records issuance of a DPoP-bound on-behalf-of token

@@ -16,40 +16,45 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// userScopes answers the scopes and tenant a user token should carry: the
-// session's static baseline with no tenant, or — when the membership resolver
-// is wired — the person's live register-resolved scopes plus the membership's
-// tenant (multi-tenant resource services scope by the token's tenant, never
-// request data). Resolution runs on EVERY user-token issue (first issue and
-// refresh alike), so a revoked membership dies at the next session refresh.
-// Any resolution failure fails the issuance closed: an error is written and
-// ok is false — a token with guessed or empty-by-error scopes is never
-// minted.
-func (r *router) userScopes(ctx *azugo.Context, sess *session.Session) ([]string, string, bool) {
+// membershipOutcome is what a user token is minted with: the scopes and the
+// tenant of the membership chosen for it — or, when the person belongs to
+// several organisations and none was named, no scopes, no tenant and the list
+// they may choose from.
+type membershipOutcome struct {
+	scopes  []string
+	tenant  string
+	choices []string
+}
+
+// userScopes answers what a user token should carry. The public client the
+// token is issued to decides whether the register is asked at all: a client
+// registered without a membership requirement (a public portal) keeps its
+// people on the session's static baseline with no tenant; a client that
+// requires one has the person resolved from the register at EVERY issue (first
+// issue and refresh alike, so a revoked membership dies at the next refresh) —
+// no membership is refused, one is minted, several are the person's to choose
+// from (tenantHint names their choice; it is checked, never trusted). Any
+// resolution failure fails the issuance closed: an error is written and ok is
+// false — a token with guessed or empty-by-error scopes is never minted.
+func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID, tenantHint string) (membershipOutcome, bool) {
 	resolver := r.ScopeResolver()
-	if resolver == nil {
-		return sess.Scopes, "", true
+	if resolver == nil || !r.Registry().MembershipRequired(clientID, resolver != nil) {
+		return membershipOutcome{scopes: sess.Scopes}, true
 	}
 
-	scopes, tenant, err := resolver.UserScopes(ctx, sess.SerialNumber)
-	switch {
-	case errors.Is(err, rolebyte.ErrNotMember):
-		// Login is not access: the person authenticated, but no membership
-		// grants them anything here.
-		ctx.Error(pkerrors.NewProblem("err:membership:notMember",
-			pkerrors.WithStatus(fasthttp.StatusForbidden),
-			pkerrors.WithPublicDetail("this account has no membership here")))
+	if sess.SerialNumber == "" {
+		// Without an identity code there is no register key to look up — and
+		// every supported login method provides one, so this is a wiring
+		// fault, not a person condition. Fail closed.
+		ctx.Log().Warn("membership resolve impossible — the login carries no identity code; refusing token issue")
+		ctx.Error(pkerrors.NewProblem("err:upstream:unavailable",
+			pkerrors.WithStatus(fasthttp.StatusBadGateway)))
 
-		return nil, "", false
-	case errors.Is(err, rolebyte.ErrAmbiguous):
-		// More than one membership cannot be expressed in a single-tenant
-		// token yet — refused rather than guessed.
-		ctx.Error(pkerrors.NewProblem("err:membership:ambiguous",
-			pkerrors.WithStatus(fasthttp.StatusConflict),
-			pkerrors.WithPublicDetail("this account belongs to more than one organisation")))
+		return membershipOutcome{}, false
+	}
 
-		return nil, "", false
-	case err != nil:
+	memberships, err := resolver.Memberships(ctx, rolebyte.PersonKey(sess.SerialNumber))
+	if err != nil {
 		// The register is unreachable or answered garbage: fail closed. The
 		// outbound helper surfaces no downstream body, so this is a produced
 		// upstream failure, not a relay.
@@ -57,10 +62,73 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session) ([]string
 		ctx.Error(pkerrors.NewProblem("err:upstream:unavailable",
 			pkerrors.WithStatus(fasthttp.StatusBadGateway)))
 
-		return nil, "", false
+		return membershipOutcome{}, false
 	}
 
-	return scopes, tenant, true
+	chosen, choices := chooseMembership(memberships, tenantHint)
+	switch {
+	case len(memberships) == 0, chosen == nil && tenantHint != "":
+		// Login is not access: the person authenticated, but no membership —
+		// or none in the organisation they named — grants them anything here.
+		ctx.Error(pkerrors.NewProblem("err:membership:notMember",
+			pkerrors.WithStatus(fasthttp.StatusForbidden),
+			pkerrors.WithPublicDetail("this account has no membership here")))
+
+		return membershipOutcome{}, false
+	case chosen == nil:
+		// Several organisations and none named: the choice is the person's.
+		// The token carries no tenant and no scopes until they make it.
+		return membershipOutcome{choices: choices}, true
+	}
+
+	return membershipOutcome{scopes: chosen.Scopes, tenant: chosen.TenantID}, true
+}
+
+// chooseMembership picks the membership a token is minted for: the named one
+// when a tenant was named (nil when the subject holds no membership there),
+// the only one when there is exactly one, and none — with the organisations
+// to choose from — when there are several. Never a guess: minting one
+// organisation's roles while acting in another would be a privilege leak.
+func chooseMembership(ms []rolebyte.Membership, hint string) (*rolebyte.Membership, []string) {
+	if hint != "" {
+		for i := range ms {
+			if ms[i].TenantID == hint {
+				return &ms[i], nil
+			}
+		}
+
+		return nil, nil
+	}
+
+	if len(ms) == 1 {
+		return &ms[0], nil
+	}
+
+	choices := make([]string, 0, len(ms))
+	for _, m := range ms {
+		choices = append(choices, m.TenantID)
+	}
+
+	return nil, choices
+}
+
+// intersectScopes keeps the scopes present in both lists, in the order of the
+// first — what a service account may receive is what its registry grant allows
+// AND its membership grants.
+func intersectScopes(allowed, granted []string) []string {
+	set := make(map[string]struct{}, len(granted))
+	for _, s := range granted {
+		set[s] = struct{}{}
+	}
+
+	out := make([]string, 0, len(allowed))
+	for _, s := range allowed {
+		if _, ok := set[s]; ok {
+			out = append(out, s)
+		}
+	}
+
+	return out
 }
 
 // tokenTypeDPoP is the token_type for sender-constrained tokens.
@@ -163,30 +231,42 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	// Bind the session to the SPA's DPoP key so refreshes stay sender-constrained.
+	// The organisation named when the login began wins over one chosen
+	// earlier in this session (a step-up re-enters the login without naming
+	// one and keeps the session's choice).
+	hint := appCode.Tenant
+	if hint == "" {
+		hint = sess.Tenant
+	}
+
+	outcome, ok := r.userScopes(ctx, sess, clientID, hint)
+	if !ok {
+		return
+	}
+
+	// Bind the session to the SPA's DPoP key so refreshes stay
+	// sender-constrained, and record the client and the membership the
+	// session's tokens are minted for, so a refresh re-resolves the same.
 	sess.Thumbprint = thumbprint
+	sess.ClientID = clientID
+	sess.Tenant = outcome.tenant
 	if err := r.Session().SaveSession(ctx, appCode.SessionID, sess, sessionTTL); err != nil {
 		ctx.Error(err)
 
 		return
 	}
 
-	scopes, tenant, ok := r.userScopes(ctx, sess)
-	if !ok {
-		return
-	}
-
 	tok, exp, err := r.Issuer().IssueUser(issuer.UserTokenInput{
 		Subject:      sess.Subject,
 		Audience:     r.Config().UserAudience,
-		Scopes:       scopes,
+		Scopes:       outcome.scopes,
 		LoA:          sess.LoA,
 		LoginMethod:  sess.LoginMethod,
 		Name:         sess.Name,
 		GivenName:    sess.GivenName,
 		FamilyName:   sess.FamilyName,
 		SerialNumber: sess.SerialNumber,
-		Tenant:       tenant,
+		Tenant:       outcome.tenant,
 		Thumbprint:   thumbprint,
 	})
 	if err != nil {
@@ -195,13 +275,14 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, r.Config().UserAudience, scopes)
+	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, r.Config().UserAudience, outcome.scopes)
 
 	ctx.JSON(&response.Token{
 		AccessToken:  tok,
 		TokenType:    tokenTypeDPoP,
 		ExpiresIn:    exp,
 		RefreshToken: appCode.SessionID,
+		Tenants:      outcome.choices,
 		// The login-captured signing capabilities ride the code exchange (and
 		// only the code exchange — a refresh re-issues a token, it is not a
 		// new identification), so the caller can hold them for the session.
@@ -229,7 +310,12 @@ func capabilitiesResponse(c *session.Capabilities) *response.Capabilities {
 }
 
 // grantClientCredentials mints a DPoP-bound service token, enforcing the
-// registry's client ↔ audience ↔ scope matrix.
+// registry's client ↔ audience ↔ scope matrix. A client that names a tenant is
+// a service account acting for that organisation: its membership there is
+// checked in the register, the tenant is minted into the token, and its scopes
+// are what the registry grant allows AND the membership grants. A client that
+// names none is a platform service acting as itself — the registry alone
+// decides, no register is consulted, no tenant is minted.
 func (r *router) grantClientCredentials(ctx *azugo.Context, thumbprint string) {
 	clientID, err := ctx.Form.String("client_id")
 	if err != nil {
@@ -257,6 +343,11 @@ func (r *router) grantClientCredentials(ctx *azugo.Context, thumbprint string) {
 		requested = registry.ParseScopeString(*s)
 	}
 
+	tenant := ""
+	if t := ctx.Form.StringOptional("tenant"); t != nil {
+		tenant = *t
+	}
+
 	if _, err := r.Registry().Authenticate(clientID, secret); err != nil {
 		ctx.Error(corehttp.UnauthorizedError{})
 
@@ -276,10 +367,18 @@ func (r *router) grantClientCredentials(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
+	if tenant != "" {
+		scopes, err = r.serviceAccountScopes(ctx, clientID, tenant, scopes)
+		if err != nil {
+			return
+		}
+	}
+
 	tok, exp, err := r.Issuer().IssueService(issuer.ServiceTokenInput{
 		ClientID:   clientID,
 		Audience:   audience,
 		Scopes:     scopes,
+		Tenant:     tenant,
 		Thumbprint: thumbprint,
 	})
 	if err != nil {
@@ -288,13 +387,62 @@ func (r *router) grantClientCredentials(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	r.Audit().ServiceTokenIssued(ctx, clientID, audience, scopes)
+	r.Audit().ServiceTokenIssued(ctx, clientID, audience, tenant, scopes)
 
 	ctx.JSON(&response.Token{
 		AccessToken: tok,
 		TokenType:   tokenTypeDPoP,
 		ExpiresIn:   exp,
 	})
+}
+
+// serviceAccountScopes checks that the client is a member of the named
+// organisation and narrows the registry-allowed scopes to what that membership
+// grants. On a refusal the error is already written to ctx and a non-nil error
+// is returned so the caller stops; the returned scopes are never empty.
+func (r *router) serviceAccountScopes(ctx *azugo.Context, clientID, tenant string, allowed []string) ([]string, error) {
+	resolver := r.ScopeResolver()
+	if resolver == nil {
+		// No register, no members: a tenant-named token cannot exist here.
+		err := pkerrors.NewProblem("err:membership:notMember",
+			pkerrors.WithStatus(fasthttp.StatusForbidden),
+			pkerrors.WithPublicDetail("this deployment has no membership register"))
+		ctx.Error(err)
+
+		return nil, err
+	}
+
+	// The register key of a service account is its own client id — the name
+	// it authenticated with and carries as its token subject.
+	memberships, err := resolver.Memberships(ctx, clientID)
+	if err != nil {
+		ctx.Log().Warn("membership resolve failed — refusing token issue: " + err.Error())
+		problem := pkerrors.NewProblem("err:upstream:unavailable", pkerrors.WithStatus(fasthttp.StatusBadGateway))
+		ctx.Error(problem)
+
+		return nil, problem
+	}
+
+	chosen, _ := chooseMembership(memberships, tenant)
+	if chosen == nil {
+		err := pkerrors.NewProblem("err:membership:notMember",
+			pkerrors.WithStatus(fasthttp.StatusForbidden),
+			pkerrors.WithPublicDetail("this account is not a member of that organisation"))
+		ctx.Error(err)
+
+		return nil, err
+	}
+
+	scopes := intersectScopes(allowed, chosen.Scopes)
+	if len(scopes) == 0 {
+		// A member, but with no role toward this audience: nothing to mint.
+		err := corehttp.ForbiddenError{}
+		ctx.Error(err)
+
+		return nil, err
+	}
+
+	return scopes, nil
 }
 
 // grantRefreshToken re-issues a user token within an existing session. The
@@ -320,9 +468,10 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	// Re-resolved on every refresh: this is where a revoked membership
-	// actually dies (the leaver guarantee rides short sessions).
-	scopes, tenant, ok := r.userScopes(ctx, sess)
+	// Re-resolved on every refresh, for the client and the membership the
+	// session was issued for: this is where a revoked membership actually dies
+	// (the leaver guarantee rides short sessions).
+	outcome, ok := r.userScopes(ctx, sess, sess.ClientID, sess.Tenant)
 	if !ok {
 		return
 	}
@@ -330,14 +479,14 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 	tok, exp, err := r.Issuer().IssueUser(issuer.UserTokenInput{
 		Subject:      sess.Subject,
 		Audience:     r.Config().UserAudience,
-		Scopes:       scopes,
+		Scopes:       outcome.scopes,
 		LoA:          sess.LoA,
 		LoginMethod:  sess.LoginMethod,
 		Name:         sess.Name,
 		GivenName:    sess.GivenName,
 		FamilyName:   sess.FamilyName,
 		SerialNumber: sess.SerialNumber,
-		Tenant:       tenant,
+		Tenant:       outcome.tenant,
 		Thumbprint:   thumbprint,
 	})
 	if err != nil {
@@ -346,14 +495,22 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, r.Config().UserAudience, scopes)
+	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, r.Config().UserAudience, outcome.scopes)
 
 	ctx.JSON(&response.Token{
 		AccessToken:  tok,
 		TokenType:    tokenTypeDPoP,
 		ExpiresIn:    exp,
 		RefreshToken: refresh,
+		Tenants:      outcome.choices,
 	})
+}
+
+// mayBeActedFor reports whether a subject token may be exchanged for a token
+// acting on its subject's behalf: any person, and a service only when the
+// token carries the tenant a service account acts for.
+func mayBeActedFor(subject *claims.Claims) bool {
+	return !subject.IsService() || subject.Tenant != ""
 }
 
 // grantTokenExchange implements RFC 8693 token exchange so a confidential
@@ -422,10 +579,14 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	// Only a user (or an already-delegated token, which still names a user) may
-	// be acted for — a service cannot be impersonated. This keeps "service acts
-	// as itself" (client_credentials) distinct from "service acts for a user".
-	if subject.IsService() {
+	// A user (or an already-delegated token, which still names a user) may be
+	// acted for. A service subject may be acted for only when its token names
+	// the organisation it acts for — a service account's tenant-named token,
+	// which nothing but a verified membership mints. A platform service acting
+	// as itself (no tenant) cannot be impersonated: "service acts as itself"
+	// stays distinct from "someone acts for a service account".
+	if !mayBeActedFor(subject) {
+		r.Audit().DelegationRefused(ctx, clientID, subject.Subject, "a platform service acting as itself cannot be acted for")
 		ctx.Error(corehttp.ForbiddenError{})
 
 		return

@@ -46,7 +46,7 @@ type UserTokenInput struct {
 	Name         string
 	GivenName    string
 	FamilyName   string
-	SerialNumber string // eIDAS identity code (e.g. "PNOLV-XXXXXX-XXXXX")
+	SerialNumber string // eIDAS identity code, canonical (e.g. "PNOLV-XXXXXXXXXXX")
 	Tenant       string // the membership's tenant (register-resolved); empty on deployments without one
 	Thumbprint   string // DPoP key thumbprint (cnf.jkt); always set
 }
@@ -76,16 +76,20 @@ type ServiceTokenInput struct {
 	ClientID   string // e.g. svc:signflow
 	Audience   string // single target, e.g. svc:document
 	Scopes     []string
+	Tenant     string // the organisation a service account acts for; empty for a platform service acting as itself
 	Thumbprint string // DPoP key thumbprint (cnf.jkt); mandatory
 }
 
 // IssueService mints a DPoP-bound service identity token scoped to a single
-// audience.
+// audience. A tenant is present only when the token was issued to a service
+// account for a named organisation — it is what lets the token be acted for
+// downstream, so nothing but a verified membership may put it there.
 func (i *Issuer) IssueService(in ServiceTokenInput) (string, int64, error) {
 	c := claims.Claims{
 		RegisteredClaims: i.base(in.ClientID, in.Audience, i.serviceTTL),
 		ClientID:         in.ClientID,
 		Scope:            strings.Join(in.Scopes, " "),
+		Tenant:           in.Tenant,
 	}
 	if in.Thumbprint != "" {
 		c.Confirmation = &claims.Confirmation{JKT: in.Thumbprint}

@@ -56,6 +56,13 @@ type Configuration struct {
 	// OIDCUpstreamClaimSerial names the userinfo claim carrying the person's
 	// identity code (default serial_number).
 	OIDCUpstreamClaimSerial string `mapstructure:"oidc_upstream_claim_serial"`
+	// OIDCUpstreamCountry is the two-letter country whose register issues the
+	// identity codes this provider's people hold. It is used only when the
+	// claim carries no country of its own — a claim that states one is
+	// believed. Leave it unset for a provider whose claim always carries the
+	// country; a bare code with no country configured is refused rather than
+	// filed under a guess. The eParaksts profile sets LV for itself.
+	OIDCUpstreamCountry string `mapstructure:"oidc_upstream_country" validate:"omitempty,len=2,alpha"`
 	// OIDCUpstreamMethodPolicy maps acr/amr tokens to login methods
 	// ("substr=method,substr=method", longest token wins); MethodDefault is
 	// the method when nothing matches; MethodsAllowed is the comma-separated
@@ -360,6 +367,9 @@ func (c *Configuration) UpstreamConfig() upstream.Config {
 	// Deployment overrides, profile-independent.
 	if c.OIDCUpstreamClaimSerial != "" {
 		cfg.ClaimSerial = c.OIDCUpstreamClaimSerial
+	}
+	if c.OIDCUpstreamCountry != "" {
+		cfg.Country = c.OIDCUpstreamCountry
 	}
 	if m := parsePairs(c.OIDCUpstreamMethodPolicy); len(m) > 0 {
 		cfg.MethodPolicy = m

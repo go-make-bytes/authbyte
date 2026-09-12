@@ -16,6 +16,11 @@ type Token struct {
 	// fields into signing requests. Absent capabilities mean "unknown", never
 	// "none": signing then resolves identities itself.
 	Capabilities *Capabilities `json:"capabilities,omitempty"`
+	// Tenants lists the organisations the person may act under when their login
+	// resolved to several memberships and none was named: the token above then
+	// carries no tenant and no scopes until the login is repeated with the chosen
+	// `tenant=<id>`. Absent whenever the token carries a tenant, or needs none.
+	Tenants []string `json:"tenants,omitempty"`
 }
 
 // Capabilities is the signing-capability set of a logged-in session: the

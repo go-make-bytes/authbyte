@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/gmb-lib/go-authbyte/identitycode"
 	"github.com/go-make-bytes/authbyte/identity"
 	"github.com/go-make-bytes/authbyte/session"
 	"github.com/go-make-bytes/authbyte/webeid"
@@ -146,7 +147,20 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		return
 	}
 
-	id := webeidIdentity(subj)
+	id, err := webeidIdentity(subj)
+	if err != nil {
+		// The card presented a code this platform cannot key. Fail closed and
+		// record why: the reason names no value, because an identity code is
+		// personal data.
+		if flow.StepUp {
+			r.Audit().StepUpFailure(ctx, flow.RequestedLogin, "web eid identity code: "+err.Error())
+		} else {
+			r.Audit().LoginFailure(ctx, "web eid identity code: "+err.Error())
+		}
+		ctx.Error(corehttp.UnauthorizedError{})
+
+		return
+	}
 
 	sess, sid, err := r.establishSession(ctx, flow, id)
 	if err != nil {
@@ -190,6 +204,7 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		CodeChallengeMethod: flow.CodeChallengeMethod,
 		ClientID:            flow.ClientID,
 		RedirectURI:         flow.AppRedirectURI,
+		Tenant:              flow.Tenant,
 	}, appCodeTTL); err != nil {
 		ctx.Error(err)
 
@@ -209,21 +224,39 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 // national id (IDCode) is the stable IdP subject + serial number; LoA is "high"
 // (physical eID smart card + QSCD); login_method "webEid" distinguishes the
 // Web eID card path from the eParaksts redirect flows.
-func webeidIdentity(s *webeid.Subject) identity.Identity {
+//
+// The code is reduced to the one spelling the platform stores and compares
+// before it becomes either, and the country it is keyed under comes from the
+// card's own certificate — the subject country attribute the engine read off
+// it. That is the nearest fact about this person there is: they are holding the
+// card. A card whose certificate states the country in the code itself keeps
+// what it states.
+//
+// A code that cannot be canonicalised refuses the login rather than producing
+// an identity keyed some other way. Both fields take the canonical value: the
+// credential handle for this method IS the national id, so letting the two
+// spellings diverge would mean a re-issued card, spelled differently, became a
+// second credential for a person the platform already knows.
+func webeidIdentity(s *webeid.Subject) (identity.Identity, error) {
+	code, err := identitycode.Canonical(s.IDCode, s.CountryCode)
+	if err != nil {
+		return identity.Identity{}, err
+	}
+
 	name := strings.TrimSpace(s.GivenName + " " + s.Surname)
 	if name == "" {
 		name = s.CommonName
 	}
 
 	return identity.Identity{
-		IdPSubject:   s.IDCode,
+		IdPSubject:   code,
 		Name:         name,
 		GivenName:    s.GivenName,
 		FamilyName:   s.Surname,
-		SerialNumber: s.IDCode,
+		SerialNumber: code,
 		LoA:          "high",
 		LoginMethod:  identity.LoginWebEID,
-	}
+	}, nil
 }
 
 // webeidNonce generates a Web eID challenge nonce: base64 of 32 cryptographically
