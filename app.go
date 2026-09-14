@@ -96,6 +96,10 @@ type App struct {
 // README's "Supported configurations" section.
 type ScopeResolver interface {
 	Memberships(ctx *azugo.Context, subjectKey string) ([]rolebyte.Membership, error)
+	// Admit offers a person who authenticated through an organisation's own
+	// directory to the register's admission door; true when a membership was
+	// created or activated by the call.
+	Admit(ctx *azugo.Context, subjectKey string, login rolebyte.DirectoryLogin) (bool, error)
 }
 
 // New constructs the Identity/Auth application.

@@ -63,6 +63,37 @@ func TestDefaultsGiveDistinctACRs(t *testing.T) {
 //
 // The convention this relies on, which holds for every key here: the
 // environment variable is the mapstructure key, upper-cased.
+// One upstream per deployment: the generic connector or the eParaksts profile,
+// never both — a second configured family used to be picked over silently,
+// which is how a misconfiguration goes unnoticed until somebody logs in through
+// the wrong provider. And never none.
+func TestValidateUpstreamRefusesTwoFamiliesAndNone(t *testing.T) {
+	both := Configuration{
+		OIDCUpstreamAuthorityURL: "https://login.example/tenant/v2.0", OIDCUpstreamClientID: "cid",
+		EparakstsAuthorityURL: "https://eparaksts.example", EparakstsClientID: "e",
+	}
+	err := both.validateUpstream()
+	qt.Assert(t, qt.IsNotNil(err))
+	qt.Assert(t, qt.StringContains(err.Error(), "two upstream identity providers"))
+
+	none := Configuration{}
+	qt.Assert(t, qt.IsNotNil(none.validateUpstream()))
+
+	generic := Configuration{OIDCUpstreamAuthorityURL: "https://login.example/tenant/v2.0", OIDCUpstreamClientID: "cid"}
+	qt.Assert(t, qt.IsNil(generic.validateUpstream()))
+
+	eparaksts := Configuration{EparakstsAuthorityURL: "https://eparaksts.example", EparakstsClientID: "e"}
+	qt.Assert(t, qt.IsNil(eparaksts.validateUpstream()))
+
+	// The explicit-endpoint form of the generic connector counts as configured too.
+	explicit := Configuration{
+		OIDCUpstreamAuthorizeURL: "https://idp.example/a", OIDCUpstreamTokenURL: "https://idp.example/t",
+		OIDCUpstreamUserInfoURL: "https://idp.example/u", OIDCUpstreamClientID: "cid",
+		EparakstsAuthorityURL: "https://eparaksts.example",
+	}
+	qt.Assert(t, qt.StringContains(explicit.validateUpstream().Error(), "two upstream identity providers"))
+}
+
 func TestUpstreamConfigKeysBindToEnvironment(t *testing.T) {
 	prefixes := []string{"oidc_upstream_", "eparaksts_"}
 

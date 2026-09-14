@@ -11,16 +11,21 @@ import (
 // discoveryDocument is the subset of the OIDC discovery document
 // (/.well-known/openid-configuration) the connector consumes.
 type discoveryDocument struct {
+	Issuer                string `json:"issuer"`
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
 	TokenEndpoint         string `json:"token_endpoint"`
 	UserInfoEndpoint      string `json:"userinfo_endpoint"`
 	EndSessionEndpoint    string `json:"end_session_endpoint"`
+	JWKSURI               string `json:"jwks_uri"`
 }
 
 // discover resolves the provider's endpoints from its discovery document and
 // fills only the Config fields that are still empty — an explicit endpoint URL
-// always wins over a discovered one. Startup fails closed on any error: a
-// provider whose endpoints cannot be established must not come up half-wired.
+// always wins over a discovered one. The document's `issuer` and `jwks_uri` are
+// taken the same way: they are what lets the connector verify the provider's
+// id_token (the issuer it must name, the keys it must be signed with). Startup
+// fails closed on any error: a provider whose endpoints cannot be established
+// must not come up half-wired.
 func discover(ctx context.Context, httpc *http.Client, cfg *Config) error {
 	if cfg.AuthorityURL == "" {
 		return fmt.Errorf("oidc: no authority URL and no explicit endpoints configured")
@@ -63,6 +68,12 @@ func discover(ctx context.Context, httpc *http.Client, cfg *Config) error {
 	}
 	if cfg.EndSessionURL == "" {
 		cfg.EndSessionURL = doc.EndSessionEndpoint
+	}
+	if cfg.Issuer == "" {
+		cfg.Issuer = doc.Issuer
+	}
+	if cfg.JWKSURL == "" {
+		cfg.JWKSURL = doc.JWKSURI
 	}
 
 	if cfg.AuthorizeURL == "" || cfg.TokenURL == "" || cfg.UserInfoURL == "" {

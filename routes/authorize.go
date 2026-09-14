@@ -98,6 +98,9 @@ func (r *router) authorize(ctx *azugo.Context) {
 	}
 
 	state := randomToken(24)
+	// The nonce binds the id_token the provider issues to this flow: it travels
+	// out with the authorize request and must come back inside the token.
+	nonce := randomToken(24)
 	flow := &session.Flow{
 		CodeChallenge:       challenge,
 		CodeChallengeMethod: method,
@@ -106,6 +109,7 @@ func (r *router) authorize(ctx *azugo.Context) {
 		EntrustRedirectURI:  entrustRedirect,
 		ClientID:            clientID,
 		Tenant:              tenant,
+		Nonce:               nonce,
 	}
 
 	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
@@ -117,6 +121,7 @@ func (r *router) authorize(ctx *azugo.Context) {
 	params := upstream.AuthorizeParams{
 		State:       state,
 		RedirectURI: entrustRedirect,
+		Nonce:       nonce,
 	}
 	if acr := ctx.Query.StringOptional("acr_values"); acr != nil {
 		params.ACRValues = *acr
@@ -181,27 +186,34 @@ func (r *router) callback(ctx *azugo.Context) {
 		return
 	}
 
-	// Exchange the code with Entrust and read the user's claims.
-	idpToken, err := r.Upstream().Exchange(ctx, code, flow.EntrustRedirectURI)
+	// Exchange the code with the provider and read the person's claims: the
+	// verified id_token where the provider publishes a key set, userinfo always.
+	tokens, err := r.Upstream().Exchange(ctx, code, flow.EntrustRedirectURI)
 	if err != nil {
 		ctx.Error(err)
 
 		return
 	}
 
-	info, err := r.Upstream().UserInfo(ctx, idpToken)
+	info, err := r.Upstream().Claims(ctx, tokens, flow.Nonce)
 	if err != nil {
-		// An identity code the platform cannot key is a refused login, not a
-		// service fault: the person exists, but storing their code under a
-		// second spelling would make them a second person. Everything else
-		// from the provider stays a plain error.
-		if errors.Is(err, upstream.ErrIdentityCode) {
+		switch {
+		case errors.Is(err, upstream.ErrIdentityCode):
+			// An identity code the platform cannot key is a refused login, not a
+			// service fault: the person exists, but storing their code under a
+			// second spelling would make them a second person.
 			r.Audit().LoginFailure(ctx, "upstream identity code: "+err.Error())
 			ctx.Error(corehttp.UnauthorizedError{})
-
-			return
+		case errors.Is(err, upstream.ErrIDToken):
+			// The provider's own assertion of who logged in was missing or did
+			// not verify: a refused login, audited with the reason, answered
+			// with the refusal every other failed login gets.
+			r.Audit().LoginFailure(ctx, "upstream id_token: "+err.Error())
+			ctx.Error(corehttp.UnauthorizedError{})
+		default:
+			// Everything else from the provider stays a plain error.
+			ctx.Error(err)
 		}
-		ctx.Error(err)
 
 		return
 	}
@@ -241,7 +253,7 @@ func (r *router) callback(ctx *azugo.Context) {
 	// capabilities from it while the upstream token is still at hand. Assigned
 	// unconditionally: capabilities describe the CURRENT login method, so a
 	// step-up replaces (or clears) whatever the previous login captured.
-	sess.Capabilities = r.captureCapabilities(ctx, idpToken, info, id.LoginMethod)
+	sess.Capabilities = r.captureCapabilities(ctx, tokens.AccessToken, info, id.LoginMethod)
 
 	if err := r.Session().SaveSession(ctx, sid, sess, sessionTTL); err != nil {
 		ctx.Error(err)
@@ -295,6 +307,12 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 		// Reflect the new assurance/method; identity and scopes are unchanged.
 		sess.LoA = id.LoA
 		sess.LoginMethod = id.LoginMethod
+		// A step-up through an upstream provider is a login through that
+		// provider's directory too; a card step-up says nothing about one.
+		if id.Issuer != "" {
+			sess.DirectoryIssuer = id.Issuer
+			sess.DirectoryGuest = id.DirectoryGuest
+		}
 
 		return sess, flow.SessionID, nil
 	}
@@ -326,6 +344,10 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 		LoA:          id.LoA,
 		LoginMethod:  id.LoginMethod,
 		Scopes:       defaultUserScopes,
+		// The directory the login came through, for the register's admission
+		// door at token issue ("" for a card login).
+		DirectoryIssuer: id.Issuer,
+		DirectoryGuest:  id.DirectoryGuest,
 	}, randomToken(24), nil
 }
 

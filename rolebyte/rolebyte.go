@@ -62,6 +62,7 @@ type Resolver struct {
 	auth       *authclient.Client
 	claimsURL  string
 	resolveURL string
+	admitURL   string
 	audience   string
 }
 
@@ -74,8 +75,54 @@ func New(ac *authclient.Client, baseURL, audience string) *Resolver {
 		auth:       ac,
 		claimsURL:  base + "/api/v1/claims",
 		resolveURL: base + "/api/v1/resolve",
+		admitURL:   base + "/api/v1/directory-admissions",
 		audience:   audience,
 	}
+}
+
+// DirectoryLogin is what a login through an organisation's own directory brings
+// to the register's admission door: the issuer the person authenticated through
+// and the name the login carried.
+type DirectoryLogin struct {
+	Issuer      string
+	DisplayName string
+}
+
+type admitRequest struct {
+	SubjectKey  string `json:"subjectKey"`
+	Issuer      string `json:"issuer"`
+	DisplayName string `json:"displayName"`
+}
+
+type admitResponse struct {
+	Outcome  string `json:"outcome"`
+	TenantID string `json:"tenantId"`
+}
+
+// admissionAdmitted is the register's word for an admission that created or
+// activated a membership; every other outcome changed nothing.
+const admissionAdmitted = "admitted"
+
+// Admit presents a person who has just authenticated through an organisation's
+// directory to the register's admission door: the tenant that attached that
+// issuer as its directory admits them as an active member with no grants. The
+// answer is whether a membership was created or activated by this call — an
+// existing member, a revoked one and an issuer no tenant attached all answer
+// false and change nothing; the refusal that may follow is the caller's. Rides
+// the claim scope: it is the same moment and the same trust as the invitation
+// claim, the identity provider saying who has just authenticated.
+func (r *Resolver) Admit(ctx *azugo.Context, subjectKey string, login DirectoryLogin) (bool, error) {
+	if subjectKey == "" || login.Issuer == "" {
+		return false, fmt.Errorf("rolebyte: an admission needs the subject key and the issuer")
+	}
+
+	var res admitResponse
+	if err := r.auth.PostJSON(ctx, r.audience, scopeClaim, r.admitURL,
+		admitRequest{SubjectKey: subjectKey, Issuer: login.Issuer, DisplayName: login.DisplayName}, &res); err != nil {
+		return false, fmt.Errorf("rolebyte: admit: %w", err)
+	}
+
+	return res.Outcome == admissionAdmitted, nil
 }
 
 type membership struct {

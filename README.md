@@ -95,12 +95,21 @@ consulted at every token issue that needs a membership (first issue and refresh 
 whose client requires one; every tenant-named service issue). The register and this service
 ship separately, so this boundary is a published contract:
 
-- **Question:** a typed subject key — a person's identity code in its canonical spelling
-  (`pno:PNOLV-XXXXXXXXXXX`) or a service account's client id (`svc:<name>`, the same name it
-  authenticates with).
+- **Question:** a typed subject key — a person's platform subject (`sub:<person id>`, the
+  identity store's stable id, equal to the token's own `sub`) or a service account's client id
+  (`svc:<name>`, the same name it authenticates with). No identity code travels into the register.
 - **Answer:** the subject's active memberships — each organisation with the `group:level`
   scopes the subject's roles grant there. The register attaches any pending invitation first,
   so a subject's very first token already carries the invited roles.
+- **The admission door, for a login through an organisation's own directory.** Such a session
+  carries the issuer it came through. When the person holds no membership, this service offers
+  them to the register's admission door (`POST /api/v1/directory-admissions`, the same
+  `membership:claim` scope): the tenant that attached that issuer as its directory admits them
+  as an active member with **no grants**, and they are resolved again — a member who holds
+  nothing until an administrator assigns a role. Somebody the provider calls a guest in its
+  directory is not offered, a person already holding a membership is not offered again, and an
+  issuer no tenant attached admits nobody — each of those is the plain `403` below. The door
+  unreachable fails the issue closed like the resolve.
 - **Refusals are this service's to make from that answer:** no membership → `403`
   `err:membership:notMember`; a named organisation the subject is not a member of → the same
   `403`; several memberships and none named → the choice above, never a guess.
@@ -207,12 +216,12 @@ sequenceDiagram
     IDP-->>AC: GET /callback?code&state
 
     AC->>RD: GETDEL flow:{state} (single use)
-    AC->>IDP: exchange code → access token → /users/me
-    AC->>AC: resolve acr+amr → login_method + loa
+    AC->>IDP: exchange code → tokens (id_token verified against the provider's keys when it publishes any) → userinfo
+    AC->>AC: resolve acr+amr (+acrs) → login_method + loa
     alt method not permitted via IdP (sc_plugin → eid)
         AC-->>SPA: 403 (eID card must use Web eID)
-    else permitted (mobileid / mobile-eid)
-        AC->>PG: identity.upsert (person keyed on national id)
+    else permitted (mobileid / mobile-eid / upstream)
+        AC->>PG: identity.upsert (person keyed on the identity code; a codeless directory login by its credential)
         AC-->>AC: GDPR access record (routine, fail-open)
         AC->>RD: SET sess:{sid} (session, TTL 12h)
         AC->>RD: SET code:{appCode} (bound to session + PKCE, TTL 60s)
@@ -288,7 +297,7 @@ Token exchange lets a confidential client obtain an on-behalf-of token toward an
 
 **The service never touches database tables.** PostgreSQL access in [`store/postgres.go`](store/postgres.go) goes exclusively through `SECURITY DEFINER` stored procedures called with a uniform JSONB envelope (`CALL proc($1::jsonb, NULL::jsonb)` → `po_data`); the service connects with an `EXECUTE`-only role (`authbyte_public`) that has no direct table grants. The schema and the procedure logic are owned by the platform's separate `database` migration repo (one authored home per schema, shipped as one migration image) — this package only knows procedure *names* (`identity.upsert`, `identity.register`, `identity.get`). A procedure that fails after a write re-raises a structured error (SQLSTATE `P0001`) whose message is the same envelope, so a validation failure and a post-write rollback surface identically.
 
-The person is keyed on the eIDAS national identity code (`serial_number`), in **one canonical spelling** — the identity type, the country, a hyphen, and the national code with its separators removed (`PNOLV-XXXXXXXXXXX`). Every spelling a card or a provider writes is reduced to it before it is stored or compared, so the same human across different auth methods — different upstream subjects, and different ways of writing the same code — resolves to one internal subject. The country is never guessed: a code that names one keeps it, otherwise it comes from the card certificate's own country attribute — the nearest fact about a person there is, since they are holding the card — and a code that names no country, from a source that supplies none, refuses the login. `identity.upsert` reports whether the person was *created* on this call (first-ever login) so the caller emits the correct GDPR event (created vs updated); linking a new method to a known person is an update. `identity.register` creates the same row for a person who has **not** logged in yet — canonical code and name, no credential — so an invitee or a record-only worker has a platform subject from the first act; their first login matches the same canonical code and lands on that row.
+The person is keyed on the eIDAS national identity code (`serial_number`), in **one canonical spelling** — the identity type, the country, a hyphen, and the national code with its separators removed (`PNOLV-XXXXXXXXXXX`). Every spelling a card or a provider writes is reduced to it before it is stored or compared, so the same human across different auth methods — different upstream subjects, and different ways of writing the same code — resolves to one internal subject. The country is never guessed: a code that names one keeps it, otherwise it comes from the card certificate's own country attribute — the nearest fact about a person there is, since they are holding the card — and a code that names no country, from a source that supplies none, refuses the login. `identity.upsert` reports whether the person was *created* on this call (first-ever login) so the caller emits the correct GDPR event (created vs updated); linking a new method to a known person is an update. `identity.register` creates the same row for a person who has **not** logged in yet — canonical code and name, no credential — so an invitee or a record-only worker has a platform subject from the first act; their first login matches the same canonical code and lands on that row. A person who signs in through an organisation's directory carries **no code at all**: the identity store resolves them by their credential handle (the provider's durable identifier) and creates them without one; a codeless person and the same human's card login are two persons until linked by a deliberate act.
 
 Redis holds only short-lived auth-flow and session state (`session/`), every key TTL-bounded:
 
@@ -336,7 +345,29 @@ standard OIDC provider** (Keycloak, Microsoft Entra ID, Google, an enterprise Id
 (`/.well-known/openid-configuration`); startup fails closed if they cannot be. **eParaksts**: set
 the `EPARAKSTS_*` variables instead — a named profile of the same connector carrying that
 provider's fixed endpoint paths, bespoke logout endpoint, scope and method vocabularies.
-Setting both selects the generic provider.
+**Setting both refuses to start** — one upstream per deployment, never a silent pick; a deployment
+that needs several providers side by side is a different composition of this service.
+
+**The id_token path.** When the provider publishes a key set — its discovery document names a
+`jwks_uri`, as every mainstream provider's does, or `OIDC_UPSTREAM_JWKS_URL` and
+`OIDC_UPSTREAM_ISSUER` are set for one configured by explicit endpoints — every login must carry
+an id_token that verifies: signed with one of the published keys (RS256 · PS256 · ES256; `none` and
+the HMAC family are refused), `iss` equal to the issuer, `aud` containing this client, `exp` and
+`iat` within `TOKEN_CLOCK_SKEW_LEEWAY`, the `nonce` this flow sent, and a subject equal to
+userinfo's. The id_token's claims win over userinfo's where both carry one, and its `acrs` — the
+authentication contexts the login satisfied, where a provider issues them — join the `amr` list, so
+`LOA_POLICY` maps a context to a level like any other token (a directory enforcing MFA under a
+context `c1`: `c1=substantial`). A missing or failing id_token refuses the login (`401`, audited
+with the reason). Without a key set — the eParaksts profile, a provider with fixed paths and none —
+userinfo alone is read, exactly as before this path existed. Two further claims serve an
+organisation whose people sign in through its own directory: `OIDC_UPSTREAM_CLAIM_DIRECTORY_ID`
+(default `sub`; `oid` for Microsoft Entra ID, whose `sub` is pairwise per application registration)
+names the durable identifier the person's credential is stored under, and
+`OIDC_UPSTREAM_CLAIM_ACCOUNT_STATUS` (`acct` for Entra) tells a member of that directory from a
+guest in it — a guest logs in like anyone else but is never admitted into a tenant by its attached
+directory (see the register boundary). Such a login carries **no identity code**: the identity store
+resolves the person by their credential and creates them without one; they stay a separate person
+from the same human's card login until linked by a deliberate act (a later increment).
 
 The claim named by `OIDC_UPSTREAM_CLAIM_SERIAL` must carry an identity code that **states its own
 country** — `PNOLV-XXXXXXXXXXX`, the prefixed form of ETSI EN 319 412-1. A provider that sends a
@@ -354,7 +385,12 @@ can be stated alongside the country.
 | `OIDC_UPSTREAM_CLIENT_SECRET` (`_FILE`) | — | Client secret (secret store) |
 | `OIDC_UPSTREAM_SCOPES` | `openid profile` | Scopes requested at authorization (space/comma separated) |
 | `OIDC_UPSTREAM_AUTHORIZE_URL` / `_TOKEN_URL` / `_USERINFO_URL` / `_END_SESSION_URL` | — (⇒ discovery) | Absolute endpoint overrides for a provider with fixed or non-standard paths; setting the first three skips discovery |
-| `OIDC_UPSTREAM_CLAIM_SERIAL` | `serial_number` | Userinfo claim carrying the person's identity code |
+| `OIDC_UPSTREAM_CLAIM_SERIAL` | `serial_number` | Userinfo claim carrying the person's identity code — leave the claim absent at a provider that has none (a directory), never invent one |
+| `OIDC_UPSTREAM_ISSUER` | — (⇒ discovery `issuer`) | The `iss` an id_token must carry; set together with `_JWKS_URL` for a provider configured by explicit endpoints |
+| `OIDC_UPSTREAM_JWKS_URL` | — (⇒ discovery `jwks_uri`) | The provider's signing keys. Known ⇒ every login's id_token is verified and required; unknown ⇒ userinfo only |
+| `OIDC_UPSTREAM_CLAIM_DIRECTORY_ID` | `sub` | Claim carrying the person's durable identifier at the provider — the handle their credential is stored under (`oid` for Entra) |
+| `OIDC_UPSTREAM_CLAIM_ACCOUNT_STATUS` | — (⇒ nobody is a guest) | Claim telling a member of the provider's directory from a guest in it (`acct` for Entra) |
+| `OIDC_UPSTREAM_ACCOUNT_STATUS_GUEST` | `1` | The account-status value that marks a guest |
 | `OIDC_UPSTREAM_METHOD_POLICY` | — (⇒ profile default) | `acr`/`amr` token → login-method vocabulary (`substr=method,…`, longest token wins) |
 | `OIDC_UPSTREAM_METHOD_DEFAULT` | `upstream` (generic) | Login method when no vocabulary token matches |
 | `OIDC_UPSTREAM_METHODS_ALLOWED` | — (⇒ the default method) | Comma-separated set a callback may resolve to; anything else is refused (fail closed) |
