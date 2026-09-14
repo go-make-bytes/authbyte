@@ -285,7 +285,7 @@ Token exchange lets a confidential client obtain an on-behalf-of token toward an
 
 **The service never touches database tables.** PostgreSQL access in [`store/postgres.go`](store/postgres.go) goes exclusively through `SECURITY DEFINER` stored procedures called with a uniform JSONB envelope (`CALL proc($1::jsonb, NULL::jsonb)` → `po_data`); the service connects with an `EXECUTE`-only role (`authbyte_public`) that has no direct table grants. The schema and the procedure logic are owned by the platform's separate `database` migration repo (one authored home per schema, shipped as one migration image) — this package only knows procedure *names* (`identity.upsert`, `identity.get`). A procedure that fails after a write re-raises a structured error (SQLSTATE `P0001`) whose message is the same envelope, so a validation failure and a post-write rollback surface identically.
 
-The person is keyed on the eIDAS national identity code (`serial_number`), in **one canonical spelling** — the identity type, the country, a hyphen, and the national code with its separators removed (`PNOLV-01018015097`). Every spelling a card or a provider writes is reduced to it before it is stored or compared, so the same human across different auth methods — different upstream subjects, and different ways of writing the same code — resolves to one internal subject. The country is never guessed: a code that names one keeps it, otherwise it comes from the card certificate's own country attribute or from `OIDC_UPSTREAM_COUNTRY`, and a code with none available refuses the login. `identity.upsert` reports whether the person was *created* on this call (first-ever login) so the caller emits the correct GDPR event (created vs updated); linking a new method to a known person is an update.
+The person is keyed on the eIDAS national identity code (`serial_number`), in **one canonical spelling** — the identity type, the country, a hyphen, and the national code with its separators removed (`PNOLV-01018015097`). Every spelling a card or a provider writes is reduced to it before it is stored or compared, so the same human across different auth methods — different upstream subjects, and different ways of writing the same code — resolves to one internal subject. The country is never guessed: a code that names one keeps it, otherwise it comes from the card certificate's own country attribute — the nearest fact about a person there is, since they are holding the card — and a code that names no country, from a source that supplies none, refuses the login. `identity.upsert` reports whether the person was *created* on this call (first-ever login) so the caller emits the correct GDPR event (created vs updated); linking a new method to a known person is an update.
 
 Redis holds only short-lived auth-flow and session state (`session/`), every key TTL-bounded:
 
@@ -335,6 +335,15 @@ the `EPARAKSTS_*` variables instead — a named profile of the same connector ca
 provider's fixed endpoint paths, bespoke logout endpoint, scope and method vocabularies.
 Setting both selects the generic provider.
 
+The claim named by `OIDC_UPSTREAM_CLAIM_SERIAL` must carry an identity code that **states its own
+country** — `PNOLV-01018015097`, the prefixed form of ETSI EN 319 412-1. A provider that sends a
+bare national code with no country in it delivers logins this service refuses, and there is
+deliberately no setting to supply the missing country: one value would apply to every person who
+ever logs in through that provider, so a user base holding codes from more than one register
+would have some of them filed under the wrong one — a valid-looking key for the wrong person,
+with no error to notice it by. Map the claim at your provider instead, where the identity type
+can be stated alongside the country.
+
 | Env | Default | Meaning |
 |---|---|---|
 | `OIDC_UPSTREAM_AUTHORITY_URL` | — | Generic provider base (issuer); endpoints via discovery |
@@ -343,7 +352,6 @@ Setting both selects the generic provider.
 | `OIDC_UPSTREAM_SCOPES` | `openid profile` | Scopes requested at authorization (space/comma separated) |
 | `OIDC_UPSTREAM_AUTHORIZE_URL` / `_TOKEN_URL` / `_USERINFO_URL` / `_END_SESSION_URL` | — (⇒ discovery) | Absolute endpoint overrides for a provider with fixed or non-standard paths; setting the first three skips discovery |
 | `OIDC_UPSTREAM_CLAIM_SERIAL` | `serial_number` | Userinfo claim carrying the person's identity code |
-| `OIDC_UPSTREAM_COUNTRY` | — | Two-letter country whose register issues this provider's identity codes; consulted only when the claim carries no country of its own. A provider that sends a bare national code and has none set delivers logins this service refuses |
 | `OIDC_UPSTREAM_METHOD_POLICY` | — (⇒ profile default) | `acr`/`amr` token → login-method vocabulary (`substr=method,…`, longest token wins) |
 | `OIDC_UPSTREAM_METHOD_DEFAULT` | `upstream` (generic) | Login method when no vocabulary token matches |
 | `OIDC_UPSTREAM_METHODS_ALLOWED` | — (⇒ the default method) | Comma-separated set a callback may resolve to; anything else is refused (fail closed) |

@@ -1,6 +1,8 @@
 package authbytecore
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/go-quicktest/qt"
@@ -44,4 +46,55 @@ func TestDefaultsGiveDistinctACRs(t *testing.T) {
 	qt.Check(t, qt.Not(qt.Equals(mobile, eidScan)))
 	// No eid-card acr default — eID card is Web eID only.
 	qt.Check(t, qt.Equals(v.GetString("eparaksts_acr_eid"), ""))
+}
+
+// TestUpstreamConfigKeysBindToEnvironment proves that every upstream-connector
+// setting is actually REACHABLE from the environment — the property the type
+// system does not check and a reader cannot see.
+//
+// It is derived, not listed: the keys come from the struct's own mapstructure
+// tags, so a field added tomorrow is covered the day it is added rather than
+// the day someone remembers to extend a list. That is the whole point. The
+// defect it was written for was a field that existed at every layer — declared,
+// validated, applied to the connector, documented in the README — and had no
+// BindEnv call, so setting the documented variable did nothing and said
+// nothing. Nothing in the build could see it, because nothing in the build
+// reads an environment variable that is never bound.
+//
+// The convention this relies on, which holds for every key here: the
+// environment variable is the mapstructure key, upper-cased.
+func TestUpstreamConfigKeysBindToEnvironment(t *testing.T) {
+	prefixes := []string{"oidc_upstream_", "eparaksts_"}
+
+	typ := reflect.TypeOf(Configuration{})
+	keys := make([]string, 0, typ.NumField())
+	for i := range typ.NumField() {
+		key := typ.Field(i).Tag.Get("mapstructure")
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(key, prefix) {
+				keys = append(keys, key)
+
+				break
+			}
+		}
+	}
+
+	// A guard on the guard: a refactor that renamed the fields away from these
+	// prefixes would otherwise leave this test passing over nothing at all.
+	qt.Assert(t, qt.IsTrue(len(keys) >= 10))
+
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			want := "probe-" + key
+			t.Setenv(strings.ToUpper(key), want)
+
+			v := viper.New()
+			NewConfiguration().Bind("", v)
+
+			qt.Check(t, qt.Equals(v.GetString(key), want),
+				qt.Commentf("%s is not bound to %s — add it to the BindEnv block; "+
+					"a field with no binding is invisible until an operator sets it and nothing happens",
+					key, strings.ToUpper(key)))
+		})
+	}
 }
