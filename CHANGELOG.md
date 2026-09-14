@@ -3,6 +3,56 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.1.2
+
+### Changed — the membership register is asked by the person's platform subject, never their identity code
+
+At token issue this service asks the membership register which organisations a person belongs to. It
+asked by the person's national identity code, typed `pno:<code>`; it now asks by their **platform
+subject** — the stable id the identity store keys the person on, which is the token's own `sub` —
+typed **`sub:<person id>`**. A service account is still asked for by its client id (`svc:<client id>`).
+No token changes shape: the key is a function of `sub`, and every consumer derives it the same way, so
+nothing new is minted and the identity code (`serial_number`) stays on the token for the signing side.
+
+```
+register lookup, before:  claim + resolve by "pno:PNOLV-12345678901"
+register lookup, after:   claim + resolve by "sub:01J8X2K4M9N7P3Q5R6S8T0V1W2"   (= "sub:" + the token's sub)
+```
+
+**Removed with it:** the refusal *"the login carries no identity code"* (a 502 at token issue). A
+session always has a subject, so a login method that supplies no identity code can be issued a token
+and resolved against the register like any other.
+
+**Deploy order.** The register's database migration that retires the `pno:` kind comes first, then the
+register service and this service together. Against an older register this service's `sub:` keys are
+refused by the register's constraint; an older authorization server's `pno:` keys are refused by the
+new register at every write door and resolve to nobody. Neither combination runs; migrate, then redeploy.
+
+### Added — `POST /identity/persons`: a person gets a platform subject before their first login
+
+An administrator registering or inviting somebody — or recording a person who will never log in —
+needs that person's platform subject to register them under, and until now a subject existed only
+once the person had logged in. The new door creates the person row in the identity store with the
+canonical identity code and whatever name is known, and **no credential**: a record, not an account.
+Nothing can log in as them until a login attaches a credential, and that login lands on this row
+because the same canonical code is matched there.
+
+```
+POST /identity/persons            Authorization: DPoP <token carrying identity:admin>
+{"identityCode": "PNOLV-123456-78901", "name": "…", "givenName": "…", "familyName": "…"}
+
+201 {"personSub": "01J8X2K4M9N7P3Q5R6S8T0V1W2", "created": true}     the person is new
+200 {"personSub": "01J8X2K4M9N7P3Q5R6S8T0V1W2", "created": false}    already known (registered, or logged in before);
+                                                                      names are filled only where the row has none
+422 err:identity:invalid    the code names no country, or an identity type this platform does not know — never echoed
+403 err:identity:forbidden  the token does not carry identity:admin
+```
+
+The scope is minted like every other: a role in the membership register grants it to an
+administrator; for bring-up a registry client may hold it as a service-token grant. Each registration
+is recorded as a GDPR-audit identity write (the administrator as actor, the person as subject), routine
+and fail-open like the login path's own record. **Nothing to configure.**
+
 ## v0.1.1
 
 ### Removed — `OIDC_UPSTREAM_COUNTRY`

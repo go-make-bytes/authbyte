@@ -4,10 +4,13 @@
 // administration lives in one register while every resource service keeps
 // checking plain token scopes.
 //
-// The subject is a typed key. A person is keyed by the eIDAS identity code
-// from their login (`pno:<code>`); a service account — a machine that is a
-// member of an organisation — is keyed by its own client id (`svc:<name>`),
-// the same name it authenticates with and carries as its token subject.
+// The subject is a typed key. A person is keyed by their platform subject —
+// the stable id the identity store gives them, which is also the `sub` of every
+// token issued for them (`sub:<person id>`); a service account — a machine that
+// is a member of an organisation — is keyed by its own client id (`svc:<name>`),
+// the same name it authenticates with and carries as its token subject. A key
+// carries nothing about the person: the national identity code stays in the
+// identity store and appears in no register.
 //
 // The adapter attaches the subject to any still-pending invitations first
 // (the claim call): an invited subject's first token issue is exactly the
@@ -24,7 +27,6 @@ import (
 	"azugo.io/azugo"
 
 	"github.com/gmb-lib/go-authbyte/authclient"
-	"github.com/gmb-lib/go-authbyte/identitycode"
 )
 
 // Scopes the membership service's API demands per call — its contract, not
@@ -37,17 +39,15 @@ const (
 // personKeyPrefix types the register's person key. The prefix is lower-case and
 // the register matches it exactly, so it is written here once and never
 // assembled at a call site.
-const personKeyPrefix = "pno:"
+const personKeyPrefix = "sub:"
 
-// PersonKey is the register key of a person: the identity code from their
-// login, in the one spelling the platform stores and compares, typed.
-//
-// The code is canonicalised on the way in even though a session's code already
-// is: this key is what an invitation is addressed to and what a login claims,
-// and those two are written by different services. A key built from a raw
-// spelling would address a membership nobody can claim.
-func PersonKey(serialNumber string) string {
-	return personKeyPrefix + identitycode.Key(serialNumber)
+// PersonKey is the register key of a person: their platform subject — the
+// identity store's stable id, equal to the token's `sub` — typed. A subject has
+// exactly one spelling, so nothing is rewritten: an invitation addressed to the
+// subject the identity store answered and the login that claims it are the same
+// bytes by construction.
+func PersonKey(personSub string) string {
+	return personKeyPrefix + personSub
 }
 
 // Membership is one organisation a subject may act under, with the

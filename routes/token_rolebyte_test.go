@@ -15,29 +15,11 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// testIDCodeLV returns a Latvian personal identity code in the one spelling the
-// platform stores and compares: the identity type, the country, a hyphen, and
-// the eleven digits with the national separator removed — built from one
-// repeated digit so it reads as a placeholder at a glance.
-//
-// It is assembled from those parts at run time rather than written as a literal —
-// an identifier-shaped constant in the source is indistinguishable from a
-// credential to a secret scanner, and indistinguishable from a real person's code
-// to a reader.
-func testIDCodeLV(digit int) string {
-	d := strconv.Itoa(digit)
-
-	return "PNOLV-" + strings.Repeat(d, 11)
-}
-
-// testIDCodeLVAsWritten returns the SAME person's code written the way a Latvian
-// certificate and a Latvian person write it — the six-and-five split. It exists
-// so a test can hand a service the other spelling and assert it still reaches
-// the one person.
-func testIDCodeLVAsWritten(digit int) string {
-	d := strconv.Itoa(digit)
-
-	return "PNOLV-" + strings.Repeat(d, 6) + "-" + strings.Repeat(d, 5)
+// testPersonSub returns a platform subject of the shape the identity store
+// mints — 26 characters of the ULID alphabet — built from one repeated digit so
+// it reads as a placeholder at a glance.
+func testPersonSub(digit int) string {
+	return "0" + strings.Repeat(strconv.Itoa(digit), 25)
 }
 
 // testRegistry registers two browser clients: a public portal whose people
@@ -88,13 +70,13 @@ func scopesApp(t *testing.T, resolver authbytecore.ScopeResolver) *azugo.TestApp
 
 	r := &router{App: app}
 	app.Get("/testonly/scopes", func(ctx *azugo.Context) {
-		serial := testIDCodeLV(0)
-		if sn := ctx.Query.StringOptional("serial"); sn != nil {
-			serial = *sn
+		subject := testPersonSub(0)
+		if s := ctx.Query.StringOptional("subject"); s != nil {
+			subject = *s
 		}
 		sess := &session.Session{
-			Scopes:       []string{"static:baseline"},
-			SerialNumber: serial,
+			Subject: subject,
+			Scopes:  []string{"static:baseline"},
 		}
 		client, tenant := "", ""
 		if c := ctx.Query.StringOptional("client"); c != nil {
@@ -183,24 +165,22 @@ func TestUserScopesResolvedFromMembership(t *testing.T) {
 	qt.Assert(t, qt.StringContains(body, `"estimating:estimator"`))
 	qt.Assert(t, qt.StringContains(body, `"01TENANTULID"`))
 	qt.Assert(t, qt.Not(qt.StringContains(body, "static:baseline")))
-	qt.Assert(t, qt.Equals(fake.asked, "pno:"+testIDCodeLV(0)))
+	qt.Assert(t, qt.Equals(fake.asked, "sub:"+testPersonSub(0)))
 }
 
-// The register is asked by the CANONICAL key whichever spelling the session
-// carries. The session's code is already canonical in production, so this
-// asserts the seam's own belt-and-braces: a person invited to a membership and
-// a person logging in must produce the same key, and the two are written by
-// different services.
-func TestUserScopesAsksTheRegisterByTheCanonicalKey(t *testing.T) {
+// The register is asked by the person's TYPED PLATFORM SUBJECT — the session's
+// subject, which is the token's `sub` — and by nothing about the person: no
+// identity code travels into the register. A person invited under the subject
+// the identity store answered and the same person logging in produce the same
+// key by construction.
+func TestUserScopesAsksTheRegisterByTheTypedSubject(t *testing.T) {
 	fake := &fakeResolver{memberships: []rolebyte.Membership{member("01TENANTULID", "estimating:estimator")}}
 	app := scopesApp(t, fake)
 
-	written := testIDCodeLVAsWritten(0)
-	qt.Assert(t, qt.Not(qt.Equals(written, testIDCodeLV(0))))
-
-	status, _ := get(t, app, "/testonly/scopes?client=product-spa&serial="+written)
+	status, _ := get(t, app, "/testonly/scopes?client=product-spa&subject="+testPersonSub(7))
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK))
-	qt.Assert(t, qt.Equals(fake.asked, "pno:"+testIDCodeLV(0)))
+	qt.Assert(t, qt.Equals(fake.asked, "sub:"+testPersonSub(7)))
+	qt.Assert(t, qt.IsFalse(strings.Contains(fake.asked, "PNO")))
 }
 
 // A client the registry does not know follows the register — required, never

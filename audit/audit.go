@@ -233,6 +233,37 @@ func (r *Recorder) IdentityWritten(ctx *azugo.Context, subjectID, loa string, cr
 	}
 }
 
+// IdentityRegistered records the personal-data write an administrator performs
+// by registering a person before their first login: IdentityCreated when the
+// call created the person, IdentityUpdated when the person was already known.
+// The actor is the administrator, the subject the registered person. Routine
+// (fail-open), like the login path's own record. No-op when the GDPR client is
+// not configured.
+func (r *Recorder) IdentityRegistered(ctx *azugo.Context, actorID, actorLoA, personSub string, created bool) {
+	if r == nil || r.gdpr == nil {
+		return
+	}
+
+	id := gdpr.Identity{
+		Actor:     broker.Actor{ID: actorID, Type: "user", Assurance: actorLoA},
+		SubjectID: personSub,
+		Purpose:   gdpr.PurposeAccountManagement,
+		Channel:   gdpr.ChannelInteractive,
+	}
+
+	var err error
+	if created {
+		err = r.gdpr.IdentityCreated(ctx, id)
+	} else {
+		err = r.gdpr.IdentityUpdated(ctx, id)
+	}
+
+	if err != nil {
+		r.logger(ctx).Warn("gdpr access record not persisted (non-fatal)",
+			zap.Bool("created", created), zap.Error(err))
+	}
+}
+
 // actorRef returns a broker.Actor pointer when it carries any identity, else nil.
 func actorRef(id, typ, assurance string) *broker.Actor {
 	if id == "" && assurance == "" {
