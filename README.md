@@ -132,7 +132,7 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 |---|---|---|
 | `GET /authorize` | Begin user login (Authorization Code + PKCE, RFC 7636). Validates `redirect_uri` against the registered allowlist, saves flow state, redirects to the identity provider. Optional `tenant=<id>`: the organisation a person with several memberships chooses to act under (checked at the token issue) | anonymous |
 | `GET /callback` | Handle the identity-provider redirect: exchange the code, read claims, resolve the person, establish a session, mint a single-use app authorization code | state-verified (path configurable) |
-| `GET /logout` | Front-channel logout: delete the server session and, for federated logins, bounce the browser through the identity provider's logout so its SSO cookie is cleared, then to `redirect_uri` | anonymous (`redirect_uri` allowlisted) |
+| `GET /logout` | Front-channel logout: delete the server session and send the browser to `redirect_uri`. For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone | anonymous (`redirect_uri` allowlisted) |
 | `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof | PKCE / client secret / session / subject token — all + DPoP |
 | `POST /step-up` | Re-authenticate with a stronger or different login method to satisfy a signing-flow binding; returns a redirect (federated methods) or a Web eID challenge | existing session |
 | `GET /identity` | The internal identity plus `loa`, `login_method`, and the signing flows that method permits | valid user token (DPoP) |
@@ -394,6 +394,7 @@ can be stated alongside the country.
 | `OIDC_UPSTREAM_METHOD_POLICY` | — (⇒ profile default) | `acr`/`amr` token → login-method vocabulary (`substr=method,…`, longest token wins) |
 | `OIDC_UPSTREAM_METHOD_DEFAULT` | `upstream` (generic) | Login method when no vocabulary token matches |
 | `OIDC_UPSTREAM_METHODS_ALLOWED` | — (⇒ the default method) | Comma-separated set a callback may resolve to; anything else is refused (fail closed) |
+| `OIDC_UPSTREAM_METHODS_FEDERATED` | — (none) | Comma-separated methods whose sign-out also goes through the provider's end-session endpoint, ending the session it keeps in the browser. Unset, signing out ends this service's session and leaves the provider's alone — a directory provider's session is the person's whole estate. The eParaksts profile lists its own methods regardless |
 | `OIDC_UPSTREAM_LOA_DEFAULT` | `low` | Assurance level when no `LOA_POLICY` token matches — raise deliberately for an IdP that enforces MFA |
 | `LOA_POLICY` | — (⇒ built-in) | Override the `acr`/`amr` → assurance-level vocabulary (`substr=loa,…`) |
 
@@ -477,7 +478,7 @@ authbyte/
 │   ├── dpop.go         — inbound DPoP verify + server-nonce challenge + jti replay
 │   ├── stepup.go       — /step-up (redirect vs Web eID challenge)
 │   ├── webeid.go       — /webeid/challenge · /webeid/login
-│   ├── logout.go       — front-channel federated logout
+│   ├── logout.go       — front-channel logout (through the provider for federated methods)
 │   ├── identity.go     — /identity (permitted signing flows)
 │   ├── wellknown.go    — jwks.json · openid-configuration
 │   ├── ready.go        — /readyz (dependency-aware)

@@ -161,8 +161,16 @@ type Config struct {
 	// a callback resolving to anything else is refused. Empty means: exactly
 	// {MethodDefault}, when MethodDefault is set.
 	MethodsAllowed []string
-	// MethodsFederated is the set of methods whose IdP session cookie a
-	// logout must clear front-channel. Empty means MethodsAllowed.
+	// MethodsFederated is the set of methods whose sign-out must also travel
+	// front-channel through the provider, clearing the session cookie it keeps
+	// in the browser. Empty means none: signing out ends this service's session
+	// and returns the browser to the application, and the provider's own
+	// session is left alone — for a directory provider that session is the
+	// person's whole estate (mail, documents, every other application), which
+	// an application's sign-out has no business ending. A profile whose
+	// provider keeps a short-lived SSO session on shared devices lists its
+	// methods here (the eParaksts profile does); a deployment adds methods
+	// with OIDC_UPSTREAM_METHODS_FEDERATED.
 	MethodsFederated []string
 }
 
@@ -218,10 +226,6 @@ func New(ctx context.Context, cfg Config, log *zap.Logger) (*Provider, error) {
 	if len(cfg.MethodsAllowed) == 0 && cfg.MethodDefault != "" {
 		cfg.MethodsAllowed = []string{cfg.MethodDefault}
 	}
-	if len(cfg.MethodsFederated) == 0 {
-		cfg.MethodsFederated = cfg.MethodsAllowed
-	}
-
 	p := &Provider{cfg: cfg, httpc: httpc, log: log, okSet: map[string]bool{}, fedSet: map[string]bool{}}
 	for _, m := range cfg.MethodsAllowed {
 		p.okSet[m] = true
@@ -261,9 +265,10 @@ func (p *Provider) Resolver() *identity.Resolver {
 // the upstream login path fails closed.
 func (p *Provider) MethodAllowed(method string) bool { return p.okSet[method] }
 
-// FederatedMethod reports whether the method authenticated through the
-// upstream IdP (and therefore set an IdP SSO cookie that a logout must clear
-// front-channel).
+// FederatedMethod reports whether a sign-out after this method must also
+// travel through the provider, clearing the session cookie it keeps in the
+// browser. The set is the profile's or the deployment's choice
+// (Config.MethodsFederated); a method outside it signs out locally.
 func (p *Provider) FederatedMethod(method string) bool { return p.fedSet[method] }
 
 // AuthorizeParams configures the authorization redirect.
