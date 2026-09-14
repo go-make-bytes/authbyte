@@ -5,6 +5,62 @@ runs the service or integrates against it.
 
 ## v0.1.2
 
+### Added — the generic connector verifies the provider's id_token
+
+When the upstream provider publishes a key set — its discovery document names a `jwks_uri`, as
+every mainstream provider's does, or `OIDC_UPSTREAM_JWKS_URL` and `OIDC_UPSTREAM_ISSUER` are set
+for a provider configured by explicit endpoints — every login must now carry an id_token that
+verifies: signed with one of the published keys (RS256 · PS256 · ES256 only), `iss` equal to the
+issuer, `aud` containing this client, `exp` and `iat` within `TOKEN_CLOCK_SKEW_LEEWAY`, the `nonce`
+this service sent with the authorize request, and a subject equal to userinfo's. A missing or
+failing id_token refuses the login — `401`, the reason in the login-failure audit event, no claim
+value in it. The id_token's claims win over userinfo's where both carry one, and its `acrs` join
+the `amr` list for the `LOA_POLICY` vocabulary. **Without a key set nothing changes**: the eParaksts
+profile and any provider with fixed paths and no `jwks_uri` stay userinfo-only.
+
+Two claim maps for an organisation whose people sign in through its own directory:
+`OIDC_UPSTREAM_CLAIM_DIRECTORY_ID` (default `sub`; `oid` for Microsoft Entra ID) names the durable
+identifier the person's credential is stored under, and `OIDC_UPSTREAM_CLAIM_ACCOUNT_STATUS`
+(`acct` for Entra) with `OIDC_UPSTREAM_ACCOUNT_STATUS_GUEST` (default `1`) tells a member of the
+directory from a guest in it.
+
+```
+OIDC_UPSTREAM_AUTHORITY_URL=https://login.microsoftonline.com/<tenant-id>/v2.0
+OIDC_UPSTREAM_SCOPES=openid profile email
+OIDC_UPSTREAM_CLAIM_SERIAL=            # empty: a directory carries no identity code
+OIDC_UPSTREAM_CLAIM_DIRECTORY_ID=oid
+OIDC_UPSTREAM_CLAIM_ACCOUNT_STATUS=acct
+OIDC_UPSTREAM_METHOD_DEFAULT=upstream
+OIDC_UPSTREAM_METHODS_ALLOWED=upstream
+OIDC_UPSTREAM_LOA_DEFAULT=low
+```
+
+**A login without an identity code is no longer refused.** The identity store creates the person
+without one, resolved by their credential on every later login; such a person stays separate from
+the same human's card login until linked by a deliberate act (a later release). Requires the
+platform database at `identity/V3` — against an older one the login is refused as before.
+
+### Added — a login through an organisation's directory is admitted into the tenant that attached it
+
+At token issue, a person who came through the upstream provider and holds no membership is offered
+to the membership register's admission door (`POST /api/v1/directory-admissions`, on the
+`membership:claim` scope this service already holds toward the register — **no registry change**):
+the tenant that attached that issuer as its directory admits them as an active member with **no
+grants**, and the token is minted for that tenant with an empty scope set — a member who holds
+nothing until an administrator assigns a role. A guest in the provider's directory is not offered
+and is refused as before (`403 err:membership:notMember`); so is everyone whose issuer no tenant
+attached. A person already holding a membership is never offered, so a refresh costs no extra
+call. **Requires a register release that exposes the door**: an older register answers `404`, and
+the issue fails closed (`502 err:upstream:unavailable`) for exactly the people who would have been
+admitted — deploy the register first.
+
+### Changed — two configured upstream families refuse to start
+
+Setting both `OIDC_UPSTREAM_*` and `EPARAKSTS_*` used to select the generic connector silently.
+The service now refuses to start: *two upstream identity providers are configured (OIDC_UPSTREAM_*
+and EPARAKSTS_*): this service runs exactly one — unset one family*. A deployment that carried
+eParaksts placeholders beside a generic connector removes them.
+
 ### Changed — the membership register is asked by the person's platform subject, never their identity code
 
 At token issue this service asks the membership register which organisations a person belongs to. It

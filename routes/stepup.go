@@ -118,6 +118,7 @@ func (r *router) stepUp(ctx *azugo.Context) {
 	}
 
 	state := randomToken(24)
+	oidcNonce := randomToken(24) // binds the provider's id_token to this step-up
 	flow := &session.Flow{
 		CodeChallenge:       req.CodeChallenge,
 		CodeChallengeMethod: "S256",
@@ -128,6 +129,7 @@ func (r *router) stepUp(ctx *azugo.Context) {
 		RequestedLogin:      req.Method,
 		SessionID:           req.SessionID,
 		ClientID:            req.ClientID,
+		Nonce:               oidcNonce,
 	}
 
 	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
@@ -141,6 +143,7 @@ func (r *router) stepUp(ctx *azugo.Context) {
 		RedirectURI: entrustRedirect,
 		ACRValues:   r.Config().ACRForMethod(req.Method),
 		Prompt:      "login", // force fresh authentication
+		Nonce:       oidcNonce,
 	})
 
 	ctx.JSON(stepUpRedirectResponse{Mode: stepUpModeRedirect, AuthorizeURL: url})

@@ -41,6 +41,14 @@ type fakeResolver struct {
 	memberships []rolebyte.Membership
 	err         error
 	asked       string // the subject key the seam passed down ("" = never asked)
+
+	// The admission door: what it answers, what it was asked, and what the
+	// register answers AFTER a successful admission.
+	admit       bool
+	admitErr    error
+	admittedKey string                   // the subject key offered ("" = never offered)
+	admitted    *rolebyte.DirectoryLogin // the login offered (nil = never offered)
+	afterAdmit  []rolebyte.Membership
 }
 
 func (f *fakeResolver) Memberships(_ *azugo.Context, subjectKey string) ([]rolebyte.Membership, error) {
@@ -48,8 +56,22 @@ func (f *fakeResolver) Memberships(_ *azugo.Context, subjectKey string) ([]roleb
 	if f.err != nil {
 		return nil, f.err
 	}
+	if f.admitted != nil && f.admit {
+		return f.afterAdmit, nil
+	}
 
 	return f.memberships, nil
+}
+
+func (f *fakeResolver) Admit(_ *azugo.Context, subjectKey string, login rolebyte.DirectoryLogin) (bool, error) {
+	f.admittedKey = subjectKey
+	l := login
+	f.admitted = &l
+	if f.admitErr != nil {
+		return false, f.admitErr
+	}
+
+	return f.admit, nil
 }
 
 // scopesApp exposes the real membership seams on scratch routes, so the mapping
@@ -77,6 +99,17 @@ func scopesApp(t *testing.T, resolver authbytecore.ScopeResolver) *azugo.TestApp
 		sess := &session.Session{
 			Subject: subject,
 			Scopes:  []string{"static:baseline"},
+		}
+		// A login through an organisation's directory: the issuer it came through,
+		// whether the provider called the person a guest there, and their name.
+		if iss := ctx.Query.StringOptional("issuer"); iss != nil {
+			sess.DirectoryIssuer = *iss
+		}
+		if g := ctx.Query.StringOptional("guest"); g != nil && *g == "1" {
+			sess.DirectoryGuest = true
+		}
+		if n := ctx.Query.StringOptional("name"); n != nil {
+			sess.Name = *n
 		}
 		client, tenant := "", ""
 		if c := ctx.Query.StringOptional("client"); c != nil {
@@ -195,13 +228,93 @@ func TestUserScopesUnknownClientFollowsTheRegister(t *testing.T) {
 	qt.Assert(t, qt.Not(qt.Equals(fake.asked, "")))
 }
 
-// No membership: token issue is refused — login is not access.
+// No membership: token issue is refused — login is not access. A login that
+// came through no directory (a card login) is offered to no admission door.
 func TestUserScopesNoMembershipRefuses(t *testing.T) {
-	app := scopesApp(t, &fakeResolver{})
+	fake := &fakeResolver{}
+	app := scopesApp(t, fake)
 
 	status, body := get(t, app, "/testonly/scopes?client=product-spa")
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusForbidden))
 	qt.Assert(t, qt.StringContains(body, `"code":"err:membership:notMember"`))
+	qt.Assert(t, qt.IsNil(fake.admitted))
+}
+
+// --- the attached directory -----------------------------------------------------
+
+const directoryIssuer = "https://login.example/tenant-id/v2.0"
+
+// A person who came through an organisation's directory and holds no
+// membership is offered to the register's admission door — by their typed
+// subject, with the issuer and the name the login carried — and, admitted, is
+// asked about again: the token carries the tenant that admitted them and no
+// scopes, a member who holds nothing until an administrator assigns a role.
+func TestUserScopesDirectoryPersonIsAdmittedThenResolved(t *testing.T) {
+	fake := &fakeResolver{admit: true, afterAdmit: []rolebyte.Membership{{TenantID: "01TENANTDIR", Scopes: []string{}}}}
+	app := scopesApp(t, fake)
+
+	status, body := get(t, app, "/testonly/scopes?client=product-spa&issuer="+directoryIssuer+"&name=Anna+Example&subject="+testPersonSub(5))
+	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%s", body))
+	qt.Assert(t, qt.StringContains(body, `"tenant":"01TENANTDIR"`))
+	qt.Assert(t, qt.StringContains(body, `"scopes":[]`))
+	qt.Assert(t, qt.Equals(fake.admittedKey, "sub:"+testPersonSub(5)))
+	qt.Assert(t, qt.IsNotNil(fake.admitted))
+	qt.Assert(t, qt.Equals(fake.admitted.Issuer, directoryIssuer))
+	qt.Assert(t, qt.Equals(fake.admitted.DisplayName, "Anna Example"))
+}
+
+// The door admits nobody (no tenant attached this issuer): the refusal is the
+// plain one — login is not access — and the register is not asked again.
+func TestUserScopesDirectoryPersonNobodyAttachedRefuses(t *testing.T) {
+	fake := &fakeResolver{admit: false}
+	app := scopesApp(t, fake)
+
+	status, body := get(t, app, "/testonly/scopes?client=product-spa&issuer="+directoryIssuer)
+	qt.Assert(t, qt.Equals(status, fasthttp.StatusForbidden))
+	qt.Assert(t, qt.StringContains(body, `"code":"err:membership:notMember"`))
+	qt.Assert(t, qt.IsNotNil(fake.admitted))
+}
+
+// A guest in the provider's directory is not offered to the door at all: a
+// tenant attached its own people, not its visitors. Refused like any stranger.
+func TestUserScopesDirectoryGuestIsNotOffered(t *testing.T) {
+	fake := &fakeResolver{admit: true, afterAdmit: []rolebyte.Membership{{TenantID: "01TENANTDIR", Scopes: []string{}}}}
+	app := scopesApp(t, fake)
+
+	status, body := get(t, app, "/testonly/scopes?client=product-spa&issuer="+directoryIssuer+"&guest=1")
+	qt.Assert(t, qt.Equals(status, fasthttp.StatusForbidden))
+	qt.Assert(t, qt.StringContains(body, `"code":"err:membership:notMember"`))
+	qt.Assert(t, qt.IsNil(fake.admitted))
+}
+
+// A person who already holds a membership is not offered again — the door is
+// for the first arrival only, and a refresh costs no extra register call.
+func TestUserScopesDirectoryMemberIsNotOfferedAgain(t *testing.T) {
+	fake := &fakeResolver{memberships: []rolebyte.Membership{member("01TENANTDIR", "projects:read")}}
+	app := scopesApp(t, fake)
+
+	status, body := get(t, app, "/testonly/scopes?client=product-spa&issuer="+directoryIssuer)
+	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK))
+	qt.Assert(t, qt.StringContains(body, `"projects:read"`))
+	qt.Assert(t, qt.IsNil(fake.admitted))
+}
+
+// The door unreachable: fail closed, like the resolve itself.
+func TestUserScopesDirectoryAdmissionFailureFailsClosed(t *testing.T) {
+	fake := &fakeResolver{admitErr: errors.New("connection refused")}
+	app := scopesApp(t, fake)
+
+	status, body := get(t, app, "/testonly/scopes?client=product-spa&issuer="+directoryIssuer)
+	qt.Assert(t, qt.Equals(status, fasthttp.StatusBadGateway))
+	qt.Assert(t, qt.StringContains(body, `"code":"err:upstream:unavailable"`))
+}
+
+// A session that carries no full name still hands the register a name: the
+// given and family names, else the subject — a membership row needs one.
+func TestSessionDisplayNameFallsBack(t *testing.T) {
+	qt.Assert(t, qt.Equals((&session.Session{Name: "Anna Example", GivenName: "A"}).DisplayName(), "Anna Example"))
+	qt.Assert(t, qt.Equals((&session.Session{GivenName: "Anna", FamilyName: "Example"}).DisplayName(), "Anna Example"))
+	qt.Assert(t, qt.Equals((&session.Session{Subject: testPersonSub(3)}).DisplayName(), testPersonSub(3)))
 }
 
 // Several memberships and none named: the person chooses — the token carries
