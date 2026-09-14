@@ -42,18 +42,9 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 		return membershipOutcome{scopes: sess.Scopes}, true
 	}
 
-	if sess.SerialNumber == "" {
-		// Without an identity code there is no register key to look up — and
-		// every supported login method provides one, so this is a wiring
-		// fault, not a person condition. Fail closed.
-		ctx.Log().Warn("membership resolve impossible — the login carries no identity code; refusing token issue")
-		ctx.Error(pkerrors.NewProblem("err:upstream:unavailable",
-			pkerrors.WithStatus(fasthttp.StatusBadGateway)))
-
-		return membershipOutcome{}, false
-	}
-
-	memberships, err := resolver.Memberships(ctx, rolebyte.PersonKey(sess.SerialNumber))
+	// The register key of a person is their platform subject, typed — the
+	// session always has one, whatever login method produced it.
+	memberships, err := resolver.Memberships(ctx, rolebyte.PersonKey(sess.Subject))
 	if err != nil {
 		// The register is unreachable or answered garbage: fail closed. The
 		// outbound helper surfaces no downstream body, so this is a produced

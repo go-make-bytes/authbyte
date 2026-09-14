@@ -54,6 +54,7 @@ func Init(a *authbytecore.App) error {
 	identityGroup := a.Group("/identity")
 	identityGroup.Use(a.AuthClient().Authenticate())
 	identityGroup.Get("", r.identity)
+	identityGroup.Post("/persons", r.registerPerson)
 
 	// Development conveniences (guarded by configuration; never on in prod).
 	if dir := a.Config().DemoDir; dir != "" {

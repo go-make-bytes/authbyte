@@ -90,8 +90,8 @@ type App struct {
 //     never consults the register. Service accounts that name a tenant at
 //     client_credentials are always resolved here.
 //
-// The subject is a typed key: a person's identity code (`pno:…`) or a service
-// account's client id (`svc:…`). Implemented by rolebyte.Resolver; the full
+// The subject is a typed key: a person's platform subject (`sub:…`, the token's
+// own `sub`) or a service account's client id (`svc:…`). Implemented by rolebyte.Resolver; the full
 // contract (answers, refusals, unreachability, compatibility) is in the
 // README's "Supported configurations" section.
 type ScopeResolver interface {
