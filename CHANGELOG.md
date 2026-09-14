@@ -5,6 +5,25 @@ runs the service or integrates against it.
 
 ## v0.1.2
 
+### Changed — signing out no longer ends a directory provider's session
+
+Signing out through `GET /logout` used to send every upstream login on through the provider's
+end-session endpoint, ending the session the provider keeps in the browser. That is right for a
+provider whose short-lived SSO session on a shared device would otherwise sign the next person in
+as the previous one — the eParaksts profile keeps doing it — and wrong for a directory provider,
+whose session is the person's whole estate: signing out of this application signed them out of
+their mail and documents too, after a page asking which account to sign out of. The generic
+connector now signs out **locally by default**: this service's session ends and the browser
+returns to `redirect_uri`; the provider's session is left alone. A deployment that wants the
+front-channel hop for a generic provider lists the methods:
+
+```
+OIDC_UPSTREAM_METHODS_FEDERATED=upstream
+```
+
+The logout audit event's `federated` attribute says which of the two happened. Nothing changes for
+the eParaksts profile.
+
 ### Added — the generic connector verifies the provider's id_token
 
 When the upstream provider publishes a key set — its discovery document names a `jwks_uri`, as

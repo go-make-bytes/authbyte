@@ -83,6 +83,32 @@ func TestEParakstsMethodGates(t *testing.T) {
 	qt.Check(t, qt.IsFalse(p.FederatedMethod(identity.LoginWebEID)))
 }
 
+// TestGenericProviderSignOutIsLocalByDefault pins the other half of that rule: a
+// generic provider federates no method unless told to. Signing out then ends this
+// service's session and returns the browser to the application, and the session
+// the provider keeps in the browser — for a directory, the person's whole estate —
+// is left alone. Listing the method in MethodsFederated opts the sign-out back
+// into the front-channel hop; the end-session URL itself is known either way,
+// because whether to go there is decided by FederatedMethod, not by LogoutURL.
+func TestGenericProviderSignOutIsLocalByDefault(t *testing.T) {
+	base := Config{
+		AuthorizeURL: "https://idp/a", TokenURL: "https://idp/t", UserInfoURL: "https://idp/u",
+		EndSessionURL: "https://idp/bye", ClientID: "cid", MethodDefault: "upstream",
+	}
+
+	p, err := New(context.Background(), base, nil)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(p.MethodAllowed("upstream")))
+	qt.Check(t, qt.IsFalse(p.FederatedMethod("upstream")))
+	qt.Check(t, qt.StringContains(p.LogoutURL("https://app/"), "https://idp/bye?"))
+
+	opted := base
+	opted.MethodsFederated = []string{"upstream"}
+	p, err = New(context.Background(), opted, nil)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(p.FederatedMethod("upstream")))
+}
+
 // TestDiscoveryResolvesEndpoints proves a generic provider with only an
 // authority URL takes its endpoints from the discovery document, and that the
 // end-session endpoint drives standard RP-initiated logout.

@@ -79,6 +79,14 @@ type Configuration struct {
 	OIDCUpstreamMethodPolicy   string `mapstructure:"oidc_upstream_method_policy"`
 	OIDCUpstreamMethodDefault  string `mapstructure:"oidc_upstream_method_default"`
 	OIDCUpstreamMethodsAllowed string `mapstructure:"oidc_upstream_methods_allowed"`
+	// OIDCUpstreamMethodsFederated is the comma-separated set of methods whose
+	// sign-out also travels through the provider's end-session endpoint, ending
+	// the session the provider keeps in the browser. Default: none — signing
+	// out ends this service's session and leaves the provider's alone (a
+	// directory provider's session is the person's whole estate). Set, it
+	// replaces the profile's own set; the eParaksts profile lists its methods
+	// itself and needs nothing here.
+	OIDCUpstreamMethodsFederated string `mapstructure:"oidc_upstream_methods_federated"`
 	// OIDCUpstreamLoADefault is the assurance level when no LoA-vocabulary
 	// token matches (default low; a deployment whose IdP enforces MFA may
 	// raise it deliberately).
@@ -271,6 +279,7 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("oidc_upstream_method_policy", "OIDC_UPSTREAM_METHOD_POLICY")
 	_ = v.BindEnv("oidc_upstream_method_default", "OIDC_UPSTREAM_METHOD_DEFAULT")
 	_ = v.BindEnv("oidc_upstream_methods_allowed", "OIDC_UPSTREAM_METHODS_ALLOWED")
+	_ = v.BindEnv("oidc_upstream_methods_federated", "OIDC_UPSTREAM_METHODS_FEDERATED")
 	_ = v.BindEnv("oidc_upstream_loa_default", "OIDC_UPSTREAM_LOA_DEFAULT")
 	_ = v.BindEnv("eparaksts_authority_url", "EPARAKSTS_AUTHORITY_URL")
 	_ = v.BindEnv("eparaksts_client_id", "EPARAKSTS_CLIENT_ID")
@@ -407,6 +416,9 @@ func (c *Configuration) UpstreamConfig() upstream.Config {
 	}
 	if l := splitList(c.OIDCUpstreamMethodsAllowed); len(l) > 0 {
 		cfg.MethodsAllowed = l
+	}
+	if l := splitList(c.OIDCUpstreamMethodsFederated); len(l) > 0 {
+		cfg.MethodsFederated = l
 	}
 	if lp := c.LoAPolicyMap(); len(lp) > 0 {
 		cfg.LoAPolicy = lp
