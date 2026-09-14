@@ -82,6 +82,16 @@ type Config struct {
 	// service refuses, which is the intended outcome — the alternative is
 	// filing a person under a guessed nationality, and a wrong identity key is
 	// the wrong person's documents.
+	//
+	// A PROVIDER PROFILE sets this, never a deployment: it is a statement
+	// about one provider's own claim format, which the people configuring a
+	// deployment cannot know better than the profile does. It is deliberately
+	// not exposed as a setting — one value covers every person who logs in
+	// through the provider, so a deployment whose users hold codes from more
+	// than one register would file some of them under the wrong one,
+	// canonically and with no error to notice. The remedy for a provider that
+	// sends bare codes is a claim mapping at that provider, where the identity
+	// type can be stated too.
 	Country string
 
 	// SignIdentityURL is the base URL (trailing slash included) of the

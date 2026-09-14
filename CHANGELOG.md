@@ -5,6 +5,24 @@ runs the service or integrates against it.
 
 ## v0.1.1
 
+### Removed — `OIDC_UPSTREAM_COUNTRY`
+
+The setting is gone. It supplied a country for an identity-code claim that carried none, so that a
+bare national code could be stored in the canonical `PNO<CC>-<code>` form. Two things were wrong with
+it: the variable was never bound to the configuration in the first place, so setting it had no effect
+and produced no warning; and the design was unsound even had it worked, because one value applies to
+every person who logs in through the provider. A deployment whose users hold codes from more than one
+national register would have filed some of them under another register's country — a perfectly valid
+key belonging to the wrong person, with nothing to notice it by.
+
+**If you set it:** nothing changes, because nothing was reading it. No deployment behaviour differs.
+
+**What the service does now:** the claim named by `OIDC_UPSTREAM_CLAIM_SERIAL` must carry an identity
+code that states its own country (`PNOLV-XXXXXXXXXXX`). A bare code refuses the login, as it already
+did. The remedy is a claim mapping at your identity provider, where the identity **type** can be
+stated alongside the country rather than assumed. Card login is unaffected: it takes the country from
+the card certificate's own subject attribute, which is a fact about the person holding the card.
+
 ### Added — tenant service accounts: a machine that is a member of an organisation
 
 A registered service client can now act **for an organisation** rather than only as itself. At
