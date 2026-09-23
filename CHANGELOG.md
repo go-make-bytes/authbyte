@@ -5,6 +5,22 @@ runs the service or integrates against it.
 
 ## v0.1.2
 
+### Changed — a token is minted only from a register answer about the person who signed in
+
+With a membership register wired, the register's resolve answer now has to name the subject it is
+about (`subjectKey`), and it has to be the subject asked about. An answer about anyone else, or one
+that names nobody, refuses the token instead of minting its memberships:
+
+```
+POST /token   (a user token, register wired)
+→ 502 { "code": "err:upstream:unavailable" }   when the register's answer is not about this person
+```
+
+Every resolve also writes one info line, `membership resolved`, with the key asked, the key
+answered for, and each membership's tenant and scopes. **Upgrade the register first:** a register
+that does not yet name its subject makes every login that needs a membership fail this way.
+
+
 ### Changed — signing out no longer ends a directory provider's session
 
 Signing out through `GET /logout` used to send every upstream login on through the provider's

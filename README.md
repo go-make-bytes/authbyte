@@ -64,6 +64,10 @@ combination below is a first-class configuration; none is a degraded form of ano
   is refused** (`403 err:membership:notMember` — the register, not the login, grants access);
   **one** is minted — its `group:level` scopes and its `tenant`; **several** are the person's to
   choose from (below). A product whose organisations decide who belongs runs this way.
+  The register's answer must name the person it is about (`subjectKey`) and be the one asked
+  about; an answer about anyone else, or about nobody, refuses the token (`502
+  err:upstream:unavailable`) rather than mint it, and each resolve logs who was asked and what
+  came back.
 - **Register wired, client admits anyone** (`membership_required: false` on the client's row):
   the client's people are minted the baseline and **the register is never asked about them** —
   a public portal in a deployment whose register exists for its machine members. Signing in

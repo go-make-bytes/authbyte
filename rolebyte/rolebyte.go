@@ -20,11 +20,13 @@
 package rolebyte
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 
 	"azugo.io/azugo"
+	"go.uber.org/zap"
 
 	"github.com/gmb-lib/go-authbyte/authclient"
 )
@@ -131,7 +133,33 @@ type membership struct {
 }
 
 type resolveResponse struct {
+	// SubjectKey is the key the register says this answer is about.
+	SubjectKey  string       `json:"subjectKey"`
 	Memberships []membership `json:"memberships"`
+}
+
+// errAnswerForAnotherSubject is a resolve answer that is not about the subject
+// asked about. Minting from it would hand one person another's access, so the
+// token issue fails closed instead.
+var errAnswerForAnotherSubject = errors.New("rolebyte: resolve answered for another subject")
+
+// answeredFor accepts the register's answer only when it names the subject that
+// was asked about. An answer that names nobody is refused the same way: a register
+// that does not say whom it answered for cannot be told apart from one that
+// answered for somebody else.
+func answeredFor(asked string, res resolveResponse) ([]Membership, error) {
+	// The register matches a key with surrounding whitespace trimmed, and names
+	// the key it matched.
+	if res.SubjectKey != strings.TrimSpace(asked) {
+		return nil, fmt.Errorf("%w: asked %q, answered %q", errAnswerForAnotherSubject, asked, res.SubjectKey)
+	}
+
+	out := make([]Membership, 0, len(res.Memberships))
+	for _, m := range res.Memberships {
+		out = append(out, Membership(m))
+	}
+
+	return out, nil
 }
 
 type claimRequest struct {
@@ -174,10 +202,16 @@ func (r *Resolver) Memberships(ctx *azugo.Context, subjectKey string) ([]Members
 		return nil, fmt.Errorf("rolebyte: resolve: %w", err)
 	}
 
-	out := make([]Membership, 0, len(res.Memberships))
+	// Who was asked about and what came back, on every resolve: if one person's
+	// login ever carries another's access, this line says whether the register
+	// answered for the wrong person or the answer was right and the fault lies
+	// after it.
+	tenants := make([]string, 0, len(res.Memberships))
 	for _, m := range res.Memberships {
-		out = append(out, Membership(m))
+		tenants = append(tenants, m.TenantID+"="+strings.Join(m.Scopes, ","))
 	}
+	ctx.Log().Info("membership resolved",
+		zap.String("asked", subjectKey), zap.String("answered_for", res.SubjectKey), zap.Strings("memberships", tenants))
 
-	return out, nil
+	return answeredFor(subjectKey, res)
 }
