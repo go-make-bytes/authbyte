@@ -1,6 +1,8 @@
 package authbytecore
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/go-quicktest/qt"
@@ -44,4 +46,86 @@ func TestDefaultsGiveDistinctACRs(t *testing.T) {
 	qt.Check(t, qt.Not(qt.Equals(mobile, eidScan)))
 	// No eid-card acr default — eID card is Web eID only.
 	qt.Check(t, qt.Equals(v.GetString("eparaksts_acr_eid"), ""))
+}
+
+// TestUpstreamConfigKeysBindToEnvironment proves that every upstream-connector
+// setting is actually REACHABLE from the environment — the property the type
+// system does not check and a reader cannot see.
+//
+// It is derived, not listed: the keys come from the struct's own mapstructure
+// tags, so a field added tomorrow is covered the day it is added rather than
+// the day someone remembers to extend a list. That is the whole point. The
+// defect it was written for was a field that existed at every layer — declared,
+// validated, applied to the connector, documented in the README — and had no
+// BindEnv call, so setting the documented variable did nothing and said
+// nothing. Nothing in the build could see it, because nothing in the build
+// reads an environment variable that is never bound.
+//
+// The convention this relies on, which holds for every key here: the
+// environment variable is the mapstructure key, upper-cased.
+// One upstream per deployment: the generic connector or the eParaksts profile,
+// never both — a second configured family used to be picked over silently,
+// which is how a misconfiguration goes unnoticed until somebody logs in through
+// the wrong provider. And never none.
+func TestValidateUpstreamRefusesTwoFamiliesAndNone(t *testing.T) {
+	both := Configuration{
+		OIDCUpstreamAuthorityURL: "https://login.example/tenant/v2.0", OIDCUpstreamClientID: "cid",
+		EparakstsAuthorityURL: "https://eparaksts.example", EparakstsClientID: "e",
+	}
+	err := both.validateUpstream()
+	qt.Assert(t, qt.IsNotNil(err))
+	qt.Assert(t, qt.StringContains(err.Error(), "two upstream identity providers"))
+
+	none := Configuration{}
+	qt.Assert(t, qt.IsNotNil(none.validateUpstream()))
+
+	generic := Configuration{OIDCUpstreamAuthorityURL: "https://login.example/tenant/v2.0", OIDCUpstreamClientID: "cid"}
+	qt.Assert(t, qt.IsNil(generic.validateUpstream()))
+
+	eparaksts := Configuration{EparakstsAuthorityURL: "https://eparaksts.example", EparakstsClientID: "e"}
+	qt.Assert(t, qt.IsNil(eparaksts.validateUpstream()))
+
+	// The explicit-endpoint form of the generic connector counts as configured too.
+	explicit := Configuration{
+		OIDCUpstreamAuthorizeURL: "https://idp.example/a", OIDCUpstreamTokenURL: "https://idp.example/t",
+		OIDCUpstreamUserInfoURL: "https://idp.example/u", OIDCUpstreamClientID: "cid",
+		EparakstsAuthorityURL: "https://eparaksts.example",
+	}
+	qt.Assert(t, qt.StringContains(explicit.validateUpstream().Error(), "two upstream identity providers"))
+}
+
+func TestUpstreamConfigKeysBindToEnvironment(t *testing.T) {
+	prefixes := []string{"oidc_upstream_", "eparaksts_"}
+
+	typ := reflect.TypeOf(Configuration{})
+	keys := make([]string, 0, typ.NumField())
+	for i := range typ.NumField() {
+		key := typ.Field(i).Tag.Get("mapstructure")
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(key, prefix) {
+				keys = append(keys, key)
+
+				break
+			}
+		}
+	}
+
+	// A guard on the guard: a refactor that renamed the fields away from these
+	// prefixes would otherwise leave this test passing over nothing at all.
+	qt.Assert(t, qt.IsTrue(len(keys) >= 10))
+
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			want := "probe-" + key
+			t.Setenv(strings.ToUpper(key), want)
+
+			v := viper.New()
+			NewConfiguration().Bind("", v)
+
+			qt.Check(t, qt.Equals(v.GetString(key), want),
+				qt.Commentf("%s is not bound to %s — add it to the BindEnv block; "+
+					"a field with no binding is invisible until an operator sets it and nothing happens",
+					key, strings.ToUpper(key)))
+		})
+	}
 }

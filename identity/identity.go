@@ -74,19 +74,34 @@ type UserInfo struct {
 	// carried no catalog (scope not granted / not requested); empty non-nil =
 	// the catalog was read and the person holds no identities.
 	SignIdentities []SignIdentity `json:"-"`
+	// Issuer is the identity provider these claims came from: the issuer the
+	// connector verified the id_token against, or the configured authority.
+	Issuer string `json:"-"`
+	// DirectoryID is the person's durable identifier at the provider — the
+	// handle their credential is stored under (the configured claim; the `sub`
+	// by default, so a provider without a better one behaves as it always did).
+	DirectoryID string `json:"-"`
+	// DirectoryGuest is true when the provider says the person is a guest in
+	// its directory rather than a member of it.
+	DirectoryGuest bool `json:"-"`
 }
 
 // Identity is the platform's normalized identity. Subject is the internal,
 // stable id (resolved by the mapping store from the IdP subject).
 type Identity struct {
 	Subject      string // internal subject id
-	IdPSubject   string // upstream IdP `sub`
+	IdPSubject   string // the handle this login's credential is stored under: the provider's durable identifier, else its `sub`
 	Name         string
 	GivenName    string
 	FamilyName   string
 	SerialNumber string
 	LoA          string
 	LoginMethod  string
+	// Issuer is the identity provider the login came through ("" for a login
+	// that did not come through an upstream provider); DirectoryGuest says the
+	// provider called the person a guest in its directory.
+	Issuer         string
+	DirectoryGuest bool
 }
 
 // Resolver maps IdP claims (acr + amr) to our internal login method + assurance
@@ -209,14 +224,21 @@ func indexPolicy(policy map[string]string) (map[string]string, []string) {
 func (r *Resolver) Resolve(u UserInfo) Identity {
 	method, loa := r.Interpret(u.ACR, u.AMR)
 
+	handle := u.DirectoryID
+	if handle == "" {
+		handle = u.Subject
+	}
+
 	return Identity{
-		IdPSubject:   u.Subject,
-		Name:         u.Name,
-		GivenName:    u.GivenName,
-		FamilyName:   u.FamilyName,
-		SerialNumber: u.SerialNumber,
-		LoA:          loa,
-		LoginMethod:  method,
+		IdPSubject:     handle,
+		Name:           u.Name,
+		GivenName:      u.GivenName,
+		FamilyName:     u.FamilyName,
+		SerialNumber:   u.SerialNumber,
+		LoA:            loa,
+		LoginMethod:    method,
+		Issuer:         u.Issuer,
+		DirectoryGuest: u.DirectoryGuest,
 	}
 }
 

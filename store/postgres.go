@@ -72,6 +72,21 @@ type Mapping struct {
 	SerialNumber string `json:"serial_number"`
 }
 
+// ProcedureError is a procedure's own refusal: the `<domain>:<reason>` code and
+// the message it answered with, whether it returned the error or raised it after
+// a write. A caller that can act on a particular refusal (a validation the caller
+// wants to answer as such, rather than as an outage) reads Code; everything else
+// treats it as an error like any other.
+type ProcedureError struct {
+	Procedure string
+	Code      string
+	Message   string
+}
+
+func (e *ProcedureError) Error() string {
+	return fmt.Sprintf("store: %s: %s: %s", e.Procedure, e.Code, e.Message)
+}
+
 // envelope is the structured result returned by every procedure
 // (util.result_success / util.result_error).
 type envelope struct {
@@ -104,7 +119,7 @@ func (s *Store) call(ctx context.Context, proc string, in any) (json.RawMessage,
 		if errors.As(err, &pgErr) && pgErr.Code == "P0001" {
 			var env envelope
 			if json.Unmarshal([]byte(pgErr.Message), &env) == nil && env.Result == "error" {
-				return nil, fmt.Errorf("store: %s: %s: %s", proc, env.Code, env.Message)
+				return nil, &ProcedureError{Procedure: proc, Code: env.Code, Message: env.Message}
 			}
 		}
 
@@ -116,7 +131,7 @@ func (s *Store) call(ctx context.Context, proc string, in any) (json.RawMessage,
 		return nil, fmt.Errorf("store: %s: decode result: %w", proc, err)
 	}
 	if env.Result != "success" {
-		return nil, fmt.Errorf("store: %s: %s: %s", proc, env.Code, env.Message)
+		return nil, &ProcedureError{Procedure: proc, Code: env.Code, Message: env.Message}
 	}
 
 	return env.Data, nil
@@ -153,6 +168,42 @@ func (s *Store) EnsureMapping(ctx context.Context, idpSubject string, p Profile)
 	}
 
 	return res.InternalSub, res.Created, nil
+}
+
+// Registration is a person an administrator registers before their first login:
+// the canonical identity code and whatever name is known. No credential.
+type Registration struct {
+	IdentityCode string
+	Name         string
+	GivenName    string
+	FamilyName   string
+}
+
+// Register creates the person row for somebody who has not logged in yet — or
+// answers the existing person's subject when the code is already known — via
+// the identity.register procedure. The returned bool is true only when THIS call
+// created the person. The procedure refuses a non-canonical code with a
+// ProcedureError whose Code is "identity:invalid".
+func (s *Store) Register(ctx context.Context, reg Registration) (string, bool, error) {
+	data, err := s.call(ctx, "identity.register", map[string]any{
+		"national_id": reg.IdentityCode,
+		"name":        reg.Name,
+		"given_name":  reg.GivenName,
+		"family_name": reg.FamilyName,
+	})
+	if err != nil {
+		return "", false, err
+	}
+
+	var res struct {
+		PersonSub string `json:"person_sub"`
+		Created   bool   `json:"created"`
+	}
+	if err := json.Unmarshal(data, &res); err != nil {
+		return "", false, fmt.Errorf("store: register: decode: %w", err)
+	}
+
+	return res.PersonSub, res.Created, nil
 }
 
 // Get reads an identity by internal subject (via the identity.get procedure).

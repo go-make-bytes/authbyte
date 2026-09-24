@@ -1,6 +1,7 @@
 package authbytecore
 
 import (
+	"os"
 	"testing"
 
 	"github.com/go-quicktest/qt"
@@ -21,8 +22,14 @@ func TestApp(tb testing.TB) *App {
 	tb.Setenv("ENVIRONMENT", "development")
 	tb.Setenv("AUTH_ISSUER_URL", "http://localhost:8080")
 	tb.Setenv("AUTH_USER_AUDIENCE", "portal-api")
-	tb.Setenv("EPARAKSTS_AUTHORITY_URL", "http://localhost:9999")
-	tb.Setenv("EPARAKSTS_CLIENT_ID", "test-client")
+	// The eParaksts profile is the default upstream for tests. A test that puts the
+	// generic connector in the environment first (OIDC_UPSTREAM_AUTHORITY_URL, or
+	// the three explicit endpoints) gets that one instead — the service refuses to
+	// start with both families configured, so only one may be set here.
+	if os.Getenv("OIDC_UPSTREAM_AUTHORITY_URL") == "" && os.Getenv("OIDC_UPSTREAM_AUTHORIZE_URL") == "" {
+		tb.Setenv("EPARAKSTS_AUTHORITY_URL", "http://localhost:9999")
+		tb.Setenv("EPARAKSTS_CLIENT_ID", "test-client")
+	}
 	tb.Setenv("BASE_URL", "http://localhost:8080")
 	tb.Setenv("POSTGRES_DSN", "postgres://localhost:5432/authbyte_test?sslmode=disable")
 	tb.Setenv("REDIS_URL", "redis://localhost:6379/0")

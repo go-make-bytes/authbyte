@@ -42,27 +42,33 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 		return membershipOutcome{scopes: sess.Scopes}, true
 	}
 
-	if sess.SerialNumber == "" {
-		// Without an identity code there is no register key to look up — and
-		// every supported login method provides one, so this is a wiring
-		// fault, not a person condition. Fail closed.
-		ctx.Log().Warn("membership resolve impossible — the login carries no identity code; refusing token issue")
-		ctx.Error(pkerrors.NewProblem("err:upstream:unavailable",
-			pkerrors.WithStatus(fasthttp.StatusBadGateway)))
-
-		return membershipOutcome{}, false
+	// The register key of a person is their platform subject, typed — the
+	// session always has one, whatever login method produced it.
+	key := rolebyte.PersonKey(sess.Subject)
+	memberships, err := resolver.Memberships(ctx, key)
+	if err != nil {
+		return r.registerUnavailable(ctx, err)
 	}
 
-	memberships, err := resolver.Memberships(ctx, rolebyte.PersonKey(sess.SerialNumber))
-	if err != nil {
-		// The register is unreachable or answered garbage: fail closed. The
-		// outbound helper surfaces no downstream body, so this is a produced
-		// upstream failure, not a relay.
-		ctx.Log().Warn("membership resolve failed — refusing token issue: " + err.Error())
-		ctx.Error(pkerrors.NewProblem("err:upstream:unavailable",
-			pkerrors.WithStatus(fasthttp.StatusBadGateway)))
-
-		return membershipOutcome{}, false
+	// A person who came through an organisation's own directory and holds no
+	// membership yet is offered to the register's admission door: the tenant
+	// that attached that issuer as its directory admits them as a member with
+	// no grants, and they are asked about again. Somebody the provider calls a
+	// guest in that directory is not offered — a tenant attached its own
+	// people, not its visitors — and is refused below like any other stranger.
+	if len(memberships) == 0 && sess.DirectoryIssuer != "" && !sess.DirectoryGuest {
+		admitted, err := resolver.Admit(ctx, key, rolebyte.DirectoryLogin{
+			Issuer:      sess.DirectoryIssuer,
+			DisplayName: sess.DisplayName(),
+		})
+		if err != nil {
+			return r.registerUnavailable(ctx, err)
+		}
+		if admitted {
+			if memberships, err = resolver.Memberships(ctx, key); err != nil {
+				return r.registerUnavailable(ctx, err)
+			}
+		}
 	}
 
 	chosen, choices := chooseMembership(memberships, tenantHint)
@@ -82,6 +88,18 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 	}
 
 	return membershipOutcome{scopes: chosen.Scopes, tenant: chosen.TenantID}, true
+}
+
+// registerUnavailable fails a token issue closed when the register is
+// unreachable or answered garbage. The outbound helper surfaces no downstream
+// body, so this is a produced upstream failure, not a relay — an empty-scope or
+// guessed-scope token is never minted.
+func (r *router) registerUnavailable(ctx *azugo.Context, err error) (membershipOutcome, bool) {
+	ctx.Log().Warn("membership resolve failed — refusing token issue: " + err.Error())
+	ctx.Error(pkerrors.NewProblem("err:upstream:unavailable",
+		pkerrors.WithStatus(fasthttp.StatusBadGateway)))
+
+	return membershipOutcome{}, false
 }
 
 // chooseMembership picks the membership a token is minted for: the named one

@@ -19,15 +19,34 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gmb-lib/go-authbyte/identitycode"
+	"github.com/gmb-lib/go-authbyte/jwks"
 	"github.com/gmb-lib/go-platform-kit/observability"
 	"github.com/go-make-bytes/authbyte/identity"
+	"github.com/golang-jwt/jwt/v5"
 
 	"go.uber.org/zap"
 )
+
+// ErrIDToken is returned when the provider is known to issue id_tokens (its key
+// set is known) and the login's id_token is missing or does not verify: the
+// signature against the provider's published keys, the issuer, the audience,
+// the times, the flow's nonce, or a subject that differs from userinfo's. A
+// login that produced it is refused — the provider's own assertion of who
+// logged in is the one thing the connector must not take on trust.
+//
+// It wraps the reason; the reason never carries a claim value.
+var ErrIDToken = errors.New("oidc: the provider's id_token did not verify")
+
+// idTokenAlgorithms is the allow-list of signature algorithms an id_token may
+// carry: asymmetric only. `none` and the HMAC family are refused — with HMAC the
+// key would be the client secret, and a token anyone holding it can mint proves
+// nothing about who logged in.
+var idTokenAlgorithms = []string{"RS256", "PS256", "ES256"}
 
 // ErrIdentityCode is returned when the provider's identity-code claim cannot be
 // reduced to the platform's canonical spelling — an identity type this platform
@@ -72,6 +91,34 @@ type Config struct {
 	// code (default "serial_number").
 	ClaimSerial string
 
+	// Issuer is the value the provider's id_token `iss` claim must carry, and
+	// the identity the platform records a login as having come through.
+	// Discovered (the document's `issuer`) unless set explicitly.
+	Issuer string
+	// JWKSURL is where the provider publishes the keys its id_tokens are signed
+	// with. Discovered (`jwks_uri`) unless set explicitly. When it is known the
+	// id_token path is ON: every login must carry an id_token that verifies, or
+	// it is refused. Empty — the eParaksts profile, a provider with fixed paths
+	// and no key set — means userinfo only, exactly as before the path existed.
+	JWKSURL string
+	// ClaimDirectoryID names the claim carrying the person's durable identifier
+	// at the provider — the handle their credential is stored under. Read from
+	// the id_token first, then userinfo. Default "sub"; Microsoft Entra ID's is
+	// `oid`, because its `sub` is pairwise per application registration and
+	// would change if the application were ever registered again.
+	ClaimDirectoryID string
+	// ClaimAccountStatus names the claim saying whether the person is a member
+	// of the provider's own directory or a guest in it (Entra: `acct`), and
+	// AccountStatusGuest is the value that marks a guest (default "1"). With no
+	// claim named, nobody is a guest. A guest is logged in like anyone else; it
+	// is only the admission into a tenant by its attached directory that the
+	// flag withholds — a tenant attached its own people, not its visitors.
+	ClaimAccountStatus string
+	AccountStatusGuest string
+	// ClockSkewLeeway is tolerated when checking an id_token's times (default
+	// 30s) — the same allowance this service grants its own tokens.
+	ClockSkewLeeway time.Duration
+
 	// Country is the two-letter country whose register issues the identity
 	// codes this provider authenticates people from — the country of the
 	// people it serves, not the country the deployment runs in.
@@ -82,6 +129,16 @@ type Config struct {
 	// service refuses, which is the intended outcome — the alternative is
 	// filing a person under a guessed nationality, and a wrong identity key is
 	// the wrong person's documents.
+	//
+	// A PROVIDER PROFILE sets this, never a deployment: it is a statement
+	// about one provider's own claim format, which the people configuring a
+	// deployment cannot know better than the profile does. It is deliberately
+	// not exposed as a setting — one value covers every person who logs in
+	// through the provider, so a deployment whose users hold codes from more
+	// than one register would file some of them under the wrong one,
+	// canonically and with no error to notice. The remedy for a provider that
+	// sends bare codes is a claim mapping at that provider, where the identity
+	// type can be stated too.
 	Country string
 
 	// SignIdentityURL is the base URL (trailing slash included) of the
@@ -104,8 +161,16 @@ type Config struct {
 	// a callback resolving to anything else is refused. Empty means: exactly
 	// {MethodDefault}, when MethodDefault is set.
 	MethodsAllowed []string
-	// MethodsFederated is the set of methods whose IdP session cookie a
-	// logout must clear front-channel. Empty means MethodsAllowed.
+	// MethodsFederated is the set of methods whose sign-out must also travel
+	// front-channel through the provider, clearing the session cookie it keeps
+	// in the browser. Empty means none: signing out ends this service's session
+	// and returns the browser to the application, and the provider's own
+	// session is left alone — for a directory provider that session is the
+	// person's whole estate (mail, documents, every other application), which
+	// an application's sign-out has no business ending. A profile whose
+	// provider keeps a short-lived SSO session on shared devices lists its
+	// methods here (the eParaksts profile does); a deployment adds methods
+	// with OIDC_UPSTREAM_METHODS_FEDERATED.
 	MethodsFederated []string
 }
 
@@ -116,6 +181,9 @@ type Provider struct {
 	log    *zap.Logger
 	fedSet map[string]bool
 	okSet  map[string]bool
+	// keys is the provider's published key set, cached and refreshed by kid;
+	// nil when no key set is known, in which case no id_token is read.
+	keys *jwks.Client
 }
 
 // New constructs the provider from its Config value. When endpoints are not
@@ -130,6 +198,15 @@ func New(ctx context.Context, cfg Config, log *zap.Logger) (*Provider, error) {
 	}
 	if cfg.ClaimSerial == "" {
 		cfg.ClaimSerial = "serial_number"
+	}
+	if cfg.ClaimDirectoryID == "" {
+		cfg.ClaimDirectoryID = "sub"
+	}
+	if cfg.AccountStatusGuest == "" {
+		cfg.AccountStatusGuest = "1"
+	}
+	if cfg.ClockSkewLeeway <= 0 {
+		cfg.ClockSkewLeeway = 30 * time.Second
 	}
 	cfg.AuthorityURL = strings.TrimSuffix(cfg.AuthorityURL, "/")
 
@@ -149,10 +226,6 @@ func New(ctx context.Context, cfg Config, log *zap.Logger) (*Provider, error) {
 	if len(cfg.MethodsAllowed) == 0 && cfg.MethodDefault != "" {
 		cfg.MethodsAllowed = []string{cfg.MethodDefault}
 	}
-	if len(cfg.MethodsFederated) == 0 {
-		cfg.MethodsFederated = cfg.MethodsAllowed
-	}
-
 	p := &Provider{cfg: cfg, httpc: httpc, log: log, okSet: map[string]bool{}, fedSet: map[string]bool{}}
 	for _, m := range cfg.MethodsAllowed {
 		p.okSet[m] = true
@@ -161,8 +234,25 @@ func New(ctx context.Context, cfg Config, log *zap.Logger) (*Provider, error) {
 		p.fedSet[m] = true
 	}
 
+	// The id_token path switches on with the provider's key set. A key set
+	// without an issuer to check the token against would verify a signature and
+	// nothing else — refused at startup rather than trusted at login.
+	if cfg.JWKSURL != "" {
+		if cfg.Issuer == "" {
+			return nil, fmt.Errorf("oidc: the provider publishes a key set (%s) but no issuer is known — set the issuer explicitly or let discovery supply it", cfg.JWKSURL)
+		}
+		p.keys = jwks.New(cfg.JWKSURL, time.Hour, jwks.WithHTTPClient(httpc))
+	}
+
 	return p, nil
 }
+
+// IDTokenVerified reports whether logins through this provider carry a verified
+// id_token: true when the provider's key set is known.
+func (p *Provider) IDTokenVerified() bool { return p.keys != nil }
+
+// Issuer is the identity provider's issuer as discovered or configured.
+func (p *Provider) Issuer() string { return p.cfg.Issuer }
 
 // Resolver builds the identity resolver carrying this provider's acr/amr
 // vocabularies and defaults.
@@ -175,9 +265,10 @@ func (p *Provider) Resolver() *identity.Resolver {
 // the upstream login path fails closed.
 func (p *Provider) MethodAllowed(method string) bool { return p.okSet[method] }
 
-// FederatedMethod reports whether the method authenticated through the
-// upstream IdP (and therefore set an IdP SSO cookie that a logout must clear
-// front-channel).
+// FederatedMethod reports whether a sign-out after this method must also
+// travel through the provider, clearing the session cookie it keeps in the
+// browser. The set is the profile's or the deployment's choice
+// (Config.MethodsFederated); a method outside it signs out locally.
 func (p *Provider) FederatedMethod(method string) bool { return p.fedSet[method] }
 
 // AuthorizeParams configures the authorization redirect.
@@ -189,6 +280,9 @@ type AuthorizeParams struct {
 	ACRValues string
 	UILocales string
 	Prompt    string
+	// Nonce binds the id_token the provider issues to this very flow: the
+	// value is kept with the flow and must come back inside the token.
+	Nonce string
 }
 
 // AuthorizeURL builds the URL to redirect the user to for authentication.
@@ -199,6 +293,9 @@ func (p *Provider) AuthorizeURL(params AuthorizeParams) string {
 	q.Set("state", params.State)
 	q.Set("redirect_uri", params.RedirectURI)
 	q.Set("scope", strings.Join(p.cfg.Scopes, " "))
+	if params.Nonce != "" {
+		q.Set("nonce", params.Nonce)
+	}
 	if params.ACRValues != "" {
 		q.Set("acr_values", params.ACRValues)
 	}
@@ -240,11 +337,19 @@ type tokenResponse struct {
 	AccessToken string `json:"access_token"`
 	TokenType   string `json:"token_type"`
 	ExpiresIn   int64  `json:"expires_in"`
+	IDToken     string `json:"id_token"`
 }
 
-// Exchange swaps an authorization code for an upstream access token using HTTP
+// Tokens is what the provider's token endpoint answered: the access token the
+// userinfo call rides, and the id_token when the provider issues one.
+type Tokens struct {
+	AccessToken string
+	IDToken     string
+}
+
+// Exchange swaps an authorization code for the provider's tokens using HTTP
 // Basic client authentication (confidential client).
-func (p *Provider) Exchange(ctx context.Context, code, redirectURI string) (string, error) {
+func (p *Provider) Exchange(ctx context.Context, code, redirectURI string) (Tokens, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("redirect_uri", redirectURI)
@@ -252,47 +357,167 @@ func (p *Provider) Exchange(ctx context.Context, code, redirectURI string) (stri
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.cfg.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", err
+		return Tokens{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
 	req.Header.Set("Authorization", p.basicAuth())
 
 	body, status, err := p.do(req)
 	if err != nil {
-		return "", err
+		return Tokens{}, err
 	}
 	if status/100 != 2 {
-		return "", fmt.Errorf("oidc: token exchange returned %d: %s", status, body)
+		return Tokens{}, fmt.Errorf("oidc: token exchange returned %d: %s", status, body)
 	}
 
 	var tr tokenResponse
 	if err := json.Unmarshal(body, &tr); err != nil {
-		return "", fmt.Errorf("oidc: invalid token response: %w", err)
+		return Tokens{}, fmt.Errorf("oidc: invalid token response: %w", err)
 	}
 
-	return tr.AccessToken, nil
+	return Tokens{AccessToken: tr.AccessToken, IDToken: tr.IDToken}, nil
+}
+
+// Claims turns the token endpoint's answer into the platform's identity claims.
+//
+// The userinfo call is always made — it is where the eParaksts profile's claims
+// live, and the standard home of the profile. When the provider's key set is
+// known (IDTokenVerified), the id_token is verified first and its claims win
+// where present: the signature against the published keys (asymmetric
+// algorithms only), the issuer, the audience (this client), the times with the
+// configured leeway, the flow's nonce, and its subject must equal userinfo's —
+// a userinfo answer about somebody else is not this login's. A missing or
+// failing id_token refuses the login (ErrIDToken). Without a known key set the
+// id_token is not read and the login behaves exactly as it did before this path
+// existed.
+//
+// Two further claims are read, id_token first: the person's durable identifier
+// at the provider (ClaimDirectoryID — the handle their credential is stored
+// under) and, when configured, the account status that tells a member of the
+// provider's directory from a guest in it. The id_token's `acrs` — the
+// authentication contexts the login satisfied, where a provider issues them —
+// are appended to the amr list, so the assurance vocabulary can map a context to
+// a level the same way it maps any other token.
+func (p *Provider) Claims(ctx context.Context, tokens Tokens, nonce string) (identity.UserInfo, error) {
+	body, err := p.userInfoBody(ctx, tokens.AccessToken)
+	if err != nil {
+		return identity.UserInfo{}, err
+	}
+	info, err := p.mapUserInfo(body)
+	if err != nil {
+		return info, err
+	}
+	info.Issuer = p.cfg.Issuer
+
+	var idClaims jwt.MapClaims
+	if p.keys != nil {
+		if tokens.IDToken == "" {
+			return info, fmt.Errorf("%w: the token response carried no id_token", ErrIDToken)
+		}
+		idClaims, err = p.verifyIDToken(ctx, tokens.IDToken, nonce)
+		if err != nil {
+			return info, err
+		}
+		if sub, _ := idClaims["sub"].(string); sub == "" || sub != info.Subject {
+			return info, fmt.Errorf("%w: the id_token subject differs from the userinfo subject", ErrIDToken)
+		}
+
+		if s := claimText(idClaims["given_name"]); s != "" {
+			info.GivenName = s
+		}
+		if s := claimText(idClaims["family_name"]); s != "" {
+			info.FamilyName = s
+		}
+		if s := claimText(idClaims["name"]); s != "" {
+			info.Name = s
+		}
+		if s := claimText(idClaims["acr"]); s != "" {
+			info.ACR = s
+		}
+		if amr := claimTexts(idClaims["amr"]); len(amr) > 0 {
+			info.AMR = amr
+		}
+		info.AMR = append(info.AMR, claimTexts(idClaims["acrs"])...)
+	}
+
+	info.DirectoryID = firstNonEmpty(
+		claimText(idClaims[p.cfg.ClaimDirectoryID]),
+		anyClaimText(body, p.cfg.ClaimDirectoryID),
+		info.Subject)
+	if p.cfg.ClaimAccountStatus != "" {
+		status := firstNonEmpty(
+			claimText(idClaims[p.cfg.ClaimAccountStatus]),
+			anyClaimText(body, p.cfg.ClaimAccountStatus))
+		info.DirectoryGuest = status != "" && status == p.cfg.AccountStatusGuest
+	}
+
+	return info, nil
+}
+
+// verifyIDToken checks the id_token the way the OpenID Connect Core rules for a
+// relying party require of a code flow: an allow-listed asymmetric algorithm,
+// the signature against the provider's published key for the token's kid, `iss`
+// equal to the provider's issuer, `aud` containing this client, `exp` present and
+// in the future and `iat` not in the future (both with the leeway), and the
+// `nonce` equal to the one this flow sent. The error never carries a claim value.
+func (p *Provider) verifyIDToken(ctx context.Context, raw, nonce string) (jwt.MapClaims, error) {
+	parser := jwt.NewParser(
+		jwt.WithValidMethods(idTokenAlgorithms),
+		jwt.WithIssuer(p.cfg.Issuer),
+		jwt.WithAudience(p.cfg.ClientID),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(p.cfg.ClockSkewLeeway),
+	)
+
+	claims := jwt.MapClaims{}
+	if _, err := parser.ParseWithClaims(raw, claims, func(t *jwt.Token) (any, error) {
+		kid, _ := t.Header["kid"].(string)
+
+		return p.keys.Key(ctx, kid)
+	}); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrIDToken, err)
+	}
+
+	if nonce != "" {
+		got, _ := claims["nonce"].(string)
+		if got != nonce {
+			return nil, fmt.Errorf("%w: the nonce does not match this login", ErrIDToken)
+		}
+	}
+
+	return claims, nil
 }
 
 // UserInfo fetches the authenticated user's claims and maps them onto the
 // platform's identity claims. Standard OIDC claims map by their registered
 // names; the identity-code claim name is configurable (ClaimSerial), and acr
 // may arrive as a string or — from some providers — an array (first value wins).
+// The id_token path builds on it: see Claims.
 func (p *Provider) UserInfo(ctx context.Context, accessToken string) (identity.UserInfo, error) {
-	var info identity.UserInfo
+	body, err := p.userInfoBody(ctx, accessToken)
+	if err != nil {
+		return identity.UserInfo{}, err
+	}
 
+	return p.mapUserInfo(body)
+}
+
+// userInfoBody fetches the raw userinfo document with the login's access token.
+func (p *Provider) userInfoBody(ctx context.Context, accessToken string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.UserInfoURL, nil)
 	if err != nil {
-		return info, err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
 
 	body, status, err := p.do(req)
 	if err != nil {
-		return info, err
+		return nil, err
 	}
 	if status/100 != 2 {
-		return info, fmt.Errorf("oidc: userinfo returned %d: %s", status, body)
+		return nil, fmt.Errorf("oidc: userinfo returned %d: %s", status, body)
 	}
 
 	// Debug aid: the full raw identity payload from the provider's userinfo.
@@ -301,6 +526,13 @@ func (p *Provider) UserInfo(ctx context.Context, accessToken string) (identity.U
 	if ce := p.log.Check(zap.DebugLevel, "upstream userinfo response"); ce != nil {
 		ce.Write(zap.Int("status", status), zap.ByteString("body", body))
 	}
+
+	return body, nil
+}
+
+// mapUserInfo maps a raw userinfo document onto the platform's identity claims.
+func (p *Provider) mapUserInfo(body []byte) (identity.UserInfo, error) {
+	var info identity.UserInfo
 
 	var raw struct {
 		Subject        string          `json:"sub"`
@@ -452,6 +684,74 @@ func stringClaim(body []byte, name string) string {
 	}
 
 	return s
+}
+
+// anyClaimText extracts one top-level claim by name from the raw userinfo
+// document as text, whatever JSON scalar it is — a provider writes an account
+// status as the number 0 or 1, and a claim map has to be able to name it.
+func anyClaimText(body []byte, name string) string {
+	if name == "" {
+		return ""
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return ""
+	}
+
+	return claimText(doc[name])
+}
+
+// claimText renders a JSON scalar claim as text: a string as it is, a number
+// without a fraction where it has none, a boolean as true/false. Anything else
+// — an object, an array, nothing — is "".
+func claimText(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case json.Number:
+		return x.String()
+	case bool:
+		return strconv.FormatBool(x)
+	default:
+		return ""
+	}
+}
+
+// claimTexts renders a claim that is an array of scalars (amr, acrs) as texts;
+// a lone scalar is one entry. Nothing else contributes.
+func claimTexts(v any) []string {
+	switch x := v.(type) {
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, e := range x {
+			if s := claimText(e); s != "" {
+				out = append(out, s)
+			}
+		}
+
+		return out
+	case nil:
+		return nil
+	default:
+		if s := claimText(x); s != "" {
+			return []string{s}
+		}
+
+		return nil
+	}
+}
+
+// firstNonEmpty answers the first of its arguments that is not "".
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+
+	return ""
 }
 
 // acrString accepts acr as a JSON string or an array of strings (first wins).

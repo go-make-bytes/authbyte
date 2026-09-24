@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -43,6 +44,10 @@ type Flow struct {
 	// began (`/authorize?tenant=`). Carried to the token issue so that, when the
 	// person holds several memberships, the choice is theirs — never guessed.
 	Tenant string `json:"tenant,omitempty"`
+	// Nonce is the value sent to the upstream provider with the authorize
+	// request; the id_token it issues must carry it back, which binds that
+	// token to this flow and nothing else. Empty for a card login.
+	Nonce string `json:"nonce,omitempty"`
 }
 
 // AppCode binds an issued application authorization code (Auth→SPA) to the
@@ -82,6 +87,29 @@ type Session struct {
 	// the upstream provides one. nil = not captured (the signing-time fallback
 	// resolves identities itself).
 	Capabilities *Capabilities `json:"capabilities,omitempty"`
+	// DirectoryIssuer is the identity provider the session's login came through
+	// ("" for a card login). At token issue a person who holds no membership
+	// yet is offered to the register's admission door with it: the tenant that
+	// attached this issuer as its directory admits them as a member with no
+	// grants. DirectoryGuest withholds that — the provider called the person a
+	// guest in its directory, and a tenant attached its own people, not its
+	// visitors; such a login is refused exactly as any other stranger's.
+	DirectoryIssuer string `json:"directory_issuer,omitempty"`
+	DirectoryGuest  bool   `json:"directory_guest,omitempty"`
+}
+
+// DisplayName is the name a register shows for the person: the full name the
+// login carried, else the given and family names, else the subject itself —
+// never empty, because a membership row needs one.
+func (s *Session) DisplayName() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	if n := strings.TrimSpace(s.GivenName + " " + s.FamilyName); n != "" {
+		return n
+	}
+
+	return s.Subject
 }
 
 // Capabilities is the signing capability set derived at login from the

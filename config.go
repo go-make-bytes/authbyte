@@ -56,13 +56,22 @@ type Configuration struct {
 	// OIDCUpstreamClaimSerial names the userinfo claim carrying the person's
 	// identity code (default serial_number).
 	OIDCUpstreamClaimSerial string `mapstructure:"oidc_upstream_claim_serial"`
-	// OIDCUpstreamCountry is the two-letter country whose register issues the
-	// identity codes this provider's people hold. It is used only when the
-	// claim carries no country of its own — a claim that states one is
-	// believed. Leave it unset for a provider whose claim always carries the
-	// country; a bare code with no country configured is refused rather than
-	// filed under a guess. The eParaksts profile sets LV for itself.
-	OIDCUpstreamCountry string `mapstructure:"oidc_upstream_country" validate:"omitempty,len=2,alpha"`
+	// The id_token path. OIDCUpstreamIssuer is the value the provider's id_token
+	// `iss` must carry and OIDCUpstreamJWKSURL where its signing keys are
+	// published — both discovered from the provider's document unless set here
+	// (a provider configured by explicit endpoints has no document to discover
+	// them from). With a key set known, every login must carry an id_token that
+	// verifies; without one, userinfo alone is read, as before.
+	OIDCUpstreamIssuer  string `mapstructure:"oidc_upstream_issuer" validate:"omitempty,url"`
+	OIDCUpstreamJWKSURL string `mapstructure:"oidc_upstream_jwks_url" validate:"omitempty,url"`
+	// OIDCUpstreamClaimDirectoryID names the claim carrying the person's durable
+	// identifier at the provider (default sub; Microsoft Entra ID: oid).
+	// OIDCUpstreamClaimAccountStatus names the claim telling a member of the
+	// provider's directory from a guest in it (Entra: acct), and
+	// OIDCUpstreamAccountStatusGuest the value marking a guest (default 1).
+	OIDCUpstreamClaimDirectoryID   string `mapstructure:"oidc_upstream_claim_directory_id"`
+	OIDCUpstreamClaimAccountStatus string `mapstructure:"oidc_upstream_claim_account_status"`
+	OIDCUpstreamAccountStatusGuest string `mapstructure:"oidc_upstream_account_status_guest"`
 	// OIDCUpstreamMethodPolicy maps acr/amr tokens to login methods
 	// ("substr=method,substr=method", longest token wins); MethodDefault is
 	// the method when nothing matches; MethodsAllowed is the comma-separated
@@ -70,6 +79,14 @@ type Configuration struct {
 	OIDCUpstreamMethodPolicy   string `mapstructure:"oidc_upstream_method_policy"`
 	OIDCUpstreamMethodDefault  string `mapstructure:"oidc_upstream_method_default"`
 	OIDCUpstreamMethodsAllowed string `mapstructure:"oidc_upstream_methods_allowed"`
+	// OIDCUpstreamMethodsFederated is the comma-separated set of methods whose
+	// sign-out also travels through the provider's end-session endpoint, ending
+	// the session the provider keeps in the browser. Default: none — signing
+	// out ends this service's session and leaves the provider's alone (a
+	// directory provider's session is the person's whole estate). Set, it
+	// replaces the profile's own set; the eParaksts profile lists its methods
+	// itself and needs nothing here.
+	OIDCUpstreamMethodsFederated string `mapstructure:"oidc_upstream_methods_federated"`
 	// OIDCUpstreamLoADefault is the assurance level when no LoA-vocabulary
 	// token matches (default low; a deployment whose IdP enforces MFA may
 	// raise it deliberately).
@@ -254,9 +271,15 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("oidc_upstream_userinfo_url", "OIDC_UPSTREAM_USERINFO_URL")
 	_ = v.BindEnv("oidc_upstream_end_session_url", "OIDC_UPSTREAM_END_SESSION_URL")
 	_ = v.BindEnv("oidc_upstream_claim_serial", "OIDC_UPSTREAM_CLAIM_SERIAL")
+	_ = v.BindEnv("oidc_upstream_issuer", "OIDC_UPSTREAM_ISSUER")
+	_ = v.BindEnv("oidc_upstream_jwks_url", "OIDC_UPSTREAM_JWKS_URL")
+	_ = v.BindEnv("oidc_upstream_claim_directory_id", "OIDC_UPSTREAM_CLAIM_DIRECTORY_ID")
+	_ = v.BindEnv("oidc_upstream_claim_account_status", "OIDC_UPSTREAM_CLAIM_ACCOUNT_STATUS")
+	_ = v.BindEnv("oidc_upstream_account_status_guest", "OIDC_UPSTREAM_ACCOUNT_STATUS_GUEST")
 	_ = v.BindEnv("oidc_upstream_method_policy", "OIDC_UPSTREAM_METHOD_POLICY")
 	_ = v.BindEnv("oidc_upstream_method_default", "OIDC_UPSTREAM_METHOD_DEFAULT")
 	_ = v.BindEnv("oidc_upstream_methods_allowed", "OIDC_UPSTREAM_METHODS_ALLOWED")
+	_ = v.BindEnv("oidc_upstream_methods_federated", "OIDC_UPSTREAM_METHODS_FEDERATED")
 	_ = v.BindEnv("oidc_upstream_loa_default", "OIDC_UPSTREAM_LOA_DEFAULT")
 	_ = v.BindEnv("eparaksts_authority_url", "EPARAKSTS_AUTHORITY_URL")
 	_ = v.BindEnv("eparaksts_client_id", "EPARAKSTS_CLIENT_ID")
@@ -316,16 +339,27 @@ func (c *Configuration) Validate(valid *validation.Validate) error {
 		return err
 	}
 
-	// Exactly one upstream provider per deployment: the generic connector
-	// (OIDC_UPSTREAM_AUTHORITY_URL, or a full explicit endpoint set) or the
-	// eParaksts profile (EPARAKSTS_AUTHORITY_URL). Fail closed at startup —
-	// an authorization server with no upstream cannot log anyone in.
+	return c.validateUpstream()
+}
+
+// validateUpstream holds the one-upstream rule. Exactly one upstream provider
+// per deployment: the generic connector (OIDC_UPSTREAM_AUTHORITY_URL, or a full
+// explicit endpoint set) or the eParaksts profile (EPARAKSTS_AUTHORITY_URL).
+// Fail closed at startup — an authorization server with no upstream cannot log
+// anyone in, and one with two configured would have to pick silently, which is
+// how a misconfiguration goes unnoticed until somebody logs in through the wrong
+// provider. A deployment that needs several providers side by side is a
+// different composition of this service, configured as a list, not two families
+// of variables.
+func (c *Configuration) validateUpstream() error {
 	genericByEndpoints := c.OIDCUpstreamAuthorizeURL != "" && c.OIDCUpstreamTokenURL != "" && c.OIDCUpstreamUserInfoURL != ""
 	generic := c.OIDCUpstreamAuthorityURL != "" || genericByEndpoints
 	eparaksts := c.EparakstsAuthorityURL != ""
 	switch {
 	case !generic && !eparaksts:
 		return fmt.Errorf("no upstream identity provider configured: set OIDC_UPSTREAM_AUTHORITY_URL (generic OIDC) or EPARAKSTS_AUTHORITY_URL (eParaksts profile)")
+	case generic && eparaksts:
+		return fmt.Errorf("two upstream identity providers are configured (OIDC_UPSTREAM_* and EPARAKSTS_*): this service runs exactly one — unset one family")
 	case generic && c.OIDCUpstreamClientID == "":
 		return fmt.Errorf("OIDC_UPSTREAM_CLIENT_ID is required with the generic OIDC upstream")
 	case !generic && eparaksts && c.EparakstsClientID == "":
@@ -353,6 +387,8 @@ func (c *Configuration) UpstreamConfig() upstream.Config {
 			TokenURL:      c.OIDCUpstreamTokenURL,
 			UserInfoURL:   c.OIDCUpstreamUserInfoURL,
 			EndSessionURL: c.OIDCUpstreamEndSessionURL,
+			Issuer:        c.OIDCUpstreamIssuer,
+			JWKSURL:       c.OIDCUpstreamJWKSURL,
 			MethodDefault: "upstream",
 		}
 	} else {
@@ -368,9 +404,10 @@ func (c *Configuration) UpstreamConfig() upstream.Config {
 	if c.OIDCUpstreamClaimSerial != "" {
 		cfg.ClaimSerial = c.OIDCUpstreamClaimSerial
 	}
-	if c.OIDCUpstreamCountry != "" {
-		cfg.Country = c.OIDCUpstreamCountry
-	}
+	cfg.ClaimDirectoryID = c.OIDCUpstreamClaimDirectoryID
+	cfg.ClaimAccountStatus = c.OIDCUpstreamClaimAccountStatus
+	cfg.AccountStatusGuest = c.OIDCUpstreamAccountStatusGuest
+	cfg.ClockSkewLeeway = c.TokenClockSkewLeeway
 	if m := parsePairs(c.OIDCUpstreamMethodPolicy); len(m) > 0 {
 		cfg.MethodPolicy = m
 	}
@@ -379,6 +416,9 @@ func (c *Configuration) UpstreamConfig() upstream.Config {
 	}
 	if l := splitList(c.OIDCUpstreamMethodsAllowed); len(l) > 0 {
 		cfg.MethodsAllowed = l
+	}
+	if l := splitList(c.OIDCUpstreamMethodsFederated); len(l) > 0 {
+		cfg.MethodsFederated = l
 	}
 	if lp := c.LoAPolicyMap(); len(lp) > 0 {
 		cfg.LoAPolicy = lp
