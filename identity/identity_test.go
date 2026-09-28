@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/go-quicktest/qt"
@@ -88,8 +89,8 @@ func TestInterpretMethod(t *testing.T) {
 }
 
 // TestResolveBindsPermittedFlows proves the end-to-end binding: a mobileid AMR
-// resolves to eParaksts Mobile, which permits the cloud/eSeal/csc flows (and not
-// the eID or Web eID flows).
+// resolves to eParaksts Mobile, which permits the cloud and eSeal flows (and not
+// the eID, Web eID or CSC flows — CSC authenticates with the eID card only).
 func TestResolveBindsPermittedFlows(t *testing.T) {
 	r := NewResolver(nil)
 	id := r.Resolve(UserInfo{
@@ -99,7 +100,10 @@ func TestResolveBindsPermittedFlows(t *testing.T) {
 
 	qt.Check(t, qt.Equals(id.LoginMethod, LoginEParakstsMobile))
 	qt.Check(t, qt.DeepEquals(BindingResolver{}.PermittedFlows(id.LoginMethod),
-		[]string{FlowEParakstsMobile, FlowEParakstsMobileEseal, FlowCSC}))
+		[]string{FlowEParakstsMobile, FlowEParakstsMobileEseal}))
+	for _, csc := range []string{FlowCSCEidScan, FlowCSCEidPlugin} {
+		qt.Check(t, qt.IsFalse(slices.Contains(BindingResolver{}.PermittedFlows(LoginEParakstsMobile), csc)))
+	}
 }
 
 // TestEIDScanBinding proves eID Scan resolves to its own login method and binds

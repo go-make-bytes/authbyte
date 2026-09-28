@@ -3,6 +3,21 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.2.0
+
+### Changed — an eParaksts Mobile login no longer permits the CSC signing flow
+
+The CSC remote-signing flow authenticates with the eID card only (read by a phone, or in a card reader), so
+it is no longer among the flows an eParaksts Mobile login may drive. The single `csc` flow name is also
+retired in favour of two, `cscEidScan` and `cscEidPlugin`, named for how the card is read. The session's
+`permitted_flows` for an eParaksts Mobile login:
+
+```json
+{ "login_method": "eparakstsMobile", "permitted_flows": ["eparakstsMobile", "eparakstsMobileEseal"] }
+```
+
+A Web eID or eID Scan login permits what it did before.
+
 ## v0.1.2
 
 ### Changed — a token is minted only from a register answer about the person who signed in

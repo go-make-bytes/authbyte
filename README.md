@@ -270,7 +270,7 @@ The `identity` package is the anti-corruption layer between the identity provide
 |---|---|---|---|---|
 | `webEid` | (validated by the web-eid engine) | `high` | `webEid` | permitted (card login) |
 | `eidScan` | `mobile-eid` | `high` | `eidScan` | permitted |
-| `eparakstsMobile` | `mobileid` \| `smart_id` \| `cloud` | `high` | `eparakstsMobile`, `eparakstsMobileEseal`, `csc` | permitted |
+| `eparakstsMobile` | `mobileid` \| `smart_id` \| `cloud` | `high` | `eparakstsMobile`, `eparakstsMobileEseal` | permitted |
 | `eid` | `sc_plugin` \| `smartcard` | — | none | **rejected** — eID card must use Web eID |
 
 The `login_method` value is one camelCase literal shared by name with the signing service, so a login and the signature it authorises correlate on a single token. The binding **fails closed**: an unknown or empty method — and the plugin `eid` path — permits nothing. Two independent guards enforce the "eID card is Web eID only" rule: the callback rejects a login that resolves to `eid` with 403 even if the identity provider's page offered it, and the built-in login-method policy never maps a bare `eid`. Assurance-level and method vocabularies can be overridden per environment (`LOA_POLICY`) once production's exact `acr` values are confirmed.
