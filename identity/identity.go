@@ -309,11 +309,14 @@ const (
 )
 
 // BindingResolver implements the login-method ↔ signing-flow binding: each login
-// method permits a specific set of signing flows. eParaksts Mobile is the only
-// method that authorizes more than one (its personal cloud signature and the
-// mobile-bound organisation eSeal); a Web eID login and an eID Scan login each
-// bind to their own single flow and do not cross over. The CSC flows authenticate
-// with the eID card only, so no eParaksts Mobile login reaches them.
+// method permits a specific set of signing flows. A card login permits two ways to
+// sign with the card, both reading it the way the login did: a Web eID login (the
+// card in a reader) permits Web eID and the CSC flow through the provider's browser
+// extension; an eID Scan login (the card read by a phone) permits eID Scan and the
+// CSC flow read by eID Scan. The two card logins do not cross over. eParaksts Mobile
+// permits its personal cloud signature and the mobile-bound organisation eSeal; the
+// CSC flows authenticate with the eID card only, so no eParaksts Mobile login
+// reaches them.
 type BindingResolver struct{}
 
 // PermittedFlows returns the signing flows a login method may drive. An unknown
@@ -322,9 +325,9 @@ type BindingResolver struct{}
 func (BindingResolver) PermittedFlows(loginMethod string) []string {
 	switch loginMethod {
 	case LoginWebEID:
-		return []string{FlowWebEID}
+		return []string{FlowWebEID, FlowCSCEidPlugin}
 	case LoginEIDScan:
-		return []string{FlowEIDScan}
+		return []string{FlowEIDScan, FlowCSCEidScan}
 	case LoginEParakstsMobile:
 		return []string{FlowEParakstsMobile, FlowEParakstsMobileEseal}
 	default:

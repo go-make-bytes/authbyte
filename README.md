@@ -268,12 +268,12 @@ The `identity` package is the anti-corruption layer between the identity provide
 
 | Login method (`login_method`) | Recognised token | Assurance | Permitted signing flows | Status |
 |---|---|---|---|---|
-| `webEid` | (validated by the web-eid engine) | `high` | `webEid` | permitted (card login) |
-| `eidScan` | `mobile-eid` | `high` | `eidScan` | permitted |
+| `webEid` | (validated by the web-eid engine) | `high` | `webEid`, `cscEidPlugin` | permitted (card login) |
+| `eidScan` | `mobile-eid` | `high` | `eidScan`, `cscEidScan` | permitted |
 | `eparakstsMobile` | `mobileid` \| `smart_id` \| `cloud` | `high` | `eparakstsMobile`, `eparakstsMobileEseal` | permitted |
 | `eid` | `sc_plugin` \| `smartcard` | — | none | **rejected** — eID card must use Web eID |
 
-The `login_method` value is one camelCase literal shared by name with the signing service, so a login and the signature it authorises correlate on a single token. The binding **fails closed**: an unknown or empty method — and the plugin `eid` path — permits nothing. Two independent guards enforce the "eID card is Web eID only" rule: the callback rejects a login that resolves to `eid` with 403 even if the identity provider's page offered it, and the built-in login-method policy never maps a bare `eid`. Assurance-level and method vocabularies can be overridden per environment (`LOA_POLICY`) once production's exact `acr` values are confirmed.
+A card login permits the CSC signing flow that reads the card the same way the login did — the card in a reader for Web eID, read by a phone for eID Scan — and never the other card route. The `login_method` value is one camelCase literal shared by name with the signing service, so a login and the signature it authorises correlate on a single token. The binding **fails closed**: an unknown or empty method — and the plugin `eid` path — permits nothing. Two independent guards enforce the "eID card is Web eID only" rule: the callback rejects a login that resolves to `eid` with 403 even if the identity provider's page offered it, and the built-in login-method policy never maps a bare `eid`. Assurance-level and method vocabularies can be overridden per environment (`LOA_POLICY`) once production's exact `acr` values are confirmed.
 
 **Step-up** re-authenticates in place: it elevates the *existing* session rather than creating a new one, and enforces that the method actually achieved matches the one requested — so a user cannot "step up" to a stronger method yet authenticate with the old one and keep the binding unchanged.
 

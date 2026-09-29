@@ -5,6 +5,17 @@ runs the service or integrates against it.
 
 ## v0.2.0
 
+### Changed — each card login also permits the CSC flow that reads the card its way
+
+A Web eID login (the card in a reader) now permits `cscEidPlugin` besides `webEid`; an eID Scan login (the card
+read by a phone) permits `cscEidScan` besides `eidScan`. Neither login reaches the other card route. The
+session's `permitted_flows`:
+
+```json
+{ "login_method": "webEid",  "permitted_flows": ["webEid", "cscEidPlugin"] }
+{ "login_method": "eidScan", "permitted_flows": ["eidScan", "cscEidScan"] }
+```
+
 ### Changed — an eParaksts Mobile login no longer permits the CSC signing flow
 
 The CSC remote-signing flow authenticates with the eID card only (read by a phone, or in a card reader), so
@@ -16,7 +27,7 @@ retired in favour of two, `cscEidScan` and `cscEidPlugin`, named for how the car
 { "login_method": "eparakstsMobile", "permitted_flows": ["eparakstsMobile", "eparakstsMobileEseal"] }
 ```
 
-A Web eID or eID Scan login permits what it did before.
+A Web eID or eID Scan login permits the CSC flow that reads its card the same way (above).
 
 ## v0.1.2
 
