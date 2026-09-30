@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/go-quicktest/qt"
@@ -88,8 +89,8 @@ func TestInterpretMethod(t *testing.T) {
 }
 
 // TestResolveBindsPermittedFlows proves the end-to-end binding: a mobileid AMR
-// resolves to eParaksts Mobile, which permits the cloud/eSeal/csc flows (and not
-// the eID or Web eID flows).
+// resolves to eParaksts Mobile, which permits the cloud and eSeal flows (and not
+// the eID, Web eID or CSC flows — CSC authenticates with the eID card only).
 func TestResolveBindsPermittedFlows(t *testing.T) {
 	r := NewResolver(nil)
 	id := r.Resolve(UserInfo{
@@ -99,11 +100,15 @@ func TestResolveBindsPermittedFlows(t *testing.T) {
 
 	qt.Check(t, qt.Equals(id.LoginMethod, LoginEParakstsMobile))
 	qt.Check(t, qt.DeepEquals(BindingResolver{}.PermittedFlows(id.LoginMethod),
-		[]string{FlowEParakstsMobile, FlowEParakstsMobileEseal, FlowCSC}))
+		[]string{FlowEParakstsMobile, FlowEParakstsMobileEseal}))
+	for _, csc := range []string{FlowCSCEidScan, FlowCSCEidPlugin} {
+		qt.Check(t, qt.IsFalse(slices.Contains(BindingResolver{}.PermittedFlows(LoginEParakstsMobile), csc)))
+	}
 }
 
 // TestEIDScanBinding proves eID Scan resolves to its own login method and binds
-// to its own single signing flow (it no longer shares one with Web eID).
+// to its own signing flows: eID Scan, and the CSC flow that reads the card the same
+// way (it shares neither with Web eID).
 func TestEIDScanBinding(t *testing.T) {
 	id := NewResolver(nil).Resolve(UserInfo{
 		ACR: "urn:eparaksts:authentication:flow:mobile-eid",
@@ -111,19 +116,32 @@ func TestEIDScanBinding(t *testing.T) {
 	})
 
 	qt.Check(t, qt.Equals(id.LoginMethod, LoginEIDScan))
-	qt.Check(t, qt.DeepEquals(BindingResolver{}.PermittedFlows(LoginEIDScan), []string{FlowEIDScan}))
+	qt.Check(t, qt.DeepEquals(BindingResolver{}.PermittedFlows(LoginEIDScan), []string{FlowEIDScan, FlowCSCEidScan}))
 	qt.Check(t, qt.Equals(id.LoA, LoAHigh)) // mobile-eid is a QSCD method
 }
 
 // TestWebEIDBinding proves the Web eID card login (set directly by the Web eID
-// adapter, not via the AMR resolver) binds to its own Web eID signing flow, and
+// adapter, not via the AMR resolver) binds to its own Web eID signing flow and the
+// CSC flow that reads the card in a reader too, and
 // that a login method that permits nothing (legacy plugin eID / unknown / empty)
 // fails closed.
 func TestWebEIDBinding(t *testing.T) {
-	qt.Check(t, qt.DeepEquals(BindingResolver{}.PermittedFlows(LoginWebEID), []string{FlowWebEID}))
+	qt.Check(t, qt.DeepEquals(BindingResolver{}.PermittedFlows(LoginWebEID), []string{FlowWebEID, FlowCSCEidPlugin}))
 	qt.Check(t, qt.IsNil(BindingResolver{}.PermittedFlows(LoginEID)))
 	qt.Check(t, qt.IsNil(BindingResolver{}.PermittedFlows("")))
 	qt.Check(t, qt.IsNil(BindingResolver{}.PermittedFlows("unknown")))
+}
+
+// TestCardLoginsDoNotCrossOver proves each card login reaches only the CSC flow that
+// reads the card the way the login did: never the other card route, and never the
+// other card login's own flow.
+func TestCardLoginsDoNotCrossOver(t *testing.T) {
+	web := BindingResolver{}.PermittedFlows(LoginWebEID)
+	scan := BindingResolver{}.PermittedFlows(LoginEIDScan)
+	qt.Check(t, qt.IsFalse(slices.Contains(web, FlowCSCEidScan)))
+	qt.Check(t, qt.IsFalse(slices.Contains(web, FlowEIDScan)))
+	qt.Check(t, qt.IsFalse(slices.Contains(scan, FlowCSCEidPlugin)))
+	qt.Check(t, qt.IsFalse(slices.Contains(scan, FlowWebEID)))
 }
 
 // TestResolveLoA covers both acr shapes: the production Safelayer level URN and
