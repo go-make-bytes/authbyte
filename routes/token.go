@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"errors"
 
 	"github.com/gmb-lib/go-authbyte/claims"
@@ -14,6 +15,16 @@ import (
 	"azugo.io/azugo"
 	corehttp "azugo.io/core/http"
 	"github.com/valyala/fasthttp"
+)
+
+// issueMoment is why a user token is being issued: a sign-in, where an
+// authorization code is exchanged right after the person authenticated, or a
+// refresh within a session they already hold.
+type issueMoment int
+
+const (
+	atSignIn issueMoment = iota
+	atRefresh
 )
 
 // membershipOutcome is what a user token is minted with: the scopes and the
@@ -33,10 +44,11 @@ type membershipOutcome struct {
 // requires one has the person resolved from the register at EVERY issue (first
 // issue and refresh alike, so a revoked membership dies at the next refresh) —
 // no membership is refused, one is minted, several are the person's to choose
-// from (tenantHint names their choice; it is checked, never trusted). Any
+// from (tenantHint names their choice; it is checked, never trusted). Only a
+// sign-in may admit a person through their organisation's directory. Any
 // resolution failure fails the issuance closed: an error is written and ok is
 // false — a token with guessed or empty-by-error scopes is never minted.
-func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID, tenantHint string) (membershipOutcome, bool) {
+func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID, tenantHint string, moment issueMoment) (membershipOutcome, bool) {
 	resolver := r.ScopeResolver()
 	if resolver == nil || !r.Registry().MembershipRequired(clientID, resolver != nil) {
 		return membershipOutcome{scopes: sess.Scopes}, true
@@ -50,13 +62,16 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 		return r.registerUnavailable(ctx, err)
 	}
 
-	// A person who came through an organisation's own directory and holds no
-	// membership yet is offered to the register's admission door: the tenant
-	// that attached that issuer as its directory admits them as a member with
-	// no grants, and they are asked about again. Somebody the provider calls a
-	// guest in that directory is not offered — a tenant attached its own
-	// people, not its visitors — and is refused below like any other stranger.
-	if len(memberships) == 0 && sess.DirectoryIssuer != "" && !sess.DirectoryGuest {
+	// A person who has just signed in through an organisation's own directory
+	// and holds no membership yet is offered to the register's admission door:
+	// the tenant that attached that issuer as its directory admits them as a
+	// member with no grants, and they are asked about again. Somebody the
+	// provider calls a guest in that directory is not offered — a tenant
+	// attached its own people, not its visitors — and is refused below like any
+	// other stranger. A refresh is never offered either: nobody authenticated
+	// just now, so a session that resolves to nothing — its person removed, or
+	// a register that no longer holds them — is refused, not admitted again.
+	if len(memberships) == 0 && moment == atSignIn && sess.DirectoryIssuer != "" && !sess.DirectoryGuest {
 		admitted, err := resolver.Admit(ctx, key, rolebyte.DirectoryLogin{
 			Issuer:      sess.DirectoryIssuer,
 			DisplayName: sess.DisplayName(),
@@ -257,7 +272,7 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		hint = sess.Tenant
 	}
 
-	outcome, ok := r.userScopes(ctx, sess, clientID, hint)
+	outcome, ok := r.userScopes(ctx, sess, clientID, hint, atSignIn)
 	if !ok {
 		return
 	}
@@ -463,6 +478,34 @@ func (r *router) serviceAccountScopes(ctx *azugo.Context, clientID, tenant strin
 	return scopes, nil
 }
 
+// sessionLoader is the store call a refresh makes for the session it names.
+type sessionLoader interface {
+	LoadSession(ctx context.Context, sid string) (*session.Session, error)
+}
+
+// refreshSession loads the session a refresh token names. A session the store
+// does not hold is refused 401: the refresh token is no longer good. A store that
+// cannot be read is answered 503, because it says nothing about the session — a
+// caller that ends what it keeps on a refusal must not end it for an outage here.
+// ok is false when the answer is already written.
+func refreshSession(ctx *azugo.Context, store sessionLoader, refresh string) (*session.Session, bool) {
+	sess, err := store.LoadSession(ctx, refresh)
+	if err != nil {
+		if !errors.Is(err, session.ErrNotFound) {
+			ctx.Log().Warn("session store could not be read at refresh: " + err.Error())
+			ctx.Error(pkerrors.NewProblem("err:upstream:unavailable",
+				pkerrors.WithStatus(fasthttp.StatusServiceUnavailable)))
+
+			return nil, false
+		}
+		ctx.Error(corehttp.UnauthorizedError{})
+
+		return nil, false
+	}
+
+	return sess, true
+}
+
 // grantRefreshToken re-issues a user token within an existing session. The
 // caller must present the same DPoP key the session is bound to.
 func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
@@ -473,10 +516,8 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	sess, err := r.Session().LoadSession(ctx, refresh)
-	if err != nil {
-		ctx.Error(corehttp.UnauthorizedError{})
-
+	sess, ok := refreshSession(ctx, r.Session(), refresh)
+	if !ok {
 		return
 	}
 
@@ -489,7 +530,7 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 	// Re-resolved on every refresh, for the client and the membership the
 	// session was issued for: this is where a revoked membership actually dies
 	// (the leaver guarantee rides short sessions).
-	outcome, ok := r.userScopes(ctx, sess, sess.ClientID, sess.Tenant)
+	outcome, ok := r.userScopes(ctx, sess, sess.ClientID, sess.Tenant, atRefresh)
 	if !ok {
 		return
 	}

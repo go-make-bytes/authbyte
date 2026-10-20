@@ -3,6 +3,33 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.2.2
+
+A security release.
+
+### Fixed — a token refresh no longer admits anyone through a directory
+
+A person who signs in through an organisation's own directory and holds no membership is offered
+to the register's admission door, which makes them a member of the organisation that attached that
+directory. Until now a token refresh made the same offer. So a session whose person the register no
+longer held, after the register was restored or rebuilt, made that person a member again without
+anyone signing in. Admission now happens only at a sign-in. A refresh that resolves to no membership
+is refused with `403` `err:membership:notMember`, the same as for anyone else without a membership,
+and the person is admitted at their next sign-in. A person removed from an organisation was already
+refused at the door, and still is. Nothing about the configuration changes.
+
+### Fixed — a refresh while the session store cannot be read is no longer a refusal
+
+A refresh that could not read the session store was answered `401`, the same as a refresh token
+whose session is gone. A caller that ends its own session on that answer ended it for a brief store
+outage. Such a refresh now answers `503` `err:upstream:unavailable`, and `401` again means the
+session is no longer held.
+
+```http
+POST /token   grant_type=refresh_token   (the session store unreachable)
+503 {"code": "err:upstream:unavailable", …}
+```
+
 ## v0.2.1
 
 A security release. **The service now builds with Go 1.27.2**, and its libraries move to their Go

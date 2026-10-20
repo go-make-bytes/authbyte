@@ -118,7 +118,12 @@ func scopesApp(t *testing.T, resolver authbytecore.ScopeResolver) *azugo.TestApp
 		if tn := ctx.Query.StringOptional("tenant"); tn != nil {
 			tenant = *tn
 		}
-		outcome, ok := r.userScopes(ctx, sess, client, tenant)
+		// A refresh within the session, or (the default) a sign-in.
+		moment := atSignIn
+		if f := ctx.Query.StringOptional("refresh"); f != nil && *f == "1" {
+			moment = atRefresh
+		}
+		outcome, ok := r.userScopes(ctx, sess, client, tenant, moment)
 		if !ok {
 			return
 		}
@@ -295,6 +300,32 @@ func TestUserScopesDirectoryMemberIsNotOfferedAgain(t *testing.T) {
 
 	status, body := get(t, app, "/testonly/scopes?client=product-spa&issuer="+directoryIssuer)
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK))
+	qt.Assert(t, qt.StringContains(body, `"projects:read"`))
+	qt.Assert(t, qt.IsNil(fake.admitted))
+}
+
+// A refresh never opens the door. A session that came through a directory and
+// now resolves to no membership was removed, or its register no longer holds
+// it: either way nobody signed in just now, so nobody is admitted. The person
+// is refused like a stranger, and admission waits for their next sign-in.
+func TestUserScopesRefreshNeverOffersTheDirectory(t *testing.T) {
+	fake := &fakeResolver{admit: true, afterAdmit: []rolebyte.Membership{{TenantID: "01TENANTDIR", Scopes: []string{}}}}
+	app := scopesApp(t, fake)
+
+	status, body := get(t, app, "/testonly/scopes?client=product-spa&refresh=1&issuer="+directoryIssuer+"&subject="+testPersonSub(6))
+	qt.Assert(t, qt.Equals(status, fasthttp.StatusForbidden), qt.Commentf("%s", body))
+	qt.Assert(t, qt.StringContains(body, `"code":"err:membership:notMember"`))
+	qt.Assert(t, qt.Equals(fake.asked, "sub:"+testPersonSub(6)))
+	qt.Assert(t, qt.IsNil(fake.admitted))
+}
+
+// A refresh of a member resolves them as a sign-in does: the door is not needed.
+func TestUserScopesRefreshResolvesAMember(t *testing.T) {
+	fake := &fakeResolver{memberships: []rolebyte.Membership{member("01TENANTDIR", "projects:read")}}
+	app := scopesApp(t, fake)
+
+	status, body := get(t, app, "/testonly/scopes?client=product-spa&refresh=1&issuer="+directoryIssuer)
+	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%s", body))
 	qt.Assert(t, qt.StringContains(body, `"projects:read"`))
 	qt.Assert(t, qt.IsNil(fake.admitted))
 }

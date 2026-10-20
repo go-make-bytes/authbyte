@@ -106,13 +106,15 @@ ship separately, so this boundary is a published contract:
   scopes the subject's roles grant there. The register attaches any pending invitation first,
   so a subject's very first token already carries the invited roles.
 - **The admission door, for a login through an organisation's own directory.** Such a session
-  carries the issuer it came through. When the person holds no membership, this service offers
-  them to the register's admission door (`POST /api/v1/directory-admissions`, the same
+  carries the issuer it came through. When the person has just signed in and holds no membership,
+  this service offers them to the register's admission door (`POST /api/v1/directory-admissions`, the same
   `membership:claim` scope): the tenant that attached that issuer as its directory admits them
   as an active member with **no grants**, and they are resolved again — a member who holds
   nothing until an administrator assigns a role. Somebody the provider calls a guest in its
   directory is not offered, a person already holding a membership is not offered again, and an
-  issuer no tenant attached admits nobody — each of those is the plain `403` below. The door
+  issuer no tenant attached admits nobody — each of those is the plain `403` below. A refresh is
+  never offered: a session that resolves to no membership was removed, or the register no longer
+  holds it, and it gets the same `403`; admission waits for the person's next sign-in. The door
   unreachable fails the issue closed like the resolve.
 - **Refusals are this service's to make from that answer:** no membership → `403`
   `err:membership:notMember`; a named organisation the subject is not a member of → the same
@@ -258,7 +260,7 @@ and a signing service falls back to resolving identities itself when fields are
 missing. Certificates carry personal data: they are never logged and die with
 the session.
 
-`refresh_token` is the server session id: a refresh re-issues a user token only when the caller presents the **same DPoP key** the session was bound to at code exchange, so a stolen refresh handle alone is useless.
+`refresh_token` is the server session id: a refresh re-issues a user token only when the caller presents the **same DPoP key** the session was bound to at code exchange, so a stolen refresh handle alone is useless. A session the store no longer holds is refused `401`. A session store that cannot be read answers `503` `err:upstream:unavailable`, because it says nothing about the session: a caller that ends its own session on a refusal keeps it through an outage here.
 
 ---
 
