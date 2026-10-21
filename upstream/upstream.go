@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gmb-lib/go-authbyte/identitycode"
 	"github.com/gmb-lib/go-authbyte/jwks"
@@ -107,6 +108,10 @@ type Config struct {
 	// `oid`, because its `sub` is pairwise per application registration and
 	// would change if the application were ever registered again.
 	ClaimDirectoryID string
+	// ClaimEmail names the claim carrying the person's email address (default
+	// "email"). Read from the id_token first, then userinfo; the platform keeps
+	// it only for a person who holds no national identity code.
+	ClaimEmail string
 	// ClaimAccountStatus names the claim saying whether the person is a member
 	// of the provider's own directory or a guest in it (Entra: `acct`), and
 	// AccountStatusGuest is the value that marks a guest (default "1"). With no
@@ -201,6 +206,9 @@ func New(ctx context.Context, cfg Config, log *zap.Logger) (*Provider, error) {
 	}
 	if cfg.ClaimDirectoryID == "" {
 		cfg.ClaimDirectoryID = "sub"
+	}
+	if cfg.ClaimEmail == "" {
+		cfg.ClaimEmail = "email"
 	}
 	if cfg.AccountStatusGuest == "" {
 		cfg.AccountStatusGuest = "1"
@@ -431,6 +439,9 @@ func (p *Provider) Claims(ctx context.Context, tokens Tokens, nonce string) (ide
 		if s := claimText(idClaims["name"]); s != "" {
 			info.Name = s
 		}
+		if s := shownAddress(claimText(idClaims[p.cfg.ClaimEmail])); s != "" {
+			info.Email = s
+		}
 		if s := claimText(idClaims["acr"]); s != "" {
 			info.ACR = s
 		}
@@ -579,6 +590,7 @@ func (p *Provider) mapUserInfo(body []byte) (identity.UserInfo, error) {
 	// no identity code at all is a wiring fault the identity store and the
 	// token issue each name in their own terms, and moving that refusal here
 	// would only rename it.
+	info.Email = shownAddress(stringClaim(body, p.cfg.ClaimEmail))
 	info.SerialNumber = stringClaim(body, p.cfg.ClaimSerial)
 	if info.SerialNumber != "" {
 		canonical, cerr := identitycode.Canonical(info.SerialNumber, p.cfg.Country)
@@ -669,6 +681,23 @@ func (p *Provider) SignIdentityCert(ctx context.Context, accessToken, id string)
 	}
 
 	return d.Identity.Details.Certificate, nil
+}
+
+// shownAddress is the address a provider sent, trimmed, or "" when it holds a
+// character no address carries: a control character (a NUL would fail the whole
+// sign-in in the store), a line or paragraph separator, or an invisible
+// formatting one (a direction override or a zero-width character could make one
+// address read as another where it is shown). Such an address is dropped, never
+// refused: a sign-in does not fail over what the directory says about an address.
+func shownAddress(raw string) string {
+	s := strings.TrimSpace(raw)
+	if strings.IndexFunc(s, func(c rune) bool {
+		return unicode.IsControl(c) || unicode.In(c, unicode.Cf, unicode.Zl, unicode.Zp)
+	}) >= 0 {
+		return ""
+	}
+
+	return s
 }
 
 // stringClaim extracts one top-level string claim by name from the raw

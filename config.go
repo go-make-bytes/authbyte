@@ -69,7 +69,11 @@ type Configuration struct {
 	// OIDCUpstreamClaimAccountStatus names the claim telling a member of the
 	// provider's directory from a guest in it (Entra: acct), and
 	// OIDCUpstreamAccountStatusGuest the value marking a guest (default 1).
-	OIDCUpstreamClaimDirectoryID   string `mapstructure:"oidc_upstream_claim_directory_id"`
+	OIDCUpstreamClaimDirectoryID string `mapstructure:"oidc_upstream_claim_directory_id"`
+	// OIDCUpstreamClaimEmail names the claim carrying the person's email address
+	// (default email). It is kept only for a person who signs in through a
+	// directory and holds no national identity code.
+	OIDCUpstreamClaimEmail         string `mapstructure:"oidc_upstream_claim_email"`
 	OIDCUpstreamClaimAccountStatus string `mapstructure:"oidc_upstream_claim_account_status"`
 	OIDCUpstreamAccountStatusGuest string `mapstructure:"oidc_upstream_account_status_guest"`
 	// OIDCUpstreamMethodPolicy maps acr/amr tokens to login methods
@@ -274,6 +278,7 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("oidc_upstream_issuer", "OIDC_UPSTREAM_ISSUER")
 	_ = v.BindEnv("oidc_upstream_jwks_url", "OIDC_UPSTREAM_JWKS_URL")
 	_ = v.BindEnv("oidc_upstream_claim_directory_id", "OIDC_UPSTREAM_CLAIM_DIRECTORY_ID")
+	_ = v.BindEnv("oidc_upstream_claim_email", "OIDC_UPSTREAM_CLAIM_EMAIL")
 	_ = v.BindEnv("oidc_upstream_claim_account_status", "OIDC_UPSTREAM_CLAIM_ACCOUNT_STATUS")
 	_ = v.BindEnv("oidc_upstream_account_status_guest", "OIDC_UPSTREAM_ACCOUNT_STATUS_GUEST")
 	_ = v.BindEnv("oidc_upstream_method_policy", "OIDC_UPSTREAM_METHOD_POLICY")
@@ -405,6 +410,7 @@ func (c *Configuration) UpstreamConfig() upstream.Config {
 		cfg.ClaimSerial = c.OIDCUpstreamClaimSerial
 	}
 	cfg.ClaimDirectoryID = c.OIDCUpstreamClaimDirectoryID
+	cfg.ClaimEmail = c.OIDCUpstreamClaimEmail
 	cfg.ClaimAccountStatus = c.OIDCUpstreamClaimAccountStatus
 	cfg.AccountStatusGuest = c.OIDCUpstreamAccountStatusGuest
 	cfg.ClockSkewLeeway = c.TokenClockSkewLeeway

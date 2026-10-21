@@ -264,6 +264,32 @@ func (r *Recorder) IdentityRegistered(ctx *azugo.Context, actorID, actorLoA, per
 	}
 }
 
+// IdentityCodeRead records that a service read a person's identity code: the
+// service as the actor, the person as the subject, and never the code. Routine
+// (fail-open): the service that asked records the disclosure it makes onward,
+// and that record is the one that gates. No-op when the GDPR client is not
+// configured.
+func (r *Recorder) IdentityCodeRead(ctx *azugo.Context, callerID, personSub string) {
+	if r == nil || r.gdpr == nil {
+		return
+	}
+
+	err := r.gdpr.Record(ctx, gdpr.EventIdentityRead, gdpr.Access{
+		Actor:        broker.Actor{ID: callerID, Type: "service"},
+		DataSubjects: []string{personSub},
+		Resource:     broker.Resource{Type: gdpr.ResourceIdentity, ID: personSub},
+		Operation:    broker.OpRead,
+		LawfulBasis:  gdpr.BasisLegitimateInterest,
+		Purpose:      gdpr.PurposeAccountManagement,
+		Channel:      gdpr.ChannelBackground,
+		Attributes:   map[string]any{"what": "identityCode"},
+	})
+	if err != nil {
+		r.logger(ctx).Warn("gdpr access record not persisted (non-fatal)",
+			zap.String("event_type", gdpr.EventIdentityRead), zap.Error(err))
+	}
+}
+
 // actorRef returns a broker.Actor pointer when it carries any identity, else nil.
 func actorRef(id, typ, assurance string) *broker.Actor {
 	if id == "" && assurance == "" {

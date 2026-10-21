@@ -1,6 +1,7 @@
 package audit_test
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/valyala/fasthttp"
 	"go.uber.org/zap"
 
+	"github.com/gmb-lib/go-gdpr-audit/gdpr"
 	"github.com/gmb-lib/go-platform-kit/broker"
 	"github.com/gmb-lib/go-sec-events/secevents"
 
@@ -161,4 +163,50 @@ func TestIdentityWrittenNoopWithoutGDPR(t *testing.T) {
 	})
 
 	qt.Check(t, qt.IsNil(sink.latest())) // no security event emitted by the GDPR-audit path
+}
+
+// A read of a person's identity code is recorded, naming the service that asked
+// and the person whose code it was — never the code itself.
+func TestIdentityCodeReadRecordsTheServiceAndThePerson(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		got []*broker.Envelope
+	)
+	gc, err := gdpr.New(gdpr.Configuration{}, gdpr.PosterFunc(func(_ context.Context, rec *broker.Envelope) error {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, rec)
+
+		return nil
+	}))
+	qt.Assert(t, qt.IsNil(err))
+	rec := audit.New(secevents.NewEmitter(&captureSink{}), gc, zap.NewNop())
+
+	const person = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	withCtx(t, func(ctx *azugo.Context) {
+		rec.IdentityCodeRead(ctx, "svc:register", person)
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	qt.Assert(t, qt.HasLen(got, 1))
+	ev := got[0]
+	qt.Check(t, qt.Equals(ev.EventType, gdpr.EventIdentityRead))
+	qt.Check(t, qt.Equals(ev.Operation, broker.OpRead))
+	qt.Assert(t, qt.IsNotNil(ev.Actor))
+	qt.Check(t, qt.Equals(ev.Actor.ID, "svc:register"))
+	qt.Check(t, qt.Equals(ev.Actor.Type, "service"))
+	qt.Check(t, qt.DeepEquals(ev.DataSubjects, []string{person}))
+	qt.Assert(t, qt.IsNotNil(ev.Resource))
+	qt.Check(t, qt.Equals(ev.Resource.ID, person))
+	qt.Check(t, qt.Equals(str(ev.Attributes["what"]), "identityCode"))
+}
+
+// Without an access audit set up, a code read records nothing and does not fail.
+func TestIdentityCodeReadNoopWithoutGDPR(t *testing.T) {
+	rec := audit.New(secevents.NewEmitter(&captureSink{}), nil, zap.NewNop())
+
+	withCtx(t, func(ctx *azugo.Context) {
+		rec.IdentityCodeRead(ctx, "svc:register", "01ARZ3NDEKTSV4RRFFQ69G5FAV") // must not panic
+	})
 }

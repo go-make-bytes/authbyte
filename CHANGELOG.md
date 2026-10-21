@@ -3,6 +3,66 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.3.0
+
+### Changed — built with Go 1.27.3
+
+The service is built with Go 1.27.3 (`go.mod` and the image). Go 1.27.2's `crypto/x509` still trusts
+certificates issued by intermediates since found compromised, and the vulnerability checker reports it as
+reachable from any call over TLS; under 1.27.3 it reports none. Nothing about the configuration changes.
+
+### Added — a directory sign-in keeps the person's email address
+
+A person who signs in through an organisation's own directory now has the email address the
+directory sends kept with their record. The address is read from the verified id_token where it
+carries one, otherwise from userinfo, and trimmed. The identity store keeps it only when it is
+address-shaped, and keeps none for a person who holds a national identity code. A login is never
+refused over it, and a card login sends none. An address carrying a control character, a line or
+paragraph separator, or an invisible formatting character (a direction override, a zero-width
+character) is dropped and the sign-in goes on. `OIDC_UPSTREAM_CLAIM_EMAIL` names the claim
+(default `email`); set it where a provider uses another name.
+
+### Added — two service-only reads of how a person signs in
+
+Both sit beside `POST /identity/persons`, answer `Cache-Control: no-store`, and are for a **service
+acting as itself** only: a person's token is refused even when it carries the scope, and so are a
+token another service obtained by exchange to act for someone and a service account's token for an
+organisation. The two scope levels are
+separate, so a grant to read the lines never reaches a code. Neither echoes a value it was sent in
+a refusal.
+
+`POST /identity/persons/lines` needs `identity:lines`. It answers, for up to 500 people, whether
+each can sign in, the email kept for them (only when there is one) and, for a person holding a
+national identity code, its country and the length of the code as a person is shown it. The code
+itself is never in the answer. A person the platform does not know is left out.
+
+```
+POST /identity/persons/lines      Authorization: DPoP <service token carrying identity:lines>
+{"subjects": ["sub:01J8X2K4M9N7P3Q5R6S8T0V1W2", "sub:01J8X2K4M9N7P3Q5R6S8T0V1W3"]}
+
+200 {"lines": [
+      {"subject": "sub:01J8X2K4M9N7P3Q5R6S8T0V1W2", "signsIn": true, "country": "LV", "length": 12},
+      {"subject": "sub:01J8X2K4M9N7P3Q5R6S8T0V1W3", "signsIn": false, "email": "person@example.org"}]}
+422 err:identity:invalid    more than 500, an empty or non-list body, or a subject that is not "sub:" and a 26-character id
+403 err:identity:forbidden  not a service acting as itself, or the identity:lines scope is missing
+```
+
+`GET /identity/persons/{personSub}/code` needs `identity:code`, takes the bare 26-character person
+id and answers the person's national identity code the way a person is shown it, with its country.
+Each code answered is recorded with the access audit as a read of that person's identity record by
+the calling service (`identity.read`, marked `identityCode`; the code is never in the record). The
+record is a routine one: an access audit that is down does not stop the answer, and the caller
+records the disclosure it makes onward, which is the record that gates it.
+
+```
+GET /identity/persons/01J8X2K4M9N7P3Q5R6S8T0V1W2/code   Authorization: DPoP <service token carrying identity:code>
+
+200 {"code": "XXXXXX-XXXXX", "country": "LV"}
+404 err:identity:not_found  the person is not known, or holds no identity code
+422 err:identity:invalid    the id is not a 26-character person id
+403 err:identity:forbidden  not a service acting as itself, or the identity:code scope is missing
+```
+
 ## v0.2.2
 
 A security release.

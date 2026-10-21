@@ -325,6 +325,7 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 		FamilyName:   id.FamilyName,
 		SerialNumber: id.SerialNumber,
 		LoginMethod:  id.LoginMethod,
+		Email:        id.Email,
 	})
 	if err != nil {
 		return nil, "", err

@@ -143,6 +143,8 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 | `POST /step-up` | Re-authenticate with a stronger or different login method to satisfy a signing-flow binding; returns a redirect (federated methods) or a Web eID challenge | existing session |
 | `GET /identity` | The internal identity plus `loa`, `login_method`, and the signing flows that method permits | valid user token (DPoP) |
 | `POST /identity/persons` | Register a person before their first login: the identity code (any spelling; stored canonical) and the name create the person row with a stable subject and **no credential** — the subject an administrator then invites them to a membership register under. Idempotent on the code: `201` created, `200` already known (names filled only where the row has none); a code naming no country or an unknown identity type is `422 err:identity:invalid` (never echoed) | valid token carrying `identity:admin` (DPoP) |
+| `POST /identity/persons/lines` | Read, for up to 500 people at once (`{"subjects": ["sub:<id>", …]}`), whether each can sign in and what is known about how: the email a directory sign-in left (only when one is kept) and, for a person holding a national identity code, its country and displayed length — **never the code**. A person the platform does not know is left out. More than 500, an empty or non-list body or a malformed subject is `422 err:identity:invalid` (the values sent are never repeated). Answered `Cache-Control: no-store` | a **service acting as itself** (its own token: subject `svc:…`, naming no organisation and no actor) carrying `identity:lines` — a person's token, a token exchanged to act for someone and a service account's token for an organisation never read it, even holding the scope (DPoP) |
+| `GET /identity/persons/{personSub}/code` | Read one person's national identity code the way a person is shown it, with its country: `{"code": "…", "country": "LV"}`. A person not known, or holding no code, is `404 err:identity:not_found`; a malformed id is `422 err:identity:invalid`. Each code answered is recorded with the access audit as a routine read of the person by the calling service (`identity.read`, marked `identityCode`, never the code); the caller records the disclosure it makes onward. Answered `Cache-Control: no-store` | a **service acting as itself** carrying `identity:code`, refused as the lines read refuses — a grant for `identity:lines` never reaches a code (DPoP) |
 | `GET /webeid/challenge` | Issue a Web eID challenge nonce and persist the flow (card login) | anonymous — **only if `WEBEID_ENGINE_URL` set** |
 | `POST /webeid/login` | Validate the Web eID auth token via the engine, resolve the person, mint an app authorization code | anonymous — **only if `WEBEID_ENGINE_URL` set** |
 | `GET /.well-known/jwks.json` | Signing public keys (active + retired-within-window) | anonymous |
@@ -371,7 +373,8 @@ organisation whose people sign in through its own directory: `OIDC_UPSTREAM_CLAI
 names the durable identifier the person's credential is stored under, and
 `OIDC_UPSTREAM_CLAIM_ACCOUNT_STATUS` (`acct` for Entra) tells a member of that directory from a
 guest in it — a guest logs in like anyone else but is never admitted into a tenant by its attached
-directory (see the register boundary). Such a login carries **no identity code**: the identity store
+directory (see the register boundary). The directory's email address is kept for such a person
+(`OIDC_UPSTREAM_CLAIM_EMAIL`, default `email`), so a caller that must reach them can read it back. Such a login carries **no identity code**: the identity store
 resolves the person by their credential and creates them without one; they stay a separate person
 from the same human's card login until linked by a deliberate act (a later increment).
 
@@ -395,6 +398,7 @@ can be stated alongside the country.
 | `OIDC_UPSTREAM_ISSUER` | — (⇒ discovery `issuer`) | The `iss` an id_token must carry; set together with `_JWKS_URL` for a provider configured by explicit endpoints |
 | `OIDC_UPSTREAM_JWKS_URL` | — (⇒ discovery `jwks_uri`) | The provider's signing keys. Known ⇒ every login's id_token is verified and required; unknown ⇒ userinfo only |
 | `OIDC_UPSTREAM_CLAIM_DIRECTORY_ID` | `sub` | Claim carrying the person's durable identifier at the provider — the handle their credential is stored under (`oid` for Entra) |
+| `OIDC_UPSTREAM_CLAIM_EMAIL` | `email` | Claim carrying the person's email address (read from the id_token first where it is verified, then userinfo; trimmed). Kept only when it is address-shaped and the person holds no national identity code; an address carrying a control character, a line or paragraph separator or an invisible formatting character is dropped. A login is never refused over it |
 | `OIDC_UPSTREAM_CLAIM_ACCOUNT_STATUS` | — (⇒ nobody is a guest) | Claim telling a member of the provider's directory from a guest in it (`acct` for Entra) |
 | `OIDC_UPSTREAM_ACCOUNT_STATUS_GUEST` | `1` | The account-status value that marks a guest |
 | `OIDC_UPSTREAM_METHOD_POLICY` | — (⇒ profile default) | `acr`/`amr` token → login-method vocabulary (`substr=method,…`, longest token wins) |
@@ -485,7 +489,8 @@ authbyte/
 │   ├── stepup.go       — /step-up (redirect vs Web eID challenge)
 │   ├── webeid.go       — /webeid/challenge · /webeid/login
 │   ├── logout.go       — front-channel logout (through the provider for federated methods)
-│   ├── identity.go     — /identity (permitted signing flows)
+│   ├── identity.go     — /identity (permitted signing flows) · person registration
+│   ├── persons.go      — service-only person reads: sign-in lines · identity code
 │   ├── wellknown.go    — jwks.json · openid-configuration
 │   ├── ready.go        — /readyz (dependency-aware)
 │   ├── helpers.go      — PKCE verify, redirect building

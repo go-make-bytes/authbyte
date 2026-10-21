@@ -68,7 +68,10 @@ type UserInfo struct {
 	FamilyName   string   `json:"family_name"`
 	Name         string   `json:"name"`
 	SerialNumber string   `json:"serial_number"`
-	EIPS         string   `json:"eips"`
+	// Email is the address the provider sent for the person (the configured
+	// claim), trimmed; "" when it sent none.
+	Email string `json:"-"`
+	EIPS  string `json:"eips"`
 	// SignIdentities is the person's sign-identity catalog, present when the
 	// login requested the sign-identity profile scope. nil = the response
 	// carried no catalog (scope not granted / not requested); empty non-nil =
@@ -95,8 +98,11 @@ type Identity struct {
 	GivenName    string
 	FamilyName   string
 	SerialNumber string
-	LoA          string
-	LoginMethod  string
+	// Email is the address a directory sign-in sent ("" for a card login or when
+	// none was sent); the identity store decides whether to keep it.
+	Email       string
+	LoA         string
+	LoginMethod string
 	// Issuer is the identity provider the login came through ("" for a login
 	// that did not come through an upstream provider); DirectoryGuest says the
 	// provider called the person a guest in its directory.
@@ -235,6 +241,7 @@ func (r *Resolver) Resolve(u UserInfo) Identity {
 		GivenName:      u.GivenName,
 		FamilyName:     u.FamilyName,
 		SerialNumber:   u.SerialNumber,
+		Email:          u.Email,
 		LoA:            loa,
 		LoginMethod:    method,
 		Issuer:         u.Issuer,

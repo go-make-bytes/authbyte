@@ -14,6 +14,13 @@ import (
 
 type router struct {
 	*authbytecore.App
+
+	// reader answers the service-only person reads; nil means the identity store
+	// itself (set only by tests).
+	reader personReader
+	// codeReads records each identity code read; nil means the service's own
+	// audit recorder (set only by tests).
+	codeReads codeReadRecorder
 }
 
 // Init registers all routes on the application.
@@ -55,6 +62,8 @@ func Init(a *authbytecore.App) error {
 	identityGroup.Use(a.AuthClient().Authenticate())
 	identityGroup.Get("", r.identity)
 	identityGroup.Post("/persons", r.registerPerson)
+	identityGroup.Post("/persons/lines", r.personLines)
+	identityGroup.Get("/persons/{personSub}/code", r.personCode)
 
 	// Development conveniences (guarded by configuration; never on in prod).
 	if dir := a.Config().DemoDir; dir != "" {
