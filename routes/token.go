@@ -59,7 +59,7 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 	key := rolebyte.PersonKey(sess.Subject)
 	memberships, err := resolver.Memberships(ctx, key)
 	if err != nil {
-		return r.registerUnavailable(ctx, err)
+		return r.registerUnavailable(ctx, key, err)
 	}
 
 	// A person who has just signed in through an organisation's own directory
@@ -77,11 +77,11 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 			DisplayName: sess.DisplayName(),
 		})
 		if err != nil {
-			return r.registerUnavailable(ctx, err)
+			return r.registerUnavailable(ctx, key, err)
 		}
 		if admitted {
 			if memberships, err = resolver.Memberships(ctx, key); err != nil {
-				return r.registerUnavailable(ctx, err)
+				return r.registerUnavailable(ctx, key, err)
 			}
 		}
 	}
@@ -109,8 +109,13 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 // unreachable or answered garbage. The outbound helper surfaces no downstream
 // body, so this is a produced upstream failure, not a relay — an empty-scope or
 // guessed-scope token is never minted.
-func (r *router) registerUnavailable(ctx *azugo.Context, err error) (membershipOutcome, bool) {
+// An answer about another subject than the one asked about is also a security
+// event.
+func (r *router) registerUnavailable(ctx *azugo.Context, asked string, err error) (membershipOutcome, bool) {
 	ctx.Log().Warn("membership resolve failed — refusing token issue: " + err.Error())
+	if errors.Is(err, rolebyte.ErrAnswerForAnotherSubject) {
+		r.Audit().SignInAnsweredForAnother(ctx, asked)
+	}
 	ctx.Error(pkerrors.NewProblem("err:upstream:unavailable",
 		pkerrors.WithStatus(fasthttp.StatusBadGateway)))
 
@@ -450,6 +455,9 @@ func (r *router) serviceAccountScopes(ctx *azugo.Context, clientID, tenant strin
 	memberships, err := resolver.Memberships(ctx, clientID)
 	if err != nil {
 		ctx.Log().Warn("membership resolve failed — refusing token issue: " + err.Error())
+		if errors.Is(err, rolebyte.ErrAnswerForAnotherSubject) {
+			r.Audit().SignInAnsweredForAnother(ctx, clientID)
+		}
 		problem := pkerrors.NewProblem("err:upstream:unavailable", pkerrors.WithStatus(fasthttp.StatusBadGateway))
 		ctx.Error(problem)
 
@@ -488,6 +496,24 @@ type sessionLoader interface {
 // cannot be read is answered 503, because it says nothing about the session — a
 // caller that ends what it keeps on a refusal must not end it for an outage here.
 // ok is false when the answer is already written.
+// refreshBoundSession is refreshSession for a caller proving a DPoP key: the
+// session goes on only for the key it was bound to at sign-in, so a refresh
+// token taken from the browser is worth nothing without the browser's key.
+func refreshBoundSession(ctx *azugo.Context, store sessionLoader, refresh, thumbprint string) (*session.Session, bool) {
+	sess, ok := refreshSession(ctx, store, refresh)
+	if !ok {
+		return nil, false
+	}
+
+	if sess.Thumbprint == "" || sess.Thumbprint != thumbprint {
+		ctx.Error(corehttp.UnauthorizedError{})
+
+		return nil, false
+	}
+
+	return sess, true
+}
+
 func refreshSession(ctx *azugo.Context, store sessionLoader, refresh string) (*session.Session, bool) {
 	sess, err := store.LoadSession(ctx, refresh)
 	if err != nil {
@@ -516,14 +542,8 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	sess, ok := refreshSession(ctx, r.Session(), refresh)
+	sess, ok := refreshBoundSession(ctx, r.Session(), refresh, thumbprint)
 	if !ok {
-		return
-	}
-
-	if sess.Thumbprint == "" || sess.Thumbprint != thumbprint {
-		ctx.Error(corehttp.UnauthorizedError{})
-
 		return
 	}
 

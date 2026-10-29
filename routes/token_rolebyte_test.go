@@ -80,13 +80,16 @@ func (f *fakeResolver) Admit(_ *azugo.Context, subjectKey string, login rolebyte
 //
 //   - GET /testonly/scopes?client=&tenant= runs the person seam (userScopes)
 //   - GET /testonly/service?tenant=&allowed=a,b runs the service-account seam
-func scopesApp(t *testing.T, resolver authbytecore.ScopeResolver) *azugo.TestApp {
+func scopesApp(t *testing.T, resolver authbytecore.ScopeResolver, setup ...func(*authbytecore.App)) *azugo.TestApp {
 	t.Helper()
 
 	t.Setenv("SERVICE_CLIENT_REGISTRY", testRegistry)
 	app := authbytecore.TestApp(t)
 	if resolver != nil {
 		app.SetScopeResolver(resolver)
+	}
+	for _, s := range setup {
+		s(app)
 	}
 	qt.Assert(t, qt.IsNil(Init(app)))
 

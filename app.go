@@ -7,6 +7,7 @@ package authbytecore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gmb-lib/go-authbyte/authclient"
+	"github.com/gmb-lib/go-authbyte/claims"
 	"github.com/gmb-lib/go-authbyte/nonce"
 	"github.com/gmb-lib/go-authbyte/replay"
 	"github.com/gmb-lib/go-gdpr-audit/gdpr"
@@ -267,11 +269,13 @@ func (a *App) init() error {
 		a.Log().Warn("WEBEID_ENGINE_URL not set — Web eID card-login routes (/webeid/*) are disabled")
 	}
 
-	// Membership-driven scopes (register-backed mode): an outbound
-	// service-client (the same client the audit poster uses, reused when
-	// present) asks the membership register for the person's scopes at every
-	// user-token issue. Off unless ROLEBYTE_URL is set — the service then
-	// runs standalone and mints the static baseline set.
+	// Membership-driven scopes (register-backed mode): at every user-token
+	// issue the register's sign-in doors are asked about the person, each call
+	// with a token this service mints in its own process naming that person,
+	// itself acting (AuditClientID), proven with the outbound client's DPoP key
+	// (the same client the audit poster uses, reused when present). No token
+	// endpoint and no registry grant are involved. Off unless ROLEBYTE_URL is
+	// set — the service then runs standalone and mints the static baseline set.
 	if cfg.RolebyteEnabled() {
 		rc := a.auditClient
 		if rc == nil {
@@ -281,7 +285,7 @@ func (a *App) init() error {
 			}
 			rc = oc
 		}
-		a.scopeResolver = rolebyte.New(rc, cfg.RolebyteURL, cfg.RolebyteAudience)
+		a.scopeResolver = rolebyte.New(rc, a.mintSignInToken, cfg.RolebyteURL, cfg.RolebyteAudience, cfg.AuditClientID)
 	}
 
 	return nil
@@ -402,6 +406,32 @@ func (a *App) ScopeResolver() ScopeResolver { return a.scopeResolver }
 
 // SetScopeResolver overrides the membership scope resolver (test use only).
 func (a *App) SetScopeResolver(r ScopeResolver) { a.scopeResolver = r }
+
+// SetAudit overrides the audit recorder (test use only).
+func (a *App) SetAudit(r *audit.Recorder) { a.audit = r }
+
+// signInTokenTTL is how long a sign-in door token lives: one call, retries included.
+const signInTokenTTL = time.Minute
+
+// mintSignInToken mints the token for one call at the register's sign-in doors:
+// the subject being signed in, the register's audience, the door's one scope,
+// this service as the acting client, bound to the key the call is proven with.
+// It lives a minute, is bound to that key, and nothing but the register accepts it.
+func (a *App) mintSignInToken(subject, audience, scope, actor, thumbprint string) (string, error) {
+	if strings.TrimSpace(thumbprint) == "" {
+		return "", errors.New("sign-in door token: no key thumbprint to bind it to")
+	}
+	tok, _, err := a.issuer.IssueDelegated(issuer.DelegatedTokenInput{
+		Subject:    subject,
+		Audience:   audience,
+		Scopes:     []string{scope},
+		Actor:      &claims.Actor{Subject: actor},
+		Thumbprint: thumbprint,
+		TTL:        signInTokenTTL,
+	})
+
+	return tok, err
+}
 
 var nonAlphaNum = regexp.MustCompile(`[^A-Za-z0-9]+`)
 

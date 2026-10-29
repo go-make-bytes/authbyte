@@ -111,6 +111,7 @@ type DelegatedTokenInput struct {
 	Tenant       string        // carried forward — a downstream multi-tenant service scopes by the token's tenant
 	Actor        *claims.Actor // the acting service, nesting any prior actor
 	Thumbprint   string        // acting client's DPoP key thumbprint (cnf.jkt)
+	TTL          time.Duration // a shorter lifetime than a service token's, for a token one call needs; 0 = the service token's
 }
 
 // IssueDelegated mints a DPoP-bound token that carries the end user as its
@@ -119,8 +120,12 @@ type DelegatedTokenInput struct {
 // is sender-constrained to the acting client's key and short-lived like a
 // service token.
 func (i *Issuer) IssueDelegated(in DelegatedTokenInput) (string, int64, error) {
+	ttl := i.serviceTTL
+	if in.TTL > 0 && in.TTL < ttl {
+		ttl = in.TTL
+	}
 	c := claims.Claims{
-		RegisteredClaims: i.base(in.Subject, in.Audience, i.serviceTTL),
+		RegisteredClaims: i.base(in.Subject, in.Audience, ttl),
 		Scope:            strings.Join(in.Scopes, " "),
 		LoA:              in.LoA,
 		LoginMethod:      in.LoginMethod,
@@ -132,7 +137,7 @@ func (i *Issuer) IssueDelegated(in DelegatedTokenInput) (string, int64, error) {
 		c.Confirmation = &claims.Confirmation{JKT: in.Thumbprint}
 	}
 
-	return i.sign(c, i.serviceTTL)
+	return i.sign(c, ttl)
 }
 
 // ParseSubjectToken verifies a token this issuer minted — signature against the

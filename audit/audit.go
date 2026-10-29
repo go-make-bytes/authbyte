@@ -158,6 +158,23 @@ func (r *Recorder) DelegationRefused(ctx *azugo.Context, clientID, subject, reas
 		})
 }
 
+// SignInAnsweredForAnother records that the membership register, asked about
+// the subject being signed in, answered about someone else. Nothing was minted;
+// the issue failed closed. A healthy deployment never produces it, so it is an
+// authorization denial at warning severity, the event an alert watches for.
+func (r *Recorder) SignInAnsweredForAnother(ctx *azugo.Context, asked string) {
+	kind := "user"
+	if strings.HasPrefix(asked, "svc:") {
+		kind = "service"
+	}
+	r.emit(ctx, secevents.EventAuthZDenied, secevents.SeverityWarning, broker.OutcomeFailure,
+		actorRef(asked, kind, ""),
+		map[string]any{
+			secevents.AttrKind:   "sign-in",
+			secevents.AttrReason: "the register answered for another subject",
+		})
+}
+
 // DelegatedTokenIssued records issuance of a DPoP-bound on-behalf-of token
 // (token exchange): the requesting service acting for a user toward an
 // audience. The acting service is the event actor; the user it acts for is

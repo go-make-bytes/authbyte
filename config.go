@@ -180,10 +180,12 @@ type Configuration struct {
 	// the membership register for the person's scopes instead: the first
 	// login claims their pending invitation, and the resolved group:level set
 	// is minted into the token. A person with no membership is refused — the
-	// register, not the login, grants access. The calls ride the same
-	// outbound service-client as the audit poster (AuditClientID), so that
-	// client also needs grants for RolebyteAudience with membership:claim +
-	// membership:resolve.
+	// register, not the login, grants access. RolebyteURL is the register's
+	// SIGN-IN listener (its own port, reachable from this service alone). Each
+	// call carries a token this service mints itself, naming the person and
+	// AuditClientID as the acting client, proven with the outbound client's key:
+	// no registry grant is needed, and none may give membership:claim or
+	// membership:resolve to any client.
 	RolebyteURL      string `mapstructure:"rolebyte_url" validate:"omitempty,url"`
 	RolebyteAudience string `mapstructure:"rolebyte_audience"`
 	// AuditClientID / AuditClientSecret authenticate this service's OUTBOUND
