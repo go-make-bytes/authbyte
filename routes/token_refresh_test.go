@@ -38,11 +38,36 @@ func refreshApp(t *testing.T, store sessionLoader) *azugo.TestApp {
 		ctx.JSON(map[string]string{"subject": sess.Subject})
 	})
 
+	app.Get("/testonly/refresh-bound", func(ctx *azugo.Context) {
+		sess, ok := refreshBoundSession(ctx, store, "a-refresh-token", string(ctx.Context().QueryArgs().Peek("jkt")))
+		if !ok {
+			return
+		}
+		ctx.JSON(map[string]string{"subject": sess.Subject})
+	})
+
 	ta := azugo.NewTestApp(app.App)
 	ta.Start(t)
 	t.Cleanup(ta.Stop)
 
 	return ta
+}
+
+// A refresh goes on only with the key the session was bound to at sign-in: a
+// stolen refresh token presented with any other key is refused, and so is any
+// refresh of a session bound to no key.
+func TestARefreshWithAnotherKeyIsRefused(t *testing.T) {
+	bound := refreshApp(t, loaderAnswering{sess: &session.Session{Subject: testPersonSub(4), Thumbprint: "the-browsers-key"}})
+
+	status, body := get(t, bound, "/testonly/refresh-bound?jkt=the-browsers-key")
+	qt.Check(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%s", body))
+
+	status, _ = get(t, bound, "/testonly/refresh-bound?jkt=a-thiefs-key")
+	qt.Check(t, qt.Equals(status, fasthttp.StatusUnauthorized))
+
+	unbound := refreshApp(t, loaderAnswering{sess: &session.Session{Subject: testPersonSub(4)}})
+	status, _ = get(t, unbound, "/testonly/refresh-bound?jkt=")
+	qt.Check(t, qt.Equals(status, fasthttp.StatusUnauthorized))
 }
 
 // A refresh token whose session the store does not hold is no longer good: the

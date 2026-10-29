@@ -102,13 +102,23 @@ ship separately, so this boundary is a published contract:
 - **Question:** a typed subject key — a person's platform subject (`sub:<person id>`, the
   identity store's stable id, equal to the token's own `sub`) or a service account's client id
   (`svc:<name>`, the same name it authenticates with). No identity code travels into the register.
+- **How it is asked:** at the register's **sign-in doors**, on its sign-in listener
+  (`POST /api/v1/sign-in/claims`, then `POST /api/v1/sign-in/memberships`), which only this
+  service can reach. The request names nobody. Each call carries a token this service mints in
+  its own process for that call alone: the subject being signed in as `sub`, this service's
+  client id (`AUDIT_CLIENT_ID`) as the acting client (`act`), the door's one scope, bound to the
+  outbound client's DPoP key. The register answers for the token's subject and nobody else. No
+  token endpoint and no registry grant are involved.
+- **The answer is checked:** it names the subject it is about, and an answer about anyone else
+  mints nothing, fails the issue closed (`502`) and raises an `authz.denied` security event
+  (`kind: sign-in`), which a healthy deployment never produces.
 - **Answer:** the subject's active memberships — each organisation with the `group:level`
   scopes the subject's roles grant there. The register attaches any pending invitation first,
   so a subject's very first token already carries the invited roles.
 - **The admission door, for a login through an organisation's own directory.** Such a session
   carries the issuer it came through. When the person has just signed in and holds no membership,
-  this service offers them to the register's admission door (`POST /api/v1/directory-admissions`, the same
-  `membership:claim` scope): the tenant that attached that issuer as its directory admits them
+  this service offers them to the register's admission door (`POST /api/v1/sign-in/directory-admissions`, the
+  same kind of token at the `membership:claim` scope, the person in the token and only the issuer and name in the body): the tenant that attached that issuer as its directory admits them
   as an active member with **no grants**, and they are resolved again — a member who holds
   nothing until an administrator assigns a role. Somebody the provider calls a guest in its
   directory is not offered, a person already holding a membership is not offered again, and an
@@ -455,7 +465,7 @@ can be stated alongside the country.
 | `AUDIT_ISSUER_URL` | — (⇒ `AUTH_ISSUER_URL`) | Issuer base for the outbound token mint (set to an in-cluster URL when the public issuer is unreachable) |
 | `WEBEID_ENGINE_URL` | — (empty ⇒ `/webeid/*` not registered) | web-eid engine base; `/auth/validate` is called server-to-server with a service token |
 | `WEBEID_AUDIENCE` / `WEBEID_SCOPE` | `svc:web-eid` / `webeid:validate` | Audience/scope for the engine call |
-| `ROLEBYTE_URL` | — (empty ⇒ standalone: static baseline scopes, no service accounts) | Membership register base — setting it wires the register (see "Supported configurations"). When set, every token issue of a person whose client requires a membership (first issue and refresh) claims the person's pending invitations and mints their register-resolved `group:level` scopes and tenant instead of the static set — no membership is **refused** (403 `err:membership:notMember`), several are the person's to choose from (the token response's `tenants`), and an unreachable register fails the issuance closed (502), never an empty-scope token; a client whose row says `membership_required: false` keeps its people on the baseline and never touches the register. Every tenant-named `client_credentials` issue is resolved here too. Uses the same outbound client identity as the audit poster (`AUDIT_CLIENT_ID`/`AUDIT_CLIENT_SECRET`), which then also needs registry grants for `membership:claim` + `membership:resolve` toward the rolebyte audience |
+| `ROLEBYTE_URL` | — (empty ⇒ standalone: static baseline scopes, no service accounts) | Membership register base — setting it wires the register (see "Supported configurations"). When set, every token issue of a person whose client requires a membership (first issue and refresh) claims the person's pending invitations and mints their register-resolved `group:level` scopes and tenant instead of the static set — no membership is **refused** (403 `err:membership:notMember`), several are the person's to choose from (the token response's `tenants`), and an unreachable register fails the issuance closed (502), never an empty-scope token; a client whose row says `membership_required: false` keeps its people on the baseline and never touches the register. Every tenant-named `client_credentials` issue is resolved here too. The address is the register's **sign-in listener** (`http://rolebyte:8081` in the stacks), not its main port. Each call carries a token this service mints for it, naming the person and `AUDIT_CLIENT_ID` as the acting client, which must be the register's `SIGN_IN_CLIENT`; no registry grant for `membership:claim` or `membership:resolve` is needed, and none may exist |
 | `ROLEBYTE_AUDIENCE` | `svc:rolebyte` | Audience for the membership calls |
 | `DEMO_DIR` | — | Serve a static demo SPA under `/demo` — development |
 
