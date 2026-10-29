@@ -3,7 +3,7 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
-## Unreleased
+## v0.3.0
 
 ### Changed — the register is asked only about the person being signed in
 
@@ -21,8 +21,6 @@ stacks), set the register's `SIGN_IN_CLIENT` to this service's `AUDIT_CLIENT_ID`
 - **An answer about another person is a security event.** It already minted nothing and failed the issue closed
   (`502`); it now also emits `authz.denied` with `kind: sign-in`, which a healthy deployment never produces.
 - **Built on go-authbyte's `Client.DoWithToken` and `Client.Thumbprint`** (the release after v0.31.2).
-
-## v0.3.0
 
 ### Changed — built with Go 1.27.3
 
