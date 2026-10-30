@@ -16,7 +16,7 @@ const (
 )
 
 // The methods a request asks for are read from its acr_values, a space-separated
-// list in order of preference (OIDC Core §3.1.2.1). A value no method answers
+// list in order of preference ([OIDC Core §3.1.2.1]). A value no method answers
 // to, or a method this provider does not offer, makes the request one that can
 // never be met.
 func TestRequestedMethods(t *testing.T) {

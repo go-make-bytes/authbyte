@@ -14,7 +14,7 @@ import (
 var errMethodNotRequested = errors.New("login method not among the requested ones")
 
 // requestedMethods reads the methods a request's acr_values ask for: a
-// space-separated list in order of preference (OIDC Core §3.1.2.1), each value
+// space-separated list in order of preference ([OIDC Core §3.1.2.1]), each value
 // named by the provider's own vocabulary. It answers false when a value names no
 // method, or a method this provider does not offer: such a request can never be
 // met. The methods returned are the vocabulary's own strings, never the
