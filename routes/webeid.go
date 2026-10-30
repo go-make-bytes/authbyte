@@ -192,9 +192,7 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		sess.Capabilities = &session.Capabilities{AuthCertificate: tok.UnverifiedCertificate}
 	}
 
-	if err := r.Session().SaveSession(ctx, sid, sess, sessionTTL); err != nil {
-		ctx.Error(err)
-
+	if !r.saveEstablishedSession(ctx, flow, sid, sess) {
 		return
 	}
 

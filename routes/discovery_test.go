@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/go-quicktest/qt"
@@ -52,4 +53,13 @@ func TestDiscoveryNamesWhatTheServerTakes(t *testing.T) {
 
 	qt.Check(t, qt.DeepEquals(doc["code_challenge_methods_supported"], any([]any{"S256"})))
 	qt.Check(t, qt.DeepEquals(doc["token_endpoint_auth_methods_supported"], any([]any{"none", "client_secret_post"})))
+}
+
+// The revocation endpoint a client ends its session at is published, with the one
+// way a client proves itself there: by the session's own key, no secret.
+func TestDiscoveryNamesTheRevocationEndpoint(t *testing.T) {
+	doc := discoveryDocument(t)
+
+	qt.Check(t, qt.Equals(doc["revocation_endpoint"], any(strings.TrimSuffix(doc["issuer"].(string), "/")+"/revoke")))
+	qt.Check(t, qt.DeepEquals(doc["revocation_endpoint_auth_methods_supported"], any([]any{"none"})))
 }

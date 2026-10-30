@@ -54,6 +54,10 @@ func Init(a *authbytecore.App) error {
 	// Token endpoint (authorization_code | client_credentials | refresh_token).
 	a.Post("/token", r.token)
 
+	// Revocation (server to server): a client ends its session at the authority
+	// before it sends the browser through /logout.
+	a.Post("/revoke", r.revoke)
+
 	// Step-up / re-auth (existing session).
 	a.Post("/step-up", r.stepUp)
 

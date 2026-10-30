@@ -140,6 +140,10 @@ type Configuration struct {
 	DPoPProofMaxAge      time.Duration `mapstructure:"dpop_proof_max_age" validate:"required,gt=0"`
 	TokenClockSkewLeeway time.Duration `mapstructure:"token_clock_skew_leeway" validate:"gte=0"`
 
+	// SessionTTL is a session's whole lifetime from its sign-in: refreshes are
+	// refused once it has run out, whatever was saved on the session since.
+	SessionTTL time.Duration `mapstructure:"session_ttl" validate:"required,gt=0"`
+
 	// Server DPoP-Nonce (required from day one; spec decision A-3).
 	DPoPNonceEnabled bool          `mapstructure:"dpop_nonce_enabled"`
 	DPoPNonceTTL     time.Duration `mapstructure:"dpop_nonce_ttl" validate:"required,gt=0"`
@@ -148,9 +152,9 @@ type Configuration struct {
 	// loaded from Vault.
 	ServiceClientRegistry string `mapstructure:"service_client_registry"`
 
-	// Backing stores.
+	// Backing stores. Sessions and login state are kept in the application's
+	// cache, configured by azugo's CACHE_* settings.
 	PostgresDSN string `mapstructure:"postgres_dsn" validate:"required"`
-	RedisURL    string `mapstructure:"redis_url" validate:"required"`
 
 	// Audit — GDPR personal-data access logging (GDPR-audit) to the access-audit
 	// service. OPTIONAL: when AccessAuditURL is empty the GDPR client is not wired
@@ -226,6 +230,7 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	v.SetDefault("token_signing_alg", "ES256")
 	v.SetDefault("user_token_ttl", 15*time.Minute)
 	v.SetDefault("service_token_ttl", 5*time.Minute)
+	v.SetDefault("session_ttl", 12*time.Hour)
 	v.SetDefault("dpop_proof_max_age", 60*time.Second)
 	v.SetDefault("token_clock_skew_leeway", 30*time.Second)
 	v.SetDefault("dpop_nonce_enabled", true)
@@ -304,15 +309,18 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("signing_key_reload_interval", "SIGNING_KEY_RELOAD_INTERVAL")
 	_ = v.BindEnv("user_token_ttl", "USER_TOKEN_TTL")
 	_ = v.BindEnv("service_token_ttl", "SERVICE_TOKEN_TTL")
+	_ = v.BindEnv("session_ttl", "SESSION_TTL")
 	_ = v.BindEnv("dpop_proof_max_age", "DPOP_PROOF_MAX_AGE")
 	_ = v.BindEnv("token_clock_skew_leeway", "TOKEN_CLOCK_SKEW_LEEWAY")
 	_ = v.BindEnv("dpop_nonce_enabled", "DPOP_NONCE_ENABLED")
 	_ = v.BindEnv("dpop_nonce_ttl", "DPOP_NONCE_TTL")
 	_ = v.BindEnv("service_client_registry", "SERVICE_CLIENT_REGISTRY")
 	_ = v.BindEnv("postgres_dsn", "POSTGRES_DSN")
-	// The address carries the store's password: REDIS_URL_FILE.
-	loadSecret(v, "redis_url", "REDIS_URL")
-	_ = v.BindEnv("redis_url", "REDIS_URL")
+	// The session store is the application's cache (CACHE_TYPE, CACHE_CONNECTION,
+	// CACHE_PASSWORD_FILE, CACHE_KEY_PREFIX). Client-side caching stays off: the
+	// store never reads through it, and a server or user that refuses it would
+	// refuse the whole connection.
+	v.SetDefault("cache.client_cache", false)
 	_ = v.BindEnv("demo_dir", "DEMO_DIR")
 
 	_ = v.BindEnv("access_audit_url", "ACCESS_AUDIT_URL")
@@ -341,6 +349,9 @@ func loadSecret(v *viper.Viper, key, name string) {
 // fleet env (and recurses into the embedded Azugo config + Telemetry/Broker);
 // valid.Struct(c) then covers the service-specific fields.
 func (c *Configuration) Validate(valid *validation.Validate) error {
+	if err := refuseEmptyFileSecret("CACHE_PASSWORD", c.Cache.Password); err != nil {
+		return err
+	}
 	if err := c.BaseConfiguration.Validate(valid); err != nil {
 		return err
 	}

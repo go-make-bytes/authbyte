@@ -39,6 +39,10 @@ func (r *router) discovery(ctx *azugo.Context) {
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post"},
 		"code_challenge_methods_supported":      []string{pkceS256},
 		"dpop_signing_alg_values_supported":     []string{"ES256"},
+		// A client ends its session here, server to server, proving itself by the
+		// session's DPoP key and never by a secret.
+		"revocation_endpoint":                        base + "/revoke",
+		"revocation_endpoint_auth_methods_supported": []string{"none"},
 		// No ID token is issued, so nothing about one is advertised.
 	})
 }

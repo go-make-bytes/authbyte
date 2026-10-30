@@ -7,9 +7,10 @@ import (
 	"github.com/go-quicktest/qt"
 )
 
-// TestApp constructs an App wired for tests. Backing-store clients are created
-// lazily (no dial), so this works without live Redis/PostgreSQL; tests that
-// exercise login/sessions require those services.
+// TestApp constructs an App wired for tests. Backing stores are reached lazily,
+// so this works without a live Valkey or PostgreSQL; a test that exercises
+// login or sessions sets an in-memory session store (SetSessionStore) or names a
+// live Valkey.
 func TestApp(tb testing.TB) *App {
 	tb.Helper()
 
@@ -32,7 +33,10 @@ func TestApp(tb testing.TB) *App {
 	}
 	tb.Setenv("BASE_URL", "http://localhost:8080")
 	tb.Setenv("POSTGRES_DSN", "postgres://localhost:5432/authbyte_test?sslmode=disable")
-	tb.Setenv("REDIS_URL", "redis://localhost:6379/0")
+	// The service refuses an in-memory session store, so tests name a Valkey; it
+	// is dialled lazily, and tests that need the store set their own.
+	tb.Setenv("CACHE_TYPE", "redis")
+	tb.Setenv("CACHE_CONNECTION", "redis://localhost:6379/0")
 
 	app, err := New(nil, "0.0.0-test")
 	qt.Assert(tb, qt.IsNil(err))

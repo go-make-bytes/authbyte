@@ -5,6 +5,72 @@ runs the service or integrates against it.
 
 ## v0.3.0
 
+### Changed — the refresh token is a value of its own, bound to its client
+
+**Breaking for every client.** The `refresh_token` a code exchange answers used to be the session's internal id,
+and the sign-out address carried it in the browser. Now:
+- **The first code exchange of a session answers a new random refresh token.** The session's internal id never leaves
+  the service, and the store keeps the token only as a hash. A step-up's code exchange answers no `refresh_token`:
+  keep the one you hold.
+- **A refresh names its client.** `grant_type=refresh_token` requires `client_id`, and only the client the token was
+  issued to may use it, with the same DPoP key as before. Another client's use is refused `401`, like a token that is
+  gone, and the session goes on for its own client.
+- **`POST /step-up` names the session by `refresh_token`** (it was `session_id`) together with the `client_id` the token
+  was issued to:
+
+  ```json
+  {"refresh_token": "…", "client_id": "portal-spa", "method": "webEid", "code_challenge": "…", "redirect_uri": "…"}
+  ```
+
+### Changed — sign-out ends the session server to server; the browser's address names no session
+
+**Breaking for every client that signs out.** `GET /logout` no longer reads `sid` and ends no session: a refresh
+token in a browser address is kept in history and logs. Sign out in two legs:
+1. **`POST /revoke`** ([RFC 7009]), server to server, with a DPoP proof of the session's key:
+
+   ```
+   token=<the refresh token>&token_type_hint=refresh_token&client_id=portal-spa
+   ```
+
+   `200` when the session is ended, and also when the token is unknown; `401` for another client's token or a proof of
+   another key (the session goes on); `503` when the store cannot be read. The ending is recorded as a security event
+   (`session_ended`) naming the person and the login method.
+2. **`GET /logout?client_id=…&redirect_uri=…&login_method=…`** as before, for the browser: it passes through the
+   identity provider's logout for a federated method.
+
+A client that still sends only the browser leg leaves the session alive until its lifetime ends. The discovery
+document names the endpoint: `revocation_endpoint` and `revocation_endpoint_auth_methods_supported: ["none"]`.
+
+### Fixed — a session's lifetime is counted from its sign-in
+
+Every save of a session used to restart its twelve hours, so a step-up or a code exchange extended it. A session now
+ends `SESSION_TTL` (new setting, default `12h`) after its sign-in, whatever is saved on it later, and a save that
+lands after the session has ended does not bring it back.
+
+### Changed — sessions live in the application's cache (`CACHE_*`)
+
+**Breaking for every deployment.** `REDIS_URL` and `REDIS_URL_FILE` are gone. Login flows, application codes,
+sessions, refresh grants and the DPoP replay guard live in the shared cache, configured by azugo's settings:
+
+```
+CACHE_TYPE=redis
+CACHE_CONNECTION=rediss://valkey.example:6380/0
+CACHE_PASSWORD_FILE=/run/secrets/cache-password
+```
+
+- **The service refuses to start on `CACHE_TYPE=memory`, or with `CACHE_TYPE` unset, in every environment.** With two
+  instances a login begun on one would be unknown to the other, and each would accept a replayed DPoP proof once.
+- A `CACHE_PASSWORD_FILE` that is missing or empty stops the start, instead of connecting without the password.
+- Client-side caching is off by default (`CACHE_CLIENT_CACHE=false`).
+- A cache span in a trace is named by its operation and instance (`GET sessions`), never by its key.
+- **Taking this version signs everyone out once:** sessions and logins in progress are kept under a new key layout,
+  and the old one is not read.
+
+### Changed — dependencies
+
+go-gdpr-audit v1.1.8 (a queued access record keeps the resource of its own request) and go-platform-kit v1.11.6 (the
+correlation id is copied before it outlives its request).
+
 ### Fixed — a sign-in completes only with a method the request asked for
 
 A request's `acr_values` used to be passed to the provider and then forgotten, so a provider that answered with

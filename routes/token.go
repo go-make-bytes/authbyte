@@ -288,8 +288,27 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 	sess.Thumbprint = thumbprint
 	sess.ClientID = clientID
 	sess.Tenant = outcome.tenant
-	if err := r.Session().SaveSession(ctx, appCode.SessionID, sess, sessionTTL); err != nil {
-		ctx.Error(err)
+
+	// The first exchange of a session answers its refresh token: a value of its
+	// own, bound to this client, kept only as a hash. A step-up's exchange finds
+	// one already issued and answers none; the client keeps the one it holds
+	// ([RFC 6749 §5.1] makes it optional).
+	refresh := ""
+	if sess.RefreshKey == "" {
+		refresh = randomToken(refreshTokenBytes)
+		sess.RefreshKey = refreshKey(refresh)
+		if err := r.Session().SaveRefresh(ctx, sess.RefreshKey, &session.RefreshGrant{
+			SessionID: appCode.SessionID,
+			ClientID:  clientID,
+		}, sess.ExpiresAt); err != nil {
+			storeRefusal(ctx, err)
+
+			return
+		}
+	}
+
+	if err := r.Session().ReplaceSession(ctx, appCode.SessionID, sess); err != nil {
+		storeRefusal(ctx, err)
 
 		return
 	}
@@ -319,7 +338,7 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		AccessToken:  tok,
 		TokenType:    tokenTypeDPoP,
 		ExpiresIn:    exp,
-		RefreshToken: appCode.SessionID,
+		RefreshToken: refresh,
 		Tenants:      outcome.choices,
 		// The login-captured signing capabilities ride the code exchange (and
 		// only the code exchange — a refresh re-issues a token, it is not a
@@ -486,54 +505,14 @@ func (r *router) serviceAccountScopes(ctx *azugo.Context, clientID, tenant strin
 	return scopes, nil
 }
 
-// sessionLoader is the store call a refresh makes for the session it names.
+// sessionLoader is the store call that loads a session by its internal id.
 type sessionLoader interface {
 	LoadSession(ctx context.Context, sid string) (*session.Session, error)
 }
 
-// refreshSession loads the session a refresh token names. A session the store
-// does not hold is refused 401: the refresh token is no longer good. A store that
-// cannot be read is answered 503, because it says nothing about the session — a
-// caller that ends what it keeps on a refusal must not end it for an outage here.
-// ok is false when the answer is already written.
-// refreshBoundSession is refreshSession for a caller proving a DPoP key: the
-// session goes on only for the key it was bound to at sign-in, so a refresh
-// token taken from the browser is worth nothing without the browser's key.
-func refreshBoundSession(ctx *azugo.Context, store sessionLoader, refresh, thumbprint string) (*session.Session, bool) {
-	sess, ok := refreshSession(ctx, store, refresh)
-	if !ok {
-		return nil, false
-	}
-
-	if sess.Thumbprint == "" || sess.Thumbprint != thumbprint {
-		ctx.Error(corehttp.UnauthorizedError{})
-
-		return nil, false
-	}
-
-	return sess, true
-}
-
-func refreshSession(ctx *azugo.Context, store sessionLoader, refresh string) (*session.Session, bool) {
-	sess, err := store.LoadSession(ctx, refresh)
-	if err != nil {
-		if !errors.Is(err, session.ErrNotFound) {
-			ctx.Log().Warn("session store could not be read at refresh: " + err.Error())
-			ctx.Error(pkerrors.NewProblem("err:upstream:unavailable",
-				pkerrors.WithStatus(fasthttp.StatusServiceUnavailable)))
-
-			return nil, false
-		}
-		ctx.Error(corehttp.UnauthorizedError{})
-
-		return nil, false
-	}
-
-	return sess, true
-}
-
 // grantRefreshToken re-issues a user token within an existing session. The
-// caller must present the same DPoP key the session is bound to.
+// caller must be the client the refresh token was issued to and present the same
+// DPoP key the session is bound to.
 func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 	refresh, err := ctx.Form.String("refresh_token")
 	if err != nil {
@@ -542,7 +521,14 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	sess, ok := refreshBoundSession(ctx, r.Session(), refresh, thumbprint)
+	clientID, err := ctx.Form.String("client_id")
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
+	sess, _, ok := refreshBoundSession(ctx, r.Session(), refresh, clientID, thumbprint)
 	if !ok {
 		return
 	}

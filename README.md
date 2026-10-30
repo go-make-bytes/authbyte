@@ -12,7 +12,7 @@ It renders no human UI (a bundled static demo aside, off in production). Its sur
 
 ## Where it sits
 
-`authbyte` is the hub of the fleet's auth. The browser SPA (`portal-spa`) begins login through its backend-for-frontend (`portal-api`); this service drives the Authorization Code flow against **one configured upstream OIDC provider** — the **eParaksts / Entrust** identity provider in this deployment, or any standard OIDC provider via the generic connector (see Configuration) — or, for eID smart cards, calls the **web-eid** engine's stateless validation. It resolves the login to a person in the shared PostgreSQL, keeps transient flow and session state in Redis, and issues tokens signed with a key held only here. Downstream resource services (document, envelope, signflow, notification, …) never see the identity provider — they validate the issued token and, when acting for a user, obtain an on-behalf-of token back from this same `/token` endpoint (RFC 8693 token exchange).
+`authbyte` is the hub of the fleet's auth. The browser SPA (`portal-spa`) begins login through its backend-for-frontend (`portal-api`); this service drives the Authorization Code flow against **one configured upstream OIDC provider** — the **eParaksts / Entrust** identity provider in this deployment, or any standard OIDC provider via the generic connector (see Configuration) — or, for eID smart cards, calls the **web-eid** engine's stateless validation. It resolves the login to a person in the shared PostgreSQL, keeps transient flow and session state in the shared cache (Valkey or Redis), and issues tokens signed with a key held only here. Downstream resource services (document, envelope, signflow, notification, …) never see the identity provider — they validate the issued token and, when acting for a user, obtain an on-behalf-of token back from this same `/token` endpoint (RFC 8693 token exchange).
 
 ```mermaid
 flowchart LR
@@ -25,7 +25,7 @@ flowchart LR
         WE["web-eid engine<br/>stateless card validation"]
         AA["access-audit<br/>GDPR access ledger"]
         RS["resource services<br/>document · envelope · signflow"]
-        RD[(Redis<br/>flow · app codes · sessions · jti replay)]
+        RD[(Valkey<br/>flow · app codes · sessions · refresh grants · jti replay)]
         PG[(PostgreSQL<br/>person + credential mapping<br/>— procedures only)]
     end
 
@@ -148,9 +148,10 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 |---|---|---|
 | `GET /authorize` | Begin user login (Authorization Code + PKCE, RFC 7636, `S256` only: another method or none is answered at the client's `redirect_uri` with `error=invalid_request`). Validates `redirect_uri` against the registered allowlist, saves flow state, redirects to the identity provider. Optional `acr_values`: the methods the client accepts, in order; a value naming no method the provider offers is answered with `error=unmet_authentication_requirements`, and a sign-in the provider completes with another method gets the same answer instead of a code. Optional `tenant=<id>`: the organisation a person with several memberships chooses to act under (checked at the token issue) | anonymous |
 | `GET /callback` | Handle the identity-provider redirect: exchange the code, read claims, resolve the person, establish a session, mint a single-use app authorization code | state-verified (path configurable) |
-| `GET /logout` | Front-channel logout: delete the server session and send the browser to `redirect_uri`. For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone | anonymous (`redirect_uri` allowlisted) |
-| `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof | PKCE / client secret / session / subject token — all + DPoP |
-| `POST /step-up` | Re-authenticate with a stronger or different login method to satisfy a signing-flow binding; returns a redirect (federated methods) or a Web eID challenge | existing session |
+| `GET /logout` | The browser's leg of a sign-out (`client_id`, `redirect_uri`, optional `login_method`): send the browser to `redirect_uri`. For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone. It ends no session and takes no value naming one: the client ends the session with `POST /revoke` first | anonymous (`redirect_uri` allowlisted) |
+| `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` (with the `client_id` the token was issued to) \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof | PKCE / client secret / refresh token + client + session key / subject token — all + DPoP |
+| `POST /revoke` | End a session server to server ([RFC 7009]): `token` (the refresh token), `client_id`, optional `token_type_hint` (ignored). `200` when ended or when the token is unknown; `401` for another client's token or a proof of another key; `503` when the store cannot be read | the session's own client + its DPoP key |
+| `POST /step-up` | Re-authenticate with a stronger or different login method to satisfy a signing-flow binding; the session is named by `refresh_token` and `client_id`, the client it was issued to. Returns a redirect (federated methods) or a Web eID challenge | existing session |
 | `GET /identity` | The internal identity plus `loa`, `login_method`, and the signing flows that method permits | valid user token (DPoP) |
 | `POST /identity/persons` | Register a person before their first login: the identity code (any spelling; stored canonical) and the name create the person row with a stable subject and **no credential** — the subject an administrator then invites them to a membership register under. Idempotent on the code: `201` created, `200` already known (names filled only where the row has none); a code naming no country or an unknown identity type is `422 err:identity:invalid` (never echoed) | valid token carrying `identity:admin` (DPoP) |
 | `POST /identity/persons/lines` | Read, for up to 500 people at once (`{"subjects": ["sub:<id>", …]}`), whether each can sign in and what is known about how: the email a directory sign-in left (only when one is kept) and, for a person holding a national identity code, its country and displayed length — **never the code**. A person the platform does not know is left out. More than 500, an empty or non-list body or a malformed subject is `422 err:identity:invalid` (the values sent are never repeated). Answered `Cache-Control: no-store` | a **service acting as itself** (its own token: subject `svc:…`, naming no organisation and no actor) carrying `identity:lines` — a person's token, a token exchanged to act for someone and a service account's token for an organisation never read it, even holding the scope (DPoP) |
@@ -160,7 +161,7 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 | `GET /.well-known/jwks.json` | Signing public keys (active + retired-within-window) | anonymous |
 | `GET /.well-known/openid-configuration` | Discovery metadata (endpoints, supported grants, `S256`, `ES256`) | anonymous |
 | `GET /healthz` | Liveness — 200 whenever the process is up | anonymous |
-| `GET /readyz` | Readiness (fail-closed) — 503 when Redis or PostgreSQL is unreachable, so the pod leaves rotation | anonymous |
+| `GET /readyz` | Readiness (fail-closed) — 503 when the session cache or PostgreSQL is unreachable, so the pod leaves rotation | anonymous |
 | `GET /demo/{path}` | Static demo SPA, served same-origin so the browser can read the `DPoP-Nonce` header | **only if `DEMO_DIR` set** — development |
 
 The `/metrics` VictoriaMetrics registry and standard tracing/logging are provided by the shared platform base (`go-platform-kit`), gated by `METRICS_ENABLED`; there are no service-specific custom metrics.
@@ -175,7 +176,7 @@ One application object (`App` in [`app.go`](app.go)) wires every dependency once
 flowchart TB
     subgraph App["App (app.go) — built once by New() → init()"]
         direction TB
-        Init["platform.Setup → keys → issuer → registry →<br/>eParaksts adapter → identity resolver + binding →<br/>DPoP nonce → Redis (session + replay) → Postgres →<br/>auth-client → audit (sec-events + optional GDPR) →<br/>web-eid adapter (optional)"]
+        Init["platform.Setup → keys → issuer → registry →<br/>eParaksts adapter → identity resolver + binding →<br/>DPoP nonce → cache (session + replay) → Postgres →<br/>auth-client → audit (sec-events + optional GDPR) →<br/>web-eid adapter (optional)"]
     end
 
     subgraph Routes["routes/ — HTTP handlers"]
@@ -196,7 +197,7 @@ flowchart TB
     end
 
     subgraph State["state"]
-        RD[(Redis<br/>flow · code · session · jti)]
+        RD[(Valkey<br/>flow · code · session · refresh · jti)]
         PG[(PostgreSQL<br/>person mapping — procedures only)]
     end
 
@@ -223,17 +224,17 @@ sequenceDiagram
     participant SPA as portal-spa / portal-api
     participant AC as authbyte
     participant IDP as eParaksts IdP
-    participant RD as Redis
+    participant RD as Valkey
     participant PG as PostgreSQL
 
     SPA->>AC: GET /authorize (PKCE challenge, client_id, redirect_uri)
     AC->>AC: validate redirect_uri against registry allowlist
-    AC->>RD: SET flow:{state} (PKCE + client + redirect, TTL 10m)
+    AC->>RD: SET flows:{state} (PKCE + client + redirect, TTL 10m)
     AC-->>SPA: 302 → IdP authorize URL
     SPA->>IDP: authenticate (eParaksts Mobile / eID Scan)
     IDP-->>AC: GET /callback?code&state
 
-    AC->>RD: GETDEL flow:{state} (single use)
+    AC->>RD: GETDEL flows:{state} (single use)
     AC->>IDP: exchange code → tokens (id_token verified against the provider's keys when it publishes any) → userinfo
     AC->>AC: resolve acr+amr (+acrs) → login_method + loa
     alt method not permitted via IdP (sc_plugin → eid)
@@ -241,8 +242,8 @@ sequenceDiagram
     else permitted (mobileid / mobile-eid / upstream)
         AC->>PG: identity.upsert (person keyed on the identity code; a codeless directory login by its credential)
         AC-->>AC: GDPR access record (routine, fail-open)
-        AC->>RD: SET sess:{sid} (session, TTL 12h)
-        AC->>RD: SET code:{appCode} (bound to session + PKCE, TTL 60s)
+        AC->>RD: SET sessions:{sid} NX (session, lifetime from now, SESSION_TTL)
+        AC->>RD: SET codes:{appCode} (bound to session + PKCE, TTL 60s)
         AC-->>SPA: 302 → redirect_uri?code&state
     end
 
@@ -250,10 +251,11 @@ sequenceDiagram
     AC-->>SPA: 401 use_dpop_nonce + DPoP-Nonce (first hop only)
     SPA->>AC: POST /token (+ server nonce, code_verifier)
     AC->>AC: verify DPoP + nonce + jti replay
-    AC->>RD: GETDEL code:{appCode}<br/> verify PKCE + client/redirect echo
-    AC->>RD: bind session to DPoP thumbprint<br/> save
+    AC->>RD: GETDEL codes:{appCode}<br/> verify PKCE + client/redirect echo
+    AC->>RD: SET refresh:{hash of a new refresh token} (session id + client)
+    AC->>RD: SET sessions:{sid} XX (bound to the DPoP thumbprint, the session's end kept)
     AC->>AC: issuer.IssueUser (cnf.jkt = thumbprint)
-    AC-->>SPA: {access_token (DPoP), refresh_token = session id, capabilities?}
+    AC-->>SPA: {access_token (DPoP), refresh_token, capabilities?}
 ```
 
 **Login-time signing capabilities.** When the upstream's userinfo carries a
@@ -272,7 +274,9 @@ and a signing service falls back to resolving identities itself when fields are
 missing. Certificates carry personal data: they are never logged and die with
 the session.
 
-`refresh_token` is the server session id: a refresh re-issues a user token only when the caller presents the **same DPoP key** the session was bound to at code exchange, so a stolen refresh handle alone is useless. A session the store no longer holds is refused `401`. A session store that cannot be read answers `503` `err:upstream:unavailable`, because it says nothing about the session: a caller that ends its own session on a refusal keeps it through an outage here.
+**The refresh token is a value of its own.** The first code exchange of a session answers a new random `refresh_token`; the session's internal id never leaves the service, and the store keeps the token only as a hash, under which it records the session and the client it was issued to. A step-up's code exchange answers no new one (the client keeps the token it holds). A refresh (`grant_type=refresh_token`, `refresh_token`, `client_id`) re-issues a user token only for the client the token was issued to and only when the caller presents the **same DPoP key** the session was bound to at the code exchange, so a refresh token taken from its client is useless. Tokens are not rotated: two refreshes of one session at the same moment both succeed. A session lives `SESSION_TTL` (12h) from its sign-in and nothing saved on it later extends that; at its end every refresh is refused. A refresh token that is gone, another client's, or whose session has ended is refused `401`. A session store that cannot be read answers `503` `err:upstream:unavailable`, because it says nothing about the session: a caller that ends its own session on a refusal keeps it through an outage here.
+
+**Sign-out runs in two legs.** The client first ends the session at this service, server to server: `POST /revoke` with `token` (the refresh token), `client_id` and a DPoP proof of the session's key ([RFC 7009]). The session and its refresh token are deleted and the ending is recorded as a security event naming the person. The right token from another client, or without the session's key, is refused `401` and the session goes on; a token this service does not hold is answered `200`, because there is nothing to end ([RFC 7009 §2.2]). Then the client sends the browser to `GET /logout?client_id=…&redirect_uri=…&login_method=…`, which carries no value naming the session: it only decides whether the browser passes through the identity provider's logout first.
 
 ---
 
@@ -289,7 +293,7 @@ The `identity` package is the anti-corruption layer between the identity provide
 
 A card login permits the CSC signing flow that reads the card the same way the login did — the card in a reader for Web eID, read by a phone for eID Scan — and never the other card route. The `login_method` value is one camelCase literal shared by name with the signing service, so a login and the signature it authorises correlate on a single token. The binding **fails closed**: an unknown or empty method — and the plugin `eid` path — permits nothing. Two independent guards enforce the "eID card is Web eID only" rule: the callback rejects a login that resolves to `eid` with 403 even if the identity provider's page offered it, and the built-in login-method policy never maps a bare `eid`. Assurance-level and method vocabularies can be overridden per environment (`LOA_POLICY`) once production's exact `acr` values are confirmed.
 
-**Step-up** re-authenticates in place: it elevates the *existing* session rather than creating a new one, and enforces that the method actually achieved matches the one requested — so a user cannot "step up" to a stronger method yet authenticate with the old one and keep the binding unchanged.
+**Step-up** re-authenticates in place: it elevates the *existing* session rather than creating a new one, and enforces that the method actually achieved matches the one requested — so a user cannot "step up" to a stronger method yet authenticate with the old one and keep the binding unchanged. The client names the session by its refresh token and its own `client_id`; a step-up completed after the session has ended does not bring it back.
 
 ---
 
@@ -317,14 +321,17 @@ Token exchange lets a confidential client obtain an on-behalf-of token toward an
 
 The person is keyed on the eIDAS national identity code (`serial_number`), in **one canonical spelling** — the identity type, the country, a hyphen, and the national code with its separators removed (`PNOLV-XXXXXXXXXXX`). Every spelling a card or a provider writes is reduced to it before it is stored or compared, so the same human across different auth methods — different upstream subjects, and different ways of writing the same code — resolves to one internal subject. The country is never guessed: a code that names one keeps it, otherwise it comes from the card certificate's own country attribute — the nearest fact about a person there is, since they are holding the card — and a code that names no country, from a source that supplies none, refuses the login. `identity.upsert` reports whether the person was *created* on this call (first-ever login) so the caller emits the correct GDPR event (created vs updated); linking a new method to a known person is an update. `identity.register` creates the same row for a person who has **not** logged in yet — canonical code and name, no credential — so an invitee or a record-only worker has a platform subject from the first act; their first login matches the same canonical code and lands on that row. A person who signs in through an organisation's directory carries **no code at all**: the identity store resolves them by their credential handle (the provider's durable identifier) and creates them without one; a codeless person and the same human's card login are two persons until linked by a deliberate act.
 
-Redis holds only short-lived auth-flow and session state (`session/`), every key TTL-bounded:
+The shared cache (Valkey or Redis, `CACHE_*`) holds only short-lived auth-flow and session state (`session/`), every key TTL-bounded. Keys are `<CACHE_KEY_PREFIX>:<instance>:<key>`; the cache serializes every value, so nothing stored shares memory with the request it came from:
 
-| Key | Value | TTL | Notes |
+| Instance | Value | TTL | Notes |
 |---|---|---|---|
-| `flow:{state}` | in-progress login (PKCE, client, redirect, step-up intent, Web eID nonce) | 10m | consumed with `GETDEL` (atomic single use) |
-| `code:{appCode}` | app authorization code → session + PKCE | 60s | consumed with `GETDEL` (replay-safe) |
-| `sess:{sid}` | user session (subject, loa, method, scopes, DPoP thumbprint, signing capabilities) | 12h | `sid` is the SPA's `refresh_token`; deleted on logout. Capabilities hold identity certificates (personal data) — session-bound by design, never logged |
-| jti replay entries | seen DPoP proof ids | proof max-age + leeway | one-time-use guard for issuance proofs |
+| `flows:{state}` | in-progress login (PKCE, client, redirect, step-up intent, Web eID nonce) | 10m | consumed with `GETDEL` (atomic single use) |
+| `codes:{appCode}` | app authorization code → session + PKCE | 60s | consumed with `GETDEL` (replay-safe) |
+| `sessions:{sid}` | user session (subject, loa, method, scopes, DPoP thumbprint, the end of its lifetime, signing capabilities) | `SESSION_TTL` from the sign-in | created with `SET … NX`; every later save is `SET … XX` for what is left of its lifetime, so a session ended meanwhile stays ended and nothing extends it. `sid` never leaves the service. Capabilities hold identity certificates (personal data) — session-bound by design, never logged |
+| `refresh:{hash}` | the session id and the client a refresh token was issued to | the session's remaining lifetime | keyed by the SHA-256 of the token; the token itself is never stored. Deleted at `/revoke` |
+| `dpop-proofs:{jti}` | seen DPoP proof ids | proof max-age + leeway | `SET … NX`: one-time-use across every instance |
+
+A cache span in a trace is named by its operation and instance (`GET sessions`) and never by its key, because every key here is a session id, a token hash, a code, a login state or a proof id. Sessions and flows held under the earlier key layout (`flow:`, `code:`, `sess:`) are not read: taking this version signs everyone out once.
 
 ---
 
@@ -449,10 +456,15 @@ can be stated alongside the country.
 | Env | Default | Meaning |
 |---|---|---|
 | `POSTGRES_DSN` (`_FILE`) | — (required) | Identity-mapping DB; connects as the `EXECUTE`-only `authbyte_public` role. Pool size comes from the DSN itself — `pool_max_conns` (pgx reads it and strips it before Postgres sees it; its default is the host's CPU count): set it explicitly to the deployment's connection budget, e.g. `?sslmode=…&pool_max_conns=4&pool_min_conns=1`. |
-| `REDIS_URL` (`_FILE`) | — (required) | Flow state, sessions, jti replay. The address carries the store's password, so it may be read from a file; an explicit `REDIS_URL` wins. |
+| `CACHE_TYPE` | `memory` (refused) | The store for login flows, application codes, sessions, refresh grants and the DPoP replay guard: `redis`, `redis-cluster` or `redis-sentinel` (Valkey or Redis). The service **refuses to start on `memory`**, in every environment: with two instances a login begun on one would be unknown to the other, and each would accept a replayed proof once |
+| `CACHE_CONNECTION` | — (required with `redis*`) | The store's address, for example `rediss://valkey.example:6380/0` |
+| `CACHE_PASSWORD` (`_FILE`) | — | The store's password. A `CACHE_PASSWORD_FILE` that is missing or empty **stops the start**, rather than connecting without the password |
+| `CACHE_KEY_PREFIX` | — | A prefix for every key, when several services share one database |
+| `CACHE_CLIENT_CACHE` | `false` | Client-side caching; off, because the store never reads through it and a server or user that refuses it would refuse the connection |
+| `SESSION_TTL` | `12h` | A session's whole lifetime from its sign-in. Nothing saved on the session later extends it; at its end every refresh is refused |
 | `SERVICE_CLIENT_REGISTRY` (`_FILE`) | — | Declarative client ↔ audience ↔ scope document (secret store) |
 
-**TLS is selected by the URL scheme.** `rediss://…` connects over TLS; `redis://…` does not. `skip_verify=true` only relaxes certificate verification on a `rediss://` URL — on a `redis://` URL the client rejects it outright (`redis: unexpected option: skip_verify`) rather than silently upgrading the connection. Earlier Azugo versions did treat `skip_verify=true` as an implicit request for TLS; that side-effect is fixed from **Azugo v0.37** onwards, so a TLS endpoint must always be addressed as `rediss://`.
+**TLS is selected by the URL scheme.** `rediss://…` connects over TLS; `redis://…` does not. `skip_verify=true` only relaxes certificate verification on a `rediss://` address; on a `redis://` address the start is refused (`skip_verify requires a TLS connection string scheme`) rather than the connection being upgraded silently, so a TLS endpoint must always be addressed as `rediss://`.
 
 **Audit + Web eID + development**
 
@@ -495,10 +507,11 @@ authbyte/
 │   ├── router.go       — route registration (optional surfaces fail-closed by absence)
 │   ├── authorize.go    — /authorize · /callback · session establishment + step-up branch
 │   ├── token.go        — /token: 4 grants (code, client-credentials, refresh, exchange)
+│   ├── refresh.go      — refresh grants (the token's hash → session + client) · /revoke
 │   ├── dpop.go         — inbound DPoP verify + server-nonce challenge + jti replay
 │   ├── stepup.go       — /step-up (redirect vs Web eID challenge)
 │   ├── webeid.go       — /webeid/challenge · /webeid/login
-│   ├── logout.go       — front-channel logout (through the provider for federated methods)
+│   ├── logout.go       — the browser's sign-out leg (through the provider for federated methods)
 │   ├── identity.go     — /identity (permitted signing flows) · person registration
 │   ├── persons.go      — service-only person reads: sign-in lines · identity code
 │   ├── wellknown.go    — jwks.json · openid-configuration
@@ -513,7 +526,7 @@ authbyte/
     ├── registry/       — declarative client ↔ audience ↔ scope matrix
     ├── upstream/       — the generic upstream-OIDC connector (a provider is configuration; carries the eParaksts profile)
     ├── webeid/         — web-eid engine stateless-validate adapter
-    ├── session/        — Redis flow state + app codes + sessions
+    ├── session/        — the cache-backed store: flows, app codes, sessions, refresh grants, DPoP replay
     ├── store/          — PostgreSQL person mapping (procedures only)
     └── audit/          — Recorder façade: sec-events (NIS2) + gdpr (GDPR)
 ```
@@ -528,9 +541,12 @@ There is no Makefile; the standard Go toolchain is used directly (Go 1.26+).
 go build ./cmd/server        # build the server binary
 go test ./...                # unit tests
 go vet ./...
+
+# the store and tracing tests against a real Valkey or Redis (skipped without it)
+VALKEY_TEST_URL=redis://localhost:6379/15 go test ./...
 ```
 
-Crypto-critical paths are covered end to end: token issue → JWKS → verify (`issuer`), registry grant enforcement (`registry`), key rotation (`keys`), the acr/amr resolver and binding (`identity`), federated logout (`routes`), and full HTTP wiring (`routes/router_test.go`). `TestApp` builds a wired `App` with lazy backing-store clients, so tests that do not touch Redis/PostgreSQL run without them; DPoP and nonce primitives are tested in `go-authbyte`.
+Crypto-critical paths are covered end to end: token issue → JWKS → verify (`issuer`), registry grant enforcement (`registry`), key rotation (`keys`), the acr/amr resolver and binding (`identity`), federated logout (`routes`), and full HTTP wiring (`routes/router_test.go`). `TestApp` builds a wired `App` with lazy backing-store clients, so tests that do not touch Valkey/PostgreSQL run without them; route tests use the in-memory store in `session/sessiontest`, which a contract test checks against the real one; DPoP and nonce primitives are tested in `go-authbyte`.
 
 The container build is a multi-stage image (`Dockerfile`): a static `CGO_ENABLED=0` binary on a minimal rootless scratch base (`ghcr.io/wntrtech/scratch`, non-root `app` user), with the `web` entrypoint and a `health` subcommand wired to the Docker `HEALTHCHECK`.
 
@@ -538,8 +554,9 @@ The container build is a multi-stage image (`Dockerfile`): a static `CGO_ENABLED
 
 ## Security invariants
 
-- **Fail closed on trust primitives** — no signing key ⇒ refuses to start (unless the explicit dev opt-in); unknown/expired flow, app code, or session ⇒ 401; an identity-provider login that resolves to the disallowed `eid` (plugin) method ⇒ 403; a dead Redis/PostgreSQL ⇒ `/readyz` 503 and the pod leaves rotation.
-- **Every issued token is sender-constrained** — `cnf.jkt` binds the token to the caller's DPoP key; refresh requires the *same* key the session was bound to. Issuance hops require a fresh DPoP proof with a server nonce, and each proof id is one-time-use (jti replay guard).
+- **Fail closed on trust primitives** — no signing key ⇒ refuses to start (unless the explicit dev opt-in); unknown/expired flow, app code, or session ⇒ 401; an identity-provider login that resolves to the disallowed `eid` (plugin) method ⇒ 403; a dead cache/PostgreSQL ⇒ `/readyz` 503 and the pod leaves rotation.
+- **Every issued token is sender-constrained** — `cnf.jkt` binds the token to the caller's DPoP key; refresh and revocation require the *same* key the session was bound to and the client the refresh token was issued to. Issuance hops require a fresh DPoP proof with a server nonce, and each proof id is one-time-use across every instance (jti replay guard).
+- **No session value in a browser address or the store** — the internal session id never leaves the service; the refresh token is answered only to the client's server and kept only as a hash; sign-out ends the session server to server, and the browser's sign-out address carries no value naming it.
 - **Single-use flow artifacts** — login flows and app authorization codes are consumed atomically (`GETDEL`), so a replay under a race cannot reuse them; PKCE `code_verifier` is compared in constant time.
 - **Least privilege to data** — the database role is `EXECUTE`-only on stored procedures; the service never touches tables and never sees a schema column name in code. Service tokens are scoped to one audience by the registry grant matrix; a service subject can never be impersonated via token exchange.
 - **Open-redirect protection** — every `redirect_uri` (login, step-up, logout) is validated against the client's registered allowlist *before* any state is saved or any redirect issued.
@@ -550,7 +567,7 @@ The container build is a multi-stage image (`Dockerfile`): a static `CGO_ENABLED
 ## Known limitations
 
 - **Assurance vocabulary is provisional** — the built-in `acr`/`amr` → LoA mapping resolves the QSCD-backed eParaksts methods to `high` and reads a `level:*` URN when present; production's exact `acr` values must be confirmed and pinned via `LOA_POLICY`. The identity provider currently returns an identical `amr` for eParaksts Mobile and eID Scan, distinguished only in `acr` — the resolver scans both claims so this resolves correctly today and survives the upstream moving the signal.
-- **Refresh material lives in Redis** — a user session (and thus refresh) is only as durable as the Redis instance; a flush logs everyone out. Sessions are single-node key/value only (standard go-redis client, ordinary commands) — a non-clustered Redis works, Redis Cluster is not assumed.
+- **Refresh material lives in the shared cache** — a user session (and thus refresh) is only as durable as the Valkey or Redis behind `CACHE_*`; a flush logs everyone out. The store uses ordinary single-key commands (`GET`, `SET` with `NX`/`XX`/`PX`, `GETDEL`, `DEL`) and has been proven on a single, non-clustered Valkey and Redis; `redis-cluster` and `redis-sentinel` are accepted by the configuration but unproven here.
 - **Trusted-proxy assumption** — DPoP `htu` reconstruction honours `X-Forwarded-Proto`/`X-Forwarded-Host` and the client IP comes from `X-Forwarded-For`; the edge gateway MUST strip/overwrite these on inbound client traffic. They are never trusted from arbitrary origins.
 - **eID smart card is Web eID only** — the eParaksts/TrustedX plugin (`sc_plugin`) card path is intentionally not permitted; card login requires the Web eID surface and the `WEBEID_ENGINE_URL` engine to be configured.
 - **GDPR access logging is best-effort** — when access-audit is unreachable, records buffer to the outbox (durable only when `ACCESS_AUDIT_OUTBOX_DIR` is set) and drain in the background; a login is never blocked on audit pressure, so a lost outbox on an in-memory deployment means lost access records rather than a failed login.

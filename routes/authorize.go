@@ -18,7 +18,6 @@ import (
 const (
 	flowTTL    = 10 * time.Minute
 	appCodeTTL = 60 * time.Second
-	sessionTTL = 12 * time.Hour
 )
 
 // Step-up elevation can fail three distinguishable ways. They are surfaced as
@@ -276,9 +275,7 @@ func (r *router) callback(ctx *azugo.Context) {
 	// step-up replaces (or clears) whatever the previous login captured.
 	sess.Capabilities = r.captureCapabilities(ctx, tokens.AccessToken, info, id.LoginMethod)
 
-	if err := r.Session().SaveSession(ctx, sid, sess, sessionTTL); err != nil {
-		ctx.Error(err)
-
+	if !r.saveEstablishedSession(ctx, flow, sid, sess) {
 		return
 	}
 
@@ -361,6 +358,38 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 		ProviderSubject: id.IdPSubject,
 		ProviderIssuer:  id.Issuer,
 	}, randomToken(24), nil
+}
+
+// saveEstablishedSession stores what establishSession produced: a sign-in's new
+// session, given its whole lifetime from now, or a step-up's raised session,
+// written only over the session it raises and keeping its end. A session ended
+// while the step-up was under way stays ended. ok is false when the answer is
+// already written.
+func (r *router) saveEstablishedSession(ctx *azugo.Context, flow *session.Flow, sid string, sess *session.Session) bool {
+	if !flow.StepUp {
+		if err := r.Session().CreateSession(ctx, sid, sess, r.Config().SessionTTL); err != nil {
+			ctx.Error(err)
+
+			return false
+		}
+
+		return true
+	}
+
+	err := r.Session().ReplaceSession(ctx, sid, sess)
+	if errors.Is(err, session.ErrNotFound) {
+		r.Audit().StepUpFailure(ctx, sess.LoginMethod, errStepUpSessionGone.Error())
+		ctx.Error(corehttp.UnauthorizedError{})
+
+		return false
+	}
+	if err != nil {
+		ctx.Error(err)
+
+		return false
+	}
+
+	return true
 }
 
 // stepUpSession loads the session a step-up raises and checks the login that

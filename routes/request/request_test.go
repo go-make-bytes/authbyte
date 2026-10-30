@@ -32,7 +32,7 @@ func withCtx(t *testing.T, fn func(ctx *azugo.Context)) {
 // only the method varies across the validation cases.
 func validStepUp(method string) *request.StepUp {
 	return &request.StepUp{
-		SessionID:     "sess-123",
+		RefreshToken:  "a-refresh-token",
 		ClientID:      "portal-spa",
 		Method:        method,
 		CodeChallenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
@@ -70,7 +70,7 @@ func TestStepUpRejectsNonLaunchMethods(t *testing.T) {
 // step-up cannot proceed without a session, client, PKCE challenge or redirect.
 func TestStepUpRequiresCoreFields(t *testing.T) {
 	cases := map[string]func(*request.StepUp){
-		"missing_session_id":     func(r *request.StepUp) { r.SessionID = "" },
+		"missing_refresh_token":  func(r *request.StepUp) { r.RefreshToken = "" },
 		"missing_client_id":      func(r *request.StepUp) { r.ClientID = "" },
 		"missing_code_challenge": func(r *request.StepUp) { r.CodeChallenge = "" },
 		"missing_redirect_uri":   func(r *request.StepUp) { r.RedirectURI = "" },

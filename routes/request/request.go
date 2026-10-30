@@ -6,10 +6,12 @@ import "azugo.io/azugo"
 // StepUp asks the service to re-authenticate the current session with a
 // stronger / different login method (for the signing-flow binding).
 type StepUp struct {
-	// SessionID identifies the existing session (the refresh handle).
-	SessionID string `json:"session_id" validate:"required"`
-	// ClientID is the public client initiating the step-up; its redirect_uri is
-	// validated against the registry allowlist (open-redirect protection).
+	// RefreshToken names the existing session: the refresh token the client was
+	// answered at its code exchange.
+	RefreshToken string `json:"refresh_token" validate:"required"`
+	// ClientID is the public client initiating the step-up: the client the refresh
+	// token was issued to. Its redirect_uri is validated against the registry
+	// allowlist (open-redirect protection).
 	ClientID string `json:"client_id" validate:"required"`
 	// Method is the login method to step up to. eparakstsMobile and eidScan are
 	// Entrust-federated (the response carries an authorize_url to follow); webEid

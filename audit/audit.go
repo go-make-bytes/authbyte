@@ -84,9 +84,22 @@ func (r *Recorder) StepUpFailure(ctx *azugo.Context, method, reason string) {
 	r.auth(ctx, "", "", method, true, broker.OutcomeFailure, reason)
 }
 
-// Logout records an interactive logout (session termination). actorID/method may
-// be empty when the caller could not resolve the session. Federated indicates the
-// browser was sent on to the eParaksts IdP logout to clear its SSO cookie.
+// SessionEnded records a session ended at its client's request, server to server:
+// its refresh token renews nothing from now on.
+func (r *Recorder) SessionEnded(ctx *azugo.Context, actorID, method string) {
+	attrs := map[string]any{secevents.AttrKind: "session_ended"}
+	if method != "" {
+		attrs[secevents.AttrMethod] = method
+	}
+
+	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeSuccess,
+		actorRef(actorID, "user", ""), attrs)
+}
+
+// Logout records the browser's leg of a sign-out. It names no person: the
+// session is ended server to server (SessionEnded), and the browser's address
+// carries no value that names it. Federated indicates the browser was sent on to
+// the provider's logout to clear its SSO cookie.
 func (r *Recorder) Logout(ctx *azugo.Context, actorID, method string, federated bool) {
 	attrs := map[string]any{secevents.AttrKind: "logout", "federated": federated}
 	if method != "" {

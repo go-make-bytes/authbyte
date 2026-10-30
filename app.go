@@ -34,8 +34,8 @@ import (
 
 	"azugo.io/azugo"
 	"azugo.io/azugo/server"
+	"azugo.io/core/cache"
 	corecfg "azugo.io/core/config"
-	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -53,11 +53,10 @@ type App struct {
 	resolver   *identity.Resolver
 	binding    identity.BindingResolver
 	nonce      *nonce.Issuer
-	session    *session.Store
+	session    SessionStore
 	store      *store.Store
 	authClient *authclient.Client
 	replay     replay.Store
-	redis      redis.UniversalClient
 
 	// Audit emitters: NIS2-audit security telemetry (always) and the optional
 	// GDPR-audit GDPR access client + its outbound auth-client (set only when
@@ -104,6 +103,35 @@ type ScopeResolver interface {
 	Admit(ctx *azugo.Context, subjectKey string, login rolebyte.DirectoryLogin) (bool, error)
 }
 
+// SessionStore keeps what a sign-in carries between requests: the login flows in
+// progress, the application codes waiting for their exchange, the people's
+// sessions and the refresh grants that name them. A missing or expired entry is
+// session.ErrNotFound; any other error says the store could not answer.
+//
+// A session lives until its ExpiresAt, set once when it is created; replacing it
+// keeps that end and writes only over a session that still exists, so an ended
+// session is never brought back by a save that was already under way. A refresh
+// grant is kept under a key the caller derives from the token, never the token.
+type SessionStore interface {
+	SaveFlow(ctx context.Context, state string, f *session.Flow, ttl time.Duration) error
+	ConsumeFlow(ctx context.Context, state string) (*session.Flow, error)
+	SaveAppCode(ctx context.Context, code string, c *session.AppCode, ttl time.Duration) error
+	ConsumeAppCode(ctx context.Context, code string) (*session.AppCode, error)
+	// CreateSession stores a new session that lives for lifetime from now, and
+	// records that end on sess.
+	CreateSession(ctx context.Context, sid string, sess *session.Session, lifetime time.Duration) error
+	// ReplaceSession writes sess over the live session sid until its ExpiresAt;
+	// session.ErrNotFound when that session has ended.
+	ReplaceSession(ctx context.Context, sid string, sess *session.Session) error
+	LoadSession(ctx context.Context, sid string) (*session.Session, error)
+	DeleteSession(ctx context.Context, sid string) error
+	// SaveRefresh keeps a refresh grant under key until expiresAt.
+	SaveRefresh(ctx context.Context, key string, g *session.RefreshGrant, expiresAt time.Time) error
+	LoadRefresh(ctx context.Context, key string) (*session.RefreshGrant, error)
+	DeleteRefresh(ctx context.Context, key string) error
+	Ping(ctx context.Context) error
+}
+
 // New constructs the Identity/Auth application.
 func New(cmd *cobra.Command, version string) (*App, error) {
 	config := NewConfiguration()
@@ -134,6 +162,10 @@ func (a *App) init() error {
 	// wired identically across the fleet via go-platform-kit.
 	if err := platform.Setup(a.App, platform.Options{
 		Config: cfg.BaseConfiguration,
+		// The session store's keys are session ids, refresh-token hashes, codes,
+		// login states and proof ids, so a cache span is named by its instance and
+		// never by its key.
+		TracingOptions: cacheTracingOptions(),
 	}); err != nil {
 		return err
 	}
@@ -190,15 +222,23 @@ func (a *App) init() error {
 		a.nonce = ni
 	}
 
-	// Redis (sessions, flow state) and PostgreSQL (identity mapping).
-	opts, err := redis.ParseURL(cfg.RedisURL)
-	if err != nil {
-		return fmt.Errorf("invalid REDIS_URL: %w", err)
+	// Sessions, login state and the DPoP replay guard live in the application's
+	// shared cache (Valkey or Redis), never in memory, in any environment: with
+	// two instances a login begun on one would be unknown to the other, and each
+	// would accept a replayed proof once. PostgreSQL holds the identity mapping.
+	if a.Cache().ConfiguredType() == cache.MemoryCache {
+		return errors.New("the session store is in memory; set CACHE_TYPE=redis and CACHE_CONNECTION")
 	}
-	a.redis = redis.NewClient(opts)
-	a.session = session.New(a.redis)
-	// The authority enforces jti replay on its own endpoints via Redis.
-	a.replay = replay.NewRedis(a.redis)
+	sessions, err := session.New(a.Cache())
+	if err != nil {
+		return err
+	}
+	a.session = sessions
+	proofs, err := session.NewProofReplay(a.Cache())
+	if err != nil {
+		return err
+	}
+	a.replay = proofs
 
 	st, err := store.New(a.BackgroundContext(), cfg.PostgresDSN)
 	if err != nil {
@@ -298,7 +338,7 @@ func (a *App) Start() error {
 	defer cancel()
 
 	if err := a.session.Ping(ctx); err != nil {
-		a.Log().Warn("redis not reachable at startup — sessions/login degraded", zap.Error(err))
+		a.Log().Warn("session cache not reachable at startup — sessions/login degraded", zap.Error(err))
 	}
 	if err := a.store.Ping(ctx); err != nil {
 		a.Log().Warn("postgres not reachable at startup — new-user mapping degraded", zap.Error(err))
@@ -369,10 +409,8 @@ func (a *App) Stop() {
 	if a.store != nil {
 		a.store.Close()
 	}
-	if a.redis != nil {
-		_ = a.redis.Close()
-	}
 
+	// The application closes its cache when it stops.
 	a.App.Stop()
 }
 
@@ -393,7 +431,7 @@ func (a *App) Upstream() *upstream.Provider      { return a.upstream }
 func (a *App) Resolver() *identity.Resolver      { return a.resolver }
 func (a *App) Binding() identity.BindingResolver { return a.binding }
 func (a *App) Nonce() *nonce.Issuer              { return a.nonce }
-func (a *App) Session() *session.Store           { return a.session }
+func (a *App) Session() SessionStore             { return a.session }
 func (a *App) Store() *store.Store               { return a.store }
 func (a *App) AuthClient() *authclient.Client    { return a.authClient }
 func (a *App) Replay() replay.Store              { return a.replay }
@@ -409,6 +447,12 @@ func (a *App) SetScopeResolver(r ScopeResolver) { a.scopeResolver = r }
 
 // SetAudit overrides the audit recorder (test use only).
 func (a *App) SetAudit(r *audit.Recorder) { a.audit = r }
+
+// SetSessionStore overrides the session store (test use only).
+func (a *App) SetSessionStore(s SessionStore) { a.session = s }
+
+// SetReplay overrides the DPoP proof replay store (test use only).
+func (a *App) SetReplay(s replay.Store) { a.replay = s }
 
 // signInTokenTTL is how long a sign-in door token lives: one call, retries included.
 const signInTokenTTL = time.Minute

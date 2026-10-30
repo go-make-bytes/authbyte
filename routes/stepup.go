@@ -58,10 +58,11 @@ func (r *router) stepUp(ctx *azugo.Context) {
 		return
 	}
 
-	// The session must exist (auth = existing session).
-	if _, err := r.Session().LoadSession(ctx, req.SessionID); err != nil {
-		ctx.Error(corehttp.UnauthorizedError{})
-
+	// The session must exist, named by the refresh token its own client holds
+	// (auth = existing session). The internal session id never leaves the
+	// authority, so it names nothing here.
+	_, sid, ok := refreshedSession(ctx, r.Session(), req.RefreshToken, req.ClientID)
+	if !ok {
 		return
 	}
 
@@ -94,7 +95,7 @@ func (r *router) stepUp(ctx *azugo.Context) {
 			SPAState:            req.State,
 			StepUp:              true,
 			RequestedLogin:      req.Method,
-			SessionID:           req.SessionID,
+			SessionID:           sid,
 			ClientID:            req.ClientID,
 			WebEIDNonce:         nonce,
 		}
@@ -127,7 +128,7 @@ func (r *router) stepUp(ctx *azugo.Context) {
 		EntrustRedirectURI:  entrustRedirect,
 		StepUp:              true,
 		RequestedLogin:      req.Method,
-		SessionID:           req.SessionID,
+		SessionID:           sid,
 		ClientID:            req.ClientID,
 		Nonce:               oidcNonce,
 	}
