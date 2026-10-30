@@ -232,7 +232,7 @@ func (r *Registry) AllowedScopes(clientID, audience string, requested []string) 
 // MayActFrom reports whether clientID may exchange a subject token issued for
 // audiences: the client must be known and enabled, and one of the audiences
 // must be the client itself or a value it lists under act_from (each principal
-// a JWT is meant for names itself in its audience, RFC 7519 §4.1.3).
+// a JWT is meant for names itself in its audience, [RFC 7519 §4.1.3]).
 func (r *Registry) MayActFrom(clientID string, audiences []string) bool {
 	c, ok := r.clients[clientID]
 	if !ok || !c.Enabled {
