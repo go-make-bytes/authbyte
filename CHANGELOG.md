@@ -5,6 +5,13 @@ runs the service or integrates against it.
 
 ## v0.3.0
 
+### Added — the store's address can come from a file
+
+`REDIS_URL_FILE`: the address of the store that holds flows, sessions and replay guards carries the store's password,
+so it can now be read from a file (for example one a secrets agent writes). `REDIS_URL`, when set, still wins, so an
+existing deployment changes nothing. A missing or empty file leaves the address unset, and the service refuses to
+start because the address is required.
+
 ### Changed — the register is asked only about the person being signed in
 
 **Breaking, together with the register.** Release it with the register version that serves the sign-in doors, and in

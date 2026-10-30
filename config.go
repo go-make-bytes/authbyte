@@ -310,6 +310,8 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("dpop_nonce_ttl", "DPOP_NONCE_TTL")
 	_ = v.BindEnv("service_client_registry", "SERVICE_CLIENT_REGISTRY")
 	_ = v.BindEnv("postgres_dsn", "POSTGRES_DSN")
+	// The address carries the store's password: REDIS_URL_FILE.
+	loadSecret(v, "redis_url", "REDIS_URL")
 	_ = v.BindEnv("redis_url", "REDIS_URL")
 	_ = v.BindEnv("demo_dir", "DEMO_DIR")
 

@@ -449,7 +449,7 @@ can be stated alongside the country.
 | Env | Default | Meaning |
 |---|---|---|
 | `POSTGRES_DSN` (`_FILE`) | — (required) | Identity-mapping DB; connects as the `EXECUTE`-only `authbyte_public` role. Pool size comes from the DSN itself — `pool_max_conns` (pgx reads it and strips it before Postgres sees it; its default is the host's CPU count): set it explicitly to the deployment's connection budget, e.g. `?sslmode=…&pool_max_conns=4&pool_min_conns=1`. |
-| `REDIS_URL` | — (required) | Flow state, sessions, jti replay |
+| `REDIS_URL` (`_FILE`) | — (required) | Flow state, sessions, jti replay. The address carries the store's password, so it may be read from a file; an explicit `REDIS_URL` wins. |
 | `SERVICE_CLIENT_REGISTRY` (`_FILE`) | — | Declarative client ↔ audience ↔ scope document (secret store) |
 
 **TLS is selected by the URL scheme.** `rediss://…` connects over TLS; `redis://…` does not. `skip_verify=true` only relaxes certificate verification on a `rediss://` URL — on a `redis://` URL the client rejects it outright (`redis: unexpected option: skip_verify`) rather than silently upgrading the connection. Earlier Azugo versions did treat `skip_verify=true` as an implicit request for TLS; that side-effect is fixed from **Azugo v0.37** onwards, so a TLS endpoint must always be addressed as `rediss://`.
