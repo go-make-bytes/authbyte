@@ -43,18 +43,6 @@ type webeidLoginResponse struct {
 //
 // @route /webeid/challenge [get].
 func (r *router) webeidChallenge(ctx *azugo.Context) {
-	challenge, err := ctx.Query.String("code_challenge")
-	if err != nil {
-		ctx.Error(err)
-
-		return
-	}
-
-	method := "S256"
-	if m := ctx.Query.StringOptional("code_challenge_method"); m != nil {
-		method = *m
-	}
-
 	redirectURI, err := ctx.Query.String("redirect_uri")
 	if err != nil {
 		ctx.Error(err)
@@ -72,6 +60,15 @@ func (r *router) webeidChallenge(ctx *azugo.Context) {
 	// Open-redirect guard, same as /authorize ([RFC 6749 §10.6]).
 	if err := r.Registry().ValidateRedirectURI(clientID, redirectURI); err != nil {
 		ctx.Error(azugo.ParamInvalidError{Name: "redirect_uri", Tag: "registered"})
+
+		return
+	}
+
+	// PKCE is S256 only, as at /authorize; this door is called by the client's
+	// server, so the refusal is an error answer, not a redirect.
+	challenge, method, ok := s256Challenge(ctx)
+	if !ok {
+		ctx.Error(azugo.ParamInvalidError{Name: "code_challenge_method", Tag: "eq=" + pkceS256})
 
 		return
 	}

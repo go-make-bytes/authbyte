@@ -5,6 +5,8 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"net/url"
+
+	"azugo.io/azugo"
 )
 
 // appendCodeState appends the application authorization code and state to a
@@ -47,17 +49,32 @@ func appendErrorState(redirectURI, errCode, errDescription, state string) string
 	return u.String()
 }
 
-// verifyPKCE validates a PKCE code_verifier against the stored challenge.
-func verifyPKCE(verifier, challenge, method string) bool {
-	switch method {
-	case "", "S256":
-		sum := sha256.Sum256([]byte(verifier))
-		computed := base64.RawURLEncoding.EncodeToString(sum[:])
+// pkceS256 is the one PKCE method accepted: the plain form puts the verifier
+// itself in the authorization request ([RFC 9700 §2.1.1]).
+const pkceS256 = "S256"
 
-		return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
-	case "plain":
-		return subtle.ConstantTimeCompare([]byte(verifier), []byte(challenge)) == 1
-	default:
+// s256Challenge reads the request's PKCE challenge. ok is false when the
+// challenge is missing or the method is anything but S256, an absent method
+// included: absent means plain ([RFC 7636 §4.3]).
+func s256Challenge(ctx *azugo.Context) (challenge, method string, ok bool) {
+	c := ctx.Query.StringOptional("code_challenge")
+	m := ctx.Query.StringOptional("code_challenge_method")
+	if c == nil || *c == "" || m == nil || *m != pkceS256 {
+		return "", "", false
+	}
+
+	return *c, pkceS256, true
+}
+
+// verifyPKCE validates a PKCE code_verifier against the stored S256 challenge.
+// Any other method never verifies.
+func verifyPKCE(verifier, challenge, method string) bool {
+	if method != pkceS256 {
 		return false
 	}
+
+	sum := sha256.Sum256([]byte(verifier))
+	computed := base64.RawURLEncoding.EncodeToString(sum[:])
+
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }

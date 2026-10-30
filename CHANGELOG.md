@@ -5,6 +5,21 @@ runs the service or integrates against it.
 
 ## v0.3.0
 
+### Changed — PKCE is S256 only, and discovery advertises no ID token
+
+**Breaking for a client that sends `code_challenge_method=plain` or no method at all.** Such a client gets a refusal
+where it used to be let through with the weaker form.
+- **`/authorize`** takes PKCE only with `code_challenge_method=S256`. An absent method means `plain` (RFC 7636 §4.3),
+  so it is refused too, as is a missing `code_challenge`. The refusal is an authorization error response: the browser
+  goes back to the client's registered `redirect_uri` with `error=invalid_request` and the client's `state`, before
+  any login flow is stored. The `redirect_uri` is checked first, so the refusal never goes anywhere else. A missing
+  `code_challenge` used to be answered with a `400` page.
+- **`/webeid/challenge`** refuses the same requests with a `422`.
+- **The token endpoint** verifies a code only against an S256 challenge.
+- **The discovery document** no longer lists `id_token_signing_alg_values_supported`, because no ID token is issued.
+  It now lists `none` beside `client_secret_post` in `token_endpoint_auth_methods_supported`, because a browser
+  client proves PKCE at `/token` instead of presenting a secret.
+
 ### Added — the store's address can come from a file
 
 `REDIS_URL_FILE`: the address of the store that holds flows, sessions and replay guards carries the store's password,

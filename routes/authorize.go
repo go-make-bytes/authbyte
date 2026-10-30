@@ -43,18 +43,6 @@ func (r *router) authorize(ctx *azugo.Context) {
 		return
 	}
 
-	challenge, err := ctx.Query.String("code_challenge")
-	if err != nil {
-		ctx.Error(err)
-
-		return
-	}
-
-	method := "S256"
-	if m := ctx.Query.StringOptional("code_challenge_method"); m != nil {
-		method = *m
-	}
-
 	redirectURI, err := ctx.Query.String("redirect_uri")
 	if err != nil {
 		ctx.Error(err)
@@ -80,6 +68,16 @@ func (r *router) authorize(ctx *azugo.Context) {
 	spaState := ""
 	if s := ctx.Query.StringOptional("state"); s != nil {
 		spaState = *s
+	}
+
+	// PKCE is S256 only. A missing challenge or any other method is answered at
+	// the client's own (now validated) address, before any flow is stored
+	// ([RFC 7636 §4.4.1]).
+	challenge, method, ok := s256Challenge(ctx)
+	if !ok {
+		ctx.RedirectUnsafe(appendErrorState(redirectURI, "invalid_request", "code_challenge with code_challenge_method S256 required", spaState))
+
+		return
 	}
 
 	// The organisation the person asks to act under, when they belong to more
