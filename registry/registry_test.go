@@ -253,3 +253,67 @@ public_clients:
 		t.Fatal("no client requires a membership explicitly — an unset requirement must not block a register-less start")
 	}
 }
+
+// A misspelled key must stop the start: read leniently, "act_form" would load as
+// a client that acts from nothing, and every exchange it makes would be refused
+// with no hint of why.
+func TestLoadRefusesAnUnknownKey(t *testing.T) {
+	_, err := Load([]byte(`
+service_clients:
+  - client_id: svc:portal-api
+    secret_ref: env:PORTAL
+    enabled: true
+    act_form: [portal-api]
+`), nil)
+	if err == nil {
+		t.Fatal("a registry with an unknown key must not load")
+	}
+}
+
+const actDoc = `
+service_clients:
+  - client_id: svc:portal-api
+    secret_ref: env:PORTAL
+    enabled: true
+    act_from: [portal-api]
+  - client_id: svc:signflow
+    secret_ref: env:ORCH
+    enabled: true
+  - client_id: svc:disabled
+    secret_ref: env:X
+    enabled: false
+    act_from: [portal-api]
+`
+
+// A client exchanges a token only when it was issued for the client itself (a
+// hop in a chain) or for an audience the client lists under act_from.
+func TestMayActFrom(t *testing.T) {
+	r, err := Load([]byte(actDoc), nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		client    string
+		audiences []string
+		want      bool
+	}{
+		{"a listed audience", "svc:portal-api", []string{"portal-api"}, true},
+		{"an audience the client does not list", "svc:portal-api", []string{"flowbyte-portal"}, false},
+		{"another service's delegated token", "svc:portal-api", []string{"svc:document"}, false},
+		{"a client listing nothing, given a product token", "svc:signflow", []string{"portal-api"}, false},
+		{"a client listing nothing, given a token addressed to itself", "svc:signflow", []string{"svc:signflow"}, true},
+		{"a token with no audience", "svc:portal-api", nil, false},
+		{"an empty audience value", "svc:portal-api", []string{""}, false},
+		{"two audiences, one listed", "svc:portal-api", []string{"svc:document", "portal-api"}, true},
+		{"two audiences, one the client itself", "svc:signflow", []string{"portal-api", "svc:signflow"}, true},
+		{"a disabled client", "svc:disabled", []string{"portal-api"}, false},
+		{"an unknown client", "svc:nobody", []string{"svc:nobody"}, false},
+	}
+	for _, c := range cases {
+		if got := r.MayActFrom(c.client, c.audiences); got != c.want {
+			t.Errorf("%s: MayActFrom(%q, %q) = %v, want %v", c.name, c.client, c.audiences, got, c.want)
+		}
+	}
+}

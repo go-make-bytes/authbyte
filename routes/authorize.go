@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -20,14 +21,16 @@ const (
 	sessionTTL = 12 * time.Hour
 )
 
-// Step-up elevation can fail two distinguishable ways. They are surfaced as
+// Step-up elevation can fail three distinguishable ways. They are surfaced as
 // separate errors so the audit trail records the true cause instead of
-// attributing every failure to a method mismatch: either the session to elevate
-// is gone (it expired between starting the step-up and completing it), or the
-// login method actually achieved did not match the one requested.
+// attributing every failure to a method mismatch: the session to elevate is gone
+// (it expired or was signed out between starting the step-up and completing
+// it), the login was another person's, or the login method actually achieved
+// did not match the one requested.
 var (
 	errStepUpSessionGone    = errors.New("step-up session not found or expired")
 	errStepUpMethodMismatch = errors.New("achieved login method did not match the requested step-up method")
+	errStepUpPersonMismatch = errors.New("the step-up login is not the person the session belongs to")
 )
 
 // authorize begins user login. The SPA (via the BFF) calls this with its PKCE
@@ -234,7 +237,7 @@ func (r *router) callback(ctx *azugo.Context) {
 	sess, sid, err := r.establishSession(ctx, flow, id)
 	if err != nil {
 		if flow.StepUp {
-			// err is errStepUpSessionGone or errStepUpMethodMismatch — its message
+			// err is errStepUpSessionGone, errStepUpPersonMismatch or errStepUpMethodMismatch — its message
 			// is the true cause; either way the step-up is unauthorized.
 			r.Audit().StepUpFailure(ctx, id.LoginMethod, err.Error())
 			ctx.Error(corehttp.UnauthorizedError{})
@@ -289,27 +292,9 @@ func (r *router) callback(ctx *azugo.Context) {
 // existing one with elevated assurance / a new login method (step-up).
 func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id identity.Identity) (*session.Session, string, error) {
 	if flow.StepUp {
-		sess, err := r.Session().LoadSession(ctx, flow.SessionID)
+		sess, err := stepUpSession(ctx, r.Session(), flow, id)
 		if err != nil {
-			return nil, "", errStepUpSessionGone
-		}
-
-		// Enforce that the achieved method matches the one requested at step-up.
-		// Without this, an eID-logged-in user could "step up" to eParaksts Mobile
-		// yet authenticate with eID again and the binding would not actually
-		// change.
-		if !stepUpMethodMatches(flow.RequestedLogin, id.LoginMethod) {
-			return nil, "", errStepUpMethodMismatch
-		}
-
-		// Reflect the new assurance/method; identity and scopes are unchanged.
-		sess.LoA = id.LoA
-		sess.LoginMethod = id.LoginMethod
-		// A step-up through an upstream provider is a login through that
-		// provider's directory too; a card step-up says nothing about one.
-		if id.Issuer != "" {
-			sess.DirectoryIssuer = id.Issuer
-			sess.DirectoryGuest = id.DirectoryGuest
+			return nil, "", err
 		}
 
 		return sess, flow.SessionID, nil
@@ -347,7 +332,58 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 		// door at token issue ("" for a card login).
 		DirectoryIssuer: id.Issuer,
 		DirectoryGuest:  id.DirectoryGuest,
+		ProviderSubject: id.IdPSubject,
+		ProviderIssuer:  id.Issuer,
 	}, randomToken(24), nil
+}
+
+// stepUpSession loads the session a step-up raises and checks the login that
+// completed it, then reflects the new assurance and method on it. Nothing is
+// changed on a refusal.
+func stepUpSession(ctx context.Context, store sessionLoader, flow *session.Flow, id identity.Identity) (*session.Session, error) {
+	sess, err := store.LoadSession(ctx, flow.SessionID)
+	if err != nil {
+		return nil, errStepUpSessionGone
+	}
+
+	// The login must be the session's person, or one person's proof would raise
+	// another person's session.
+	if !samePerson(sess, id) {
+		return nil, errStepUpPersonMismatch
+	}
+
+	// Enforce that the achieved method matches the one requested at step-up.
+	// Without this, an eID-logged-in user could "step up" to eParaksts Mobile
+	// yet authenticate with eID again and the binding would not actually
+	// change.
+	if !stepUpMethodMatches(flow.RequestedLogin, id.LoginMethod) {
+		return nil, errStepUpMethodMismatch
+	}
+
+	// Reflect the new assurance/method; identity and scopes are unchanged.
+	sess.LoA = id.LoA
+	sess.LoginMethod = id.LoginMethod
+	// A step-up through an upstream provider is a login through that
+	// provider's directory too; a card step-up says nothing about one.
+	if id.Issuer != "" {
+		sess.DirectoryIssuer = id.Issuer
+		sess.DirectoryGuest = id.DirectoryGuest
+	}
+
+	return sess, nil
+}
+
+// samePerson reports whether a step-up's login is the person the session
+// belongs to. A session with an identity code needs the same code (both login
+// paths canonicalise it). A session without one needs the same credential at the
+// same provider, since nothing else names the person. A login with a code never
+// steps up a session without one, nor the other way round: nothing links the two.
+func samePerson(sess *session.Session, id identity.Identity) bool {
+	if sess.SerialNumber != "" || id.SerialNumber != "" {
+		return sess.SerialNumber == id.SerialNumber
+	}
+
+	return sess.ProviderSubject != "" && sess.ProviderSubject == id.IdPSubject && sess.ProviderIssuer == id.Issuer
 }
 
 // stepUpMethodMatches reports whether the login method actually achieved during

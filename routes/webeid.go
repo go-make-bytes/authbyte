@@ -162,7 +162,7 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 	sess, sid, err := r.establishSession(ctx, flow, id)
 	if err != nil {
 		if flow.StepUp {
-			// err is errStepUpSessionGone or errStepUpMethodMismatch — its message
+			// err is errStepUpSessionGone, errStepUpPersonMismatch or errStepUpMethodMismatch — its message
 			// is the true cause; either way the step-up is unauthorized.
 			r.Audit().StepUpFailure(ctx, id.LoginMethod, err.Error())
 			ctx.Error(corehttp.UnauthorizedError{})

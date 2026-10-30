@@ -6,8 +6,11 @@
 package registry
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"slices"
 	"strings"
 
 	yaml "go.yaml.in/yaml/v3"
@@ -35,6 +38,11 @@ type Client struct {
 	SecretRef string  `yaml:"secret_ref"`
 	Enabled   bool    `yaml:"enabled"`
 	Grants    []Grant `yaml:"grants"`
+	// ActFrom names the audiences whose user tokens the client may exchange to
+	// act for their person (RFC 8693): a product's edge lists its product's user
+	// audience. A token addressed to the client itself is always accepted, so a
+	// service passing on what was delegated to it needs no entry.
+	ActFrom []string `yaml:"act_from"`
 }
 
 // PublicClient is a registered browser/native client (no secret; protected by
@@ -75,8 +83,12 @@ type SecretResolver func(clientID, secretRef string) (string, error)
 // enabled client to fetch its secret from the secret store; pass nil to skip
 // secret resolution (e.g. in tests that supply secrets directly).
 func Load(doc []byte, resolve SecretResolver) (*Registry, error) {
+	// An unknown key is refused rather than ignored, so a misspelled setting
+	// stops the start instead of loading as its absence.
 	var d Document
-	if err := yaml.Unmarshal(doc, &d); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(doc))
+	dec.KnownFields(true)
+	if err := dec.Decode(&d); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("registry: parse: %w", err)
 	}
 
@@ -134,6 +146,10 @@ func validateClient(c Client) error {
 		if g.Audience == "" {
 			return fmt.Errorf("registry: client %q has a grant with empty audience", c.ClientID)
 		}
+	}
+
+	if slices.Contains(c.ActFrom, "") {
+		return fmt.Errorf("registry: client %q has an empty act_from audience", c.ClientID)
 	}
 
 	return nil
@@ -211,6 +227,25 @@ func (r *Registry) AllowedScopes(clientID, audience string, requested []string) 
 	}
 
 	return out, nil
+}
+
+// MayActFrom reports whether clientID may exchange a subject token issued for
+// audiences: the client must be known and enabled, and one of the audiences
+// must be the client itself or a value it lists under act_from (each principal
+// a JWT is meant for names itself in its audience, RFC 7519 §4.1.3).
+func (r *Registry) MayActFrom(clientID string, audiences []string) bool {
+	c, ok := r.clients[clientID]
+	if !ok || !c.Enabled {
+		return false
+	}
+
+	for _, aud := range audiences {
+		if aud != "" && (aud == c.ClientID || slices.Contains(c.ActFrom, aud)) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // MembershipRequired reports whether the people who log in through the public

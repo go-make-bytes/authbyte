@@ -96,6 +96,12 @@ type Session struct {
 	// visitors; such a login is refused exactly as any other stranger's.
 	DirectoryIssuer string `json:"directory_issuer,omitempty"`
 	DirectoryGuest  bool   `json:"directory_guest,omitempty"`
+	// ProviderSubject and ProviderIssuer name the credential the session's login
+	// used: the provider's handle for the person and the provider ("" for a card
+	// login). A step-up of a session without an identity code must come back with
+	// the same pair, since nothing else says it is the same person.
+	ProviderSubject string `json:"provider_subject,omitempty"`
+	ProviderIssuer  string `json:"provider_issuer,omitempty"`
 }
 
 // DisplayName is the name a register shows for the person: the full name the

@@ -671,6 +671,17 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
+	// The subject token must have been issued for the client itself or for an
+	// audience it acts from (registry act_from): a token one product's edge holds
+	// cannot be exchanged by another product's edge, nor a token delegated to one
+	// service by a different one.
+	if !r.Registry().MayActFrom(clientID, subject.Audience) {
+		r.Audit().DelegationRefused(ctx, clientID, subject.Subject, "the subject token was issued for an audience this client does not act from")
+		ctx.Error(corehttp.ForbiddenError{})
+
+		return
+	}
+
 	// The target audience + scopes are authorized against the same grant matrix
 	// that governs client-credentials.
 	scopes, err := r.Registry().AllowedScopes(clientID, audience, requested)

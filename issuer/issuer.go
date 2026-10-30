@@ -143,8 +143,9 @@ func (i *Issuer) IssueDelegated(in DelegatedTokenInput) (string, int64, error) {
 // ParseSubjectToken verifies a token this issuer minted — signature against the
 // active or a still-trusted retired key, issuer, and expiry — and returns its
 // claims. It is the validation step for a token-exchange subject token. The
-// audience is deliberately NOT checked: a subject token's audience is the
-// previous hop (e.g. the portal API), not this endpoint.
+// audience is not checked here: a subject token's audience is the previous hop
+// (e.g. the portal API), not this endpoint, and which hops a client may act from
+// is the registry's to say, so the exchange checks it (registry.MayActFrom).
 func (i *Issuer) ParseSubjectToken(raw string) (*claims.Claims, error) {
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{i.km.Alg()}),

@@ -5,6 +5,33 @@ runs the service or integrates against it.
 
 ## v0.3.0
 
+### Fixed — a step-up must be completed by the person the session belongs to
+
+A step-up used to check only the login method, so another person's card, or another person's sign-in at the
+provider, could raise a session's assurance level. Now the step-up is refused, at the provider callback and at the
+card door alike, unless:
+- for a session whose login carried an identity code, the step-up's login carries the same code;
+- for a session without one (a directory sign-in), the step-up's login is the same credential at the same provider.
+
+A login with a code never raises a session without one, or the other way round, because nothing links the two yet.
+The refusal answers `401` like the other step-up refusals and is recorded as a step-up failure with its own reason.
+The session is left as it was. Sessions now keep the login's provider handle and provider, so a directory session
+signed in before this version cannot be stepped up; signing in again fixes it.
+
+### Changed — a token exchange checks where the subject token came from
+
+**Breaking for every deployment whose edges exchange a person's token.** Add `act_from` to each such client in the
+client registry before taking this version, or its exchanges are refused.
+- **A client exchanges only a subject token issued for itself or for an audience it lists under `act_from`.** A
+  product's edge lists the product's user audience (`AUTH_USER_AUDIENCE`), for example `act_from: [portal-api]`. A
+  token addressed to the client itself needs no entry, so a service passing on what was delegated to it keeps working
+  unchanged. A subject token with no audience is refused.
+- **The refusal** answers `403`, as a refused delegation already does, and is recorded as a delegation refusal with
+  its own reason.
+- **The registry refuses unknown keys.** A misspelled key used to load as if it were absent; now the service refuses
+  to start and names the line. Check a registry before deploying: one that carried keys this service never read will
+  stop the start.
+
 ### Changed — PKCE is S256 only, and discovery advertises no ID token
 
 **Breaking for a client that sends `code_challenge_method=plain` or no method at all.** Such a client gets a refusal
