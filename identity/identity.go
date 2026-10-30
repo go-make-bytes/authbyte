@@ -275,6 +275,25 @@ func (r *Resolver) Interpret(acr string, amr []string) (method, loa string) {
 	return method, loa
 }
 
+// MethodFor names the login method a requested acr value asks for, by the same
+// vocabulary Interpret reads a provider's answer with. Unlike Interpret it has no
+// default: a value the vocabulary does not know names no method, so a request
+// for a method nobody offers is refused instead of becoming the default one.
+func (r *Resolver) MethodFor(acr string) (string, bool) {
+	hay := strings.ToLower(acr)
+	if hay == "" {
+		return "", false
+	}
+
+	for _, k := range r.methodKeys {
+		if strings.Contains(hay, k) {
+			return r.methodPolicy[k], true
+		}
+	}
+
+	return "", false
+}
+
 // ResolveLoA derives the assurance level from the acr + amr claims (a thin wrapper
 // over the LoA vocabulary; see Interpret for why both claims are scanned).
 func (r *Resolver) ResolveLoA(acr string, amr ...string) string {

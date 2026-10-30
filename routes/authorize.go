@@ -83,6 +83,20 @@ func (r *router) authorize(ctx *azugo.Context) {
 		return
 	}
 
+	// The methods the client asks for (acr_values) must be ones this provider
+	// offers. A request that can never be met is answered at the client's own
+	// address, before any flow is stored or the browser is sent on.
+	acrValues := ""
+	if acr := ctx.Query.StringOptional("acr_values"); acr != nil {
+		acrValues = *acr
+	}
+	requested, ok := requestedMethods(r.Upstream().Resolver(), r.Upstream().MethodAllowed, acrValues)
+	if !ok {
+		ctx.RedirectUnsafe(appendErrorState(redirectURI, "unmet_authentication_requirements", "acr_values names no login method this server offers", spaState))
+
+		return
+	}
+
 	// The organisation the person asks to act under, when they belong to more
 	// than one. Optional; it is checked against their memberships at the token
 	// issue, never trusted on its own.
@@ -111,6 +125,7 @@ func (r *router) authorize(ctx *azugo.Context) {
 		ClientID:            clientID,
 		Tenant:              tenant,
 		Nonce:               nonce,
+		RequestedMethods:    requested,
 	}
 
 	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
@@ -124,8 +139,8 @@ func (r *router) authorize(ctx *azugo.Context) {
 		RedirectURI: entrustRedirect,
 		Nonce:       nonce,
 	}
-	if acr := ctx.Query.StringOptional("acr_values"); acr != nil {
-		params.ACRValues = *acr
+	if acrValues != "" {
+		params.ACRValues = acrValues
 	}
 
 	// External IdP authorize endpoint — use the unsanitized redirect so the
@@ -241,6 +256,11 @@ func (r *router) callback(ctx *azugo.Context) {
 			// is the true cause; either way the step-up is unauthorized.
 			r.Audit().StepUpFailure(ctx, id.LoginMethod, err.Error())
 			ctx.Error(corehttp.UnauthorizedError{})
+		} else if errors.Is(err, errMethodNotRequested) {
+			// The provider answered with a method the client did not ask for: no
+			// session, and the client hears it at its own address.
+			r.Audit().LoginFailure(ctx, "login method not requested: "+id.LoginMethod)
+			ctx.RedirectUnsafe(appendErrorState(flow.AppRedirectURI, "unmet_authentication_requirements", "the sign-in used a login method the request did not ask for", flow.SPAState))
 		} else {
 			r.Audit().LoginFailure(ctx, "session establishment failed")
 			ctx.Error(err)
@@ -298,6 +318,12 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 		}
 
 		return sess, flow.SessionID, nil
+	}
+
+	// A sign-in completes only with a method the request asked for. Checked before
+	// the identity store is touched, so a refused sign-in writes nothing.
+	if !methodRequested(flow.RequestedMethods, id.LoginMethod) {
+		return nil, "", errMethodNotRequested
 	}
 
 	// Normal login: resolve the stable internal subject (the PERSON, keyed on the

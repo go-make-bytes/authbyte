@@ -5,6 +5,20 @@ runs the service or integrates against it.
 
 ## v0.3.0
 
+### Fixed — a sign-in completes only with a method the request asked for
+
+A request's `acr_values` used to be passed to the provider and then forgotten, so a provider that answered with
+another method (its own session still live for it, say) produced a session the client never asked for.
+- **At `/authorize`**, each value in `acr_values` must name a method the provider offers, read with the provider's own
+  vocabulary. A request naming any other value is answered at the client's registered address with
+  `error=unmet_authentication_requirements` and the client's `state`, before a flow is stored or the browser is sent
+  on.
+- **At completion**, at the provider callback and at the card door alike, the method achieved must be one of those
+  asked for. Otherwise no code is issued, nothing is written to the identity store, the failure is recorded with the
+  method achieved, and the provider callback sends the browser to the client with
+  `error=unmet_authentication_requirements` and its `state` (the card door answers `401`).
+- A request that names no method accepts any method the provider allows, as before.
+
 ### Fixed — a step-up must be completed by the person the session belongs to
 
 A step-up used to check only the login method, so another person's card, or another person's sign-in at the

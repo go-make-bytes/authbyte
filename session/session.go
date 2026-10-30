@@ -32,6 +32,10 @@ type Flow struct {
 	// Whether this flow is a step-up (re-auth) and the method requested.
 	StepUp         bool   `json:"step_up"`
 	RequestedLogin string `json:"requested_login"`
+	// RequestedMethods are the login methods an ordinary sign-in's acr_values
+	// asked for, in order; empty when it asked for none. The sign-in completes only
+	// with one of them.
+	RequestedMethods []string `json:"requested_methods,omitempty"`
 	// ExistingSession id to update on step-up completion.
 	SessionID string `json:"session_id"`
 	// ClientID of the public client that initiated the authorization request.

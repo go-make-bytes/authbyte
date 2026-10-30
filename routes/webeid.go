@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/gmb-lib/go-authbyte/identitycode"
@@ -165,6 +166,9 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 			// err is errStepUpSessionGone, errStepUpPersonMismatch or errStepUpMethodMismatch — its message
 			// is the true cause; either way the step-up is unauthorized.
 			r.Audit().StepUpFailure(ctx, id.LoginMethod, err.Error())
+			ctx.Error(corehttp.UnauthorizedError{})
+		} else if errors.Is(err, errMethodNotRequested) {
+			r.Audit().LoginFailure(ctx, "login method not requested: "+id.LoginMethod)
 			ctx.Error(corehttp.UnauthorizedError{})
 		} else {
 			r.Audit().LoginFailure(ctx, "session establishment failed")
