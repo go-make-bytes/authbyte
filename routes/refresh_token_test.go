@@ -35,7 +35,14 @@ const sessionLifetime = 12 * time.Hour
 func signInApp(t *testing.T, setup ...func(*authbytecore.App)) (*azugo.TestApp, *sessiontest.Memory) {
 	t.Helper()
 
-	t.Setenv("SERVICE_CLIENT_REGISTRY", testRegistry)
+	return registryApp(t, testRegistry, setup...)
+}
+
+// registryApp is signInApp with a registry of the test's own.
+func registryApp(t *testing.T, registry string, setup ...func(*authbytecore.App)) (*azugo.TestApp, *sessiontest.Memory) {
+	t.Helper()
+
+	t.Setenv("SERVICE_CLIENT_REGISTRY", registry)
 	app := authbytecore.TestApp(t)
 	mem := sessiontest.NewMemory()
 	app.SetSessionStore(mem)
@@ -73,7 +80,6 @@ func seedSignIn(t *testing.T, mem *sessiontest.Memory, clientID, redirectURI str
 		Subject:     testPersonSub(5),
 		LoA:         "high",
 		LoginMethod: "webEid",
-		Scopes:      defaultUserScopes,
 	}, sessionLifetime)))
 	qt.Assert(t, qt.IsNil(mem.SaveAppCode(ctx, in.code, &session.AppCode{
 		SessionID:           in.sid,
@@ -94,6 +100,8 @@ type edge struct {
 	key   *ecdsa.PrivateKey
 	nonce string
 	mu    sync.Mutex
+	// basic, when set, is sent as HTTP Basic client credentials: id, secret.
+	basic []string
 }
 
 func newEdge(t *testing.T, app *azugo.TestApp) *edge {
@@ -119,10 +127,15 @@ func (e *edge) post(path string, form url.Values) (int, map[string]any) {
 		qt.Assert(e.t, qt.IsNil(err))
 
 		tc := e.app.TestClient()
-		resp, err := tc.Post(path, []byte(form.Encode()),
+		opts := []azugo.TestClientOption{
 			tc.WithHost(testHost),
 			tc.WithHeader("Content-Type", "application/x-www-form-urlencoded"),
-			tc.WithHeader("DPoP", proof))
+			tc.WithHeader("DPoP", proof),
+		}
+		if len(e.basic) == 2 {
+			opts = append(opts, tc.WithHeader("Authorization", basicAuth(e.basic[0], e.basic[1])))
+		}
+		resp, err := tc.Post(path, []byte(form.Encode()), opts...)
 		qt.Assert(e.t, qt.IsNil(err))
 
 		status := resp.StatusCode()
@@ -179,6 +192,7 @@ func (e *edge) revoke(token, clientID string) (int, map[string]any) {
 
 const (
 	portalRedirect  = "https://portal.example/callback"
+	portalLanding   = "https://portal.example/"
 	productRedirect = "https://product.example/callback"
 )
 
@@ -413,7 +427,7 @@ func TestTheBrowserSignOutTakesNoSessionValue(t *testing.T) {
 
 	_, refresh := signedIn(t, app, mem, e)
 
-	q := url.Values{"client_id": {"portal-spa"}, "redirect_uri": {portalRedirect}, "sid": {refresh}}
+	q := url.Values{"client_id": {"portal-spa"}, "redirect_uri": {portalLanding}, "sid": {refresh}}
 	tc := app.TestClient()
 	resp, err := tc.Get("/logout?"+q.Encode(), tc.WithHost(testHost))
 	qt.Assert(t, qt.IsNil(err))

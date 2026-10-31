@@ -26,14 +26,44 @@ func testPersonSub(digit int) string {
 // stay on the baseline, and a product portal that leaves the requirement
 // unset — required whenever a register is wired.
 const testRegistry = `
-public_clients:
-  - client_id: portal-spa
+service_clients:
+  - client_id: svc:caller
+    secret_ref: literal:caller-secret
+    enabled: true
+    grants:
+      - audience: svc:target
+        scopes: [things:read]
+sign_in_clients:
+  - client_id: edge-app
+    type: confidential
+    secret_ref: literal:edge-secret
+    audience: portal-api
     enabled: true
     membership_required: false
-    allowed_redirect_uris: [https://portal.example/callback]
-  - client_id: product-spa
+    redirect_uris: [https://edge.example/callback]
+    baseline_scopes: [records:read]
+    methods: [webEid]
+    step_up_methods: [webEid]
+    post_logout_redirect_uris: [https://edge.example/]
+  - client_id: portal-spa
+    type: public
+    audience: portal-api
     enabled: true
-    allowed_redirect_uris: [https://product.example/callback]
+    membership_required: false
+    redirect_uris: [https://portal.example/callback]
+    baseline_scopes: [envelopes:read, envelopes:write, documents:read]
+    claims: [name, given_name, family_name, serial_number]
+    methods: [eparakstsMobile, eidScan, webEid]
+    step_up_methods: [eparakstsMobile, eidScan, webEid]
+    signing: true
+    post_logout_redirect_uris: [https://portal.example/]
+  - client_id: product-spa
+    type: public
+    audience: product-api
+    enabled: true
+    claims: [name, given_name, family_name]
+    methods: [webEid]
+    redirect_uris: [https://product.example/callback]
 `
 
 // fakeResolver drives the membership seams without a live register.
@@ -99,10 +129,7 @@ func scopesApp(t *testing.T, resolver authbytecore.ScopeResolver, setup ...func(
 		if s := ctx.Query.StringOptional("subject"); s != nil {
 			subject = *s
 		}
-		sess := &session.Session{
-			Subject: subject,
-			Scopes:  []string{"static:baseline"},
-		}
+		sess := &session.Session{Subject: subject}
 		// A login through an organisation's directory: the issuer it came through,
 		// whether the provider called the person a guest there, and their name.
 		if iss := ctx.Query.StringOptional("issuer"); iss != nil {
@@ -171,14 +198,14 @@ func member(tenant string, scopes ...string) rolebyte.Membership {
 
 // --- people -----------------------------------------------------------------
 
-// Resolver absent — standalone, the default: the session's static baseline
-// passes through untouched, whatever the client, and no tenant is minted.
+// Resolver absent — standalone, the default: the client's own baseline is
+// minted, and no tenant.
 func TestUserScopesStaticWithoutResolver(t *testing.T) {
 	app := scopesApp(t, nil)
 
-	status, body := get(t, app, "/testonly/scopes?client=product-spa")
+	status, body := get(t, app, "/testonly/scopes?client=edge-app")
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK))
-	qt.Assert(t, qt.StringContains(body, `"static:baseline"`))
+	qt.Assert(t, qt.StringContains(body, `"records:read"`))
 	qt.Assert(t, qt.StringContains(body, `"tenant":""`))
 }
 
@@ -190,7 +217,7 @@ func TestUserScopesPublicPortalNeverAsksTheRegister(t *testing.T) {
 
 	status, body := get(t, app, "/testonly/scopes?client=portal-spa")
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK))
-	qt.Assert(t, qt.StringContains(body, `"static:baseline"`))
+	qt.Assert(t, qt.StringContains(body, `"envelopes:read"`))
 	qt.Assert(t, qt.StringContains(body, `"tenant":""`))
 	qt.Assert(t, qt.Equals(fake.asked, ""))
 }
@@ -205,7 +232,7 @@ func TestUserScopesResolvedFromMembership(t *testing.T) {
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK))
 	qt.Assert(t, qt.StringContains(body, `"estimating:estimator"`))
 	qt.Assert(t, qt.StringContains(body, `"01TENANTULID"`))
-	qt.Assert(t, qt.Not(qt.StringContains(body, "static:baseline")))
+	qt.Assert(t, qt.Not(qt.StringContains(body, "envelopes:read")))
 	qt.Assert(t, qt.Equals(fake.asked, "sub:"+testPersonSub(0)))
 }
 

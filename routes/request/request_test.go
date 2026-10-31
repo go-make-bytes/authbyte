@@ -41,9 +41,9 @@ func validStepUp(method string) *request.StepUp {
 	}
 }
 
-// TestStepUpAcceptsLaunchMethods proves all three launch methods are valid
-// step-up targets — including webEid, which the route now branches to a Web
-// eID challenge instead of an empty-acr Entrust redirect.
+// TestStepUpAcceptsLaunchMethods proves all three launch methods pass the
+// request's own check. Which of them a client may step up to is its registry
+// row's step_up_methods, checked by the route.
 func TestStepUpAcceptsLaunchMethods(t *testing.T) {
 	for _, m := range []string{"eparakstsMobile", "eidScan", "webEid"} {
 		t.Run(m, func(t *testing.T) {
@@ -54,16 +54,13 @@ func TestStepUpAcceptsLaunchMethods(t *testing.T) {
 	}
 }
 
-// TestStepUpRejectsNonLaunchMethods proves the legacy sc_plugin "eid", an empty
-// method, and any unknown/wrong-case value are rejected (the oneof guard holds).
-func TestStepUpRejectsNonLaunchMethods(t *testing.T) {
-	for _, m := range []string{"eid", "", "bogus", "WEBEID"} {
-		t.Run("method="+m, func(t *testing.T) {
-			withCtx(t, func(ctx *azugo.Context) {
-				qt.Check(t, qt.IsNotNil(validStepUp(m).Validate(ctx)))
-			})
-		})
-	}
+// TestStepUpRequiresAMethod proves a step-up names a method. Any other value is
+// refused by the route unless it is on the client's step_up_methods, the legacy
+// "eid" and a wrong-case spelling included.
+func TestStepUpRequiresAMethod(t *testing.T) {
+	withCtx(t, func(ctx *azugo.Context) {
+		qt.Check(t, qt.IsNotNil(validStepUp("").Validate(ctx)))
+	})
 }
 
 // TestStepUpRequiresCoreFields proves the required fields are enforced, so a

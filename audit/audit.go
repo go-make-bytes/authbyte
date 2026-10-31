@@ -21,6 +21,7 @@ import (
 	"azugo.io/azugo"
 	"go.uber.org/zap"
 
+	"github.com/gmb-lib/go-authbyte/claims"
 	"github.com/gmb-lib/go-gdpr-audit/gdpr"
 	"github.com/gmb-lib/go-platform-kit/broker"
 	"github.com/gmb-lib/go-sec-events/secevents"
@@ -274,11 +275,18 @@ func (r *Recorder) IdentityRegistered(ctx *azugo.Context, actorID, actorLoA, per
 		return
 	}
 
+	// A service registering a person (a register adding its workers) acts system
+	// to system; an administrator acts interactively.
+	actor, channel := broker.Actor{ID: actorID, Type: "user", Assurance: actorLoA}, gdpr.ChannelInteractive
+	if strings.HasPrefix(actorID, claims.ServiceSubjectPrefix) {
+		actor, channel = broker.Actor{ID: actorID, Type: "service"}, gdpr.ChannelBackground
+	}
+
 	id := gdpr.Identity{
-		Actor:     broker.Actor{ID: actorID, Type: "user", Assurance: actorLoA},
+		Actor:     actor,
 		SubjectID: personSub,
 		Purpose:   gdpr.PurposeAccountManagement,
-		Channel:   gdpr.ChannelInteractive,
+		Channel:   channel,
 	}
 
 	var err error

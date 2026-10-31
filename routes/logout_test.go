@@ -53,10 +53,13 @@ func genericUpstreamApp(t *testing.T, federated string) *azugo.TestApp {
 	t.Setenv("OIDC_UPSTREAM_CLIENT_ID", "cid")
 	t.Setenv("OIDC_UPSTREAM_METHODS_FEDERATED", federated)
 	t.Setenv("SERVICE_CLIENT_REGISTRY", `
-public_clients:
+sign_in_clients:
   - client_id: app
+    type: public
+    audience: portal-api
     enabled: true
-    allowed_redirect_uris: [https://app.example/]
+    redirect_uris: [https://app.example/cb]
+    post_logout_redirect_uris: [https://app.example/]
 `)
 
 	app := authbytecore.TestApp(t)
@@ -80,6 +83,21 @@ func signOutLocation(t *testing.T, app *azugo.TestApp) string {
 		qt.Commentf("a sign-out answers a redirect, got %d: %s", status, resp.Body()))
 
 	return string(resp.Header.Peek("Location"))
+}
+
+// A sign-out lands only on the client's sign-out list: its login return is a
+// different list, and offering it as a landing is refused without a redirect.
+func TestLogoutRefusesALoginReturnAsALanding(t *testing.T) {
+	app := genericUpstreamApp(t, "")
+	app.Start(t)
+	defer app.Stop()
+
+	resp, err := app.TestClient().Get("/logout?client_id=app&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&login_method=upstream")
+	qt.Assert(t, qt.IsNil(err))
+	defer fasthttp.ReleaseResponse(resp)
+
+	qt.Check(t, qt.Equals(resp.StatusCode(), fasthttp.StatusUnprocessableEntity))
+	qt.Check(t, qt.Equals(string(resp.Header.Peek("Location")), ""))
 }
 
 // TestLogoutAfterGenericUpstreamLoginIsLocal pins the default for a generic

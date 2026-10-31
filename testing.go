@@ -14,6 +14,17 @@ import (
 func TestApp(tb testing.TB) *App {
 	tb.Helper()
 
+	app, err := startTestApp(tb)
+	qt.Assert(tb, qt.IsNil(err))
+
+	return app
+}
+
+// startTestApp is TestApp answering what New refuses, for a test of the start's
+// own checks.
+func startTestApp(tb testing.TB) (*App, error) {
+	tb.Helper()
+
 	tb.Setenv("METRICS_ENABLED", "false")
 	tb.Setenv("ALLOW_EPHEMERAL_SIGNING_KEY", "true")
 	// SERVICE_NAME is required by go-platform-kit's base config. ENVIRONMENT is
@@ -22,7 +33,6 @@ func TestApp(tb testing.TB) *App {
 	tb.Setenv("SERVICE_NAME", "authbyte")
 	tb.Setenv("ENVIRONMENT", "development")
 	tb.Setenv("AUTH_ISSUER_URL", "http://localhost:8080")
-	tb.Setenv("AUTH_USER_AUDIENCE", "portal-api")
 	// The eParaksts profile is the default upstream for tests. A test that puts the
 	// generic connector in the environment first (OIDC_UPSTREAM_AUTHORITY_URL, or
 	// the three explicit endpoints) gets that one instead — the service refuses to
@@ -38,8 +48,5 @@ func TestApp(tb testing.TB) *App {
 	tb.Setenv("CACHE_TYPE", "redis")
 	tb.Setenv("CACHE_CONNECTION", "redis://localhost:6379/0")
 
-	app, err := New(nil, "0.0.0-test")
-	qt.Assert(tb, qt.IsNil(err))
-
-	return app
+	return New(nil, "0.0.0-test")
 }

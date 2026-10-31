@@ -55,8 +55,9 @@ Two knobs decide who is asked about membership: whether a **membership register*
 combination below is a first-class configuration; none is a degraded form of another.
 
 - **Standalone** (default — `ROLEBYTE_URL` empty): every authenticated person is minted the
-  **static baseline scope set** and no `tenant` claim. Authentication is access: whoever the
-  identity provider vouches for gets the baseline capabilities. No service account can obtain
+  **baseline scopes of the client they signed in through** (`baseline_scopes` on its registry
+  row; a row that lists none mints none) and no `tenant` claim. Authentication is access: whoever
+  the identity provider vouches for gets the baseline capabilities. No service account can obtain
   a tenant-named token here, because there is no register to hold its membership.
 - **Register wired, client requires membership** (`ROLEBYTE_URL` set; the client's row says
   `membership_required: true`, or leaves it unset — required is the default whenever a register
@@ -79,7 +80,9 @@ combination below is a first-class configuration; none is a degraded form of ano
   platform service acting as itself: the registry alone decides, as before.
 
 A client row that requires a membership in a deployment with no register is a configuration
-error: the service refuses to start rather than mint such a client's people the baseline.
+error: the service refuses to start rather than mint such a client's people the baseline. So is
+a row that lists `baseline_scopes` while its people need a membership (`membership_required:
+true`, or unset with a register wired): that baseline could never be minted.
 
 ### Choosing an organisation
 
@@ -146,17 +149,17 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 
 | Method + path | Purpose | Auth |
 |---|---|---|
-| `GET /authorize` | Begin user login (Authorization Code + PKCE, RFC 7636, `S256` only: another method or none is answered at the client's `redirect_uri` with `error=invalid_request`). Validates `redirect_uri` against the registered allowlist, saves flow state, redirects to the identity provider. Optional `acr_values`: the methods the client accepts, in order; a value naming no method the provider offers is answered with `error=unmet_authentication_requirements`, and a sign-in the provider completes with another method gets the same answer instead of a code. Optional `tenant=<id>`: the organisation a person with several memberships chooses to act under (checked at the token issue) | anonymous |
+| `GET /authorize` | Begin user login (Authorization Code + PKCE, RFC 7636, `S256` only: another method or none is answered at the client's `redirect_uri` with `error=invalid_request`). Validates `redirect_uri` against the client's `redirect_uris`, saves flow state, redirects to the identity provider. Optional `acr_values`: the methods the client accepts, in order; a value naming no method the provider offers and the client's row allows (`methods`) is answered with `error=unmet_authentication_requirements`, and a sign-in the provider completes with another method gets the same answer instead of a code. With none named, the sign-in may complete with any method the row allows that the provider offers, and a row allowed none of those gets the same answer. Optional `tenant=<id>`: the organisation a person with several memberships chooses to act under (checked at the token issue) | anonymous |
 | `GET /callback` | Handle the identity-provider redirect: exchange the code, read claims, resolve the person, establish a session, mint a single-use app authorization code | state-verified (path configurable) |
-| `GET /logout` | The browser's leg of a sign-out (`client_id`, `redirect_uri`, optional `login_method`): send the browser to `redirect_uri`. For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone. It ends no session and takes no value naming one: the client ends the session with `POST /revoke` first | anonymous (`redirect_uri` allowlisted) |
-| `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` (with the `client_id` the token was issued to) \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof | PKCE / client secret / refresh token + client + session key / subject token — all + DPoP |
-| `POST /revoke` | End a session server to server ([RFC 7009]): `token` (the refresh token), `client_id`, optional `token_type_hint` (ignored). `200` when ended or when the token is unknown; `401` for another client's token or a proof of another key; `503` when the store cannot be read | the session's own client + its DPoP key |
-| `POST /step-up` | Re-authenticate with a stronger or different login method to satisfy a signing-flow binding; the session is named by `refresh_token` and `client_id`, the client it was issued to. Returns a redirect (federated methods) or a Web eID challenge | existing session |
-| `GET /identity` | The internal identity plus `loa`, `login_method`, and the signing flows that method permits | valid user token (DPoP) |
+| `GET /logout` | The browser's leg of a sign-out (`client_id`, `redirect_uri`, optional `login_method`): send the browser to `redirect_uri`, which must be on the client's `post_logout_redirect_uris` (a sign-in return is not a sign-out landing). For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone. It ends no session and takes no value naming one: the client ends the session with `POST /revoke` first | anonymous (`redirect_uri` allowlisted) |
+| `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` (with the `client_id` the token was issued to) \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof. A confidential client proves itself at every grant with its secret, by HTTP Basic (`client_secret_basic`) or in the form (`client_secret_post`), never both in one request, and at the code exchange before the code is spent; a public client sends none | PKCE / client secret / refresh token + client + session key / subject token — all + DPoP |
+| `POST /revoke` | End a session server to server ([RFC 7009]): `token` (the refresh token), `client_id`, optional `token_type_hint` (ignored). `200` when ended or when the token is unknown; `401` for another client's token, a proof of another key, or a confidential client without its secret; `503` when the store cannot be read | the session's own client (its secret, when confidential) + its DPoP key |
+| `POST /step-up` | Re-authenticate with a stronger or different login method to satisfy a signing-flow binding; the session is named by `refresh_token` and `client_id`, the client it was issued to, and a confidential client adds its `client_secret` to the body. The `method` must be on the client's `step_up_methods` (else `422`; a row with none cannot step up). Returns a redirect (federated methods) or a Web eID challenge | existing session |
+| `GET /identity` | The internal identity plus `loa`, `login_method` and, to a token of a client whose row says `signing: true`, the signing flows that method permits. A token for any enabled sign-in client's audience is accepted | valid user token (DPoP) |
 | `POST /identity/persons` | Register a person before their first login: the identity code (any spelling; stored canonical) and the name create the person row with a stable subject and **no credential** — the subject an administrator then invites them to a membership register under. Idempotent on the code: `201` created, `200` already known (names filled only where the row has none); a code naming no country or an unknown identity type is `422 err:identity:invalid` (never echoed) | valid token carrying `identity:admin` (DPoP) |
 | `POST /identity/persons/lines` | Read, for up to 500 people at once (`{"subjects": ["sub:<id>", …]}`), whether each can sign in and what is known about how: the email a directory sign-in left (only when one is kept) and, for a person holding a national identity code, its country and displayed length — **never the code**. A person the platform does not know is left out. More than 500, an empty or non-list body or a malformed subject is `422 err:identity:invalid` (the values sent are never repeated). Answered `Cache-Control: no-store` | a **service acting as itself** (its own token: subject `svc:…`, naming no organisation and no actor) carrying `identity:lines` — a person's token, a token exchanged to act for someone and a service account's token for an organisation never read it, even holding the scope (DPoP) |
 | `GET /identity/persons/{personSub}/code` | Read one person's national identity code the way a person is shown it, with its country: `{"code": "…", "country": "LV"}`. A person not known, or holding no code, is `404 err:identity:not_found`; a malformed id is `422 err:identity:invalid`. Each code answered is recorded with the access audit as a routine read of the person by the calling service (`identity.read`, marked `identityCode`, never the code); the caller records the disclosure it makes onward. Answered `Cache-Control: no-store` | a **service acting as itself** carrying `identity:code`, refused as the lines read refuses — a grant for `identity:lines` never reaches a code (DPoP) |
-| `GET /webeid/challenge` | Issue a Web eID challenge nonce and persist the flow (card login; PKCE `S256` only, else `422`) | anonymous — **only if `WEBEID_ENGINE_URL` set** |
+| `GET /webeid/challenge` | Issue a Web eID challenge nonce and persist the flow (card login, for a client whose row allows `webEid`, else `403`; PKCE `S256` only, else `422`) | anonymous — **only if `WEBEID_ENGINE_URL` set** |
 | `POST /webeid/login` | Validate the Web eID auth token via the engine, resolve the person, mint an app authorization code | anonymous — **only if `WEBEID_ENGINE_URL` set** |
 | `GET /.well-known/jwks.json` | Signing public keys (active + retired-within-window) | anonymous |
 | `GET /.well-known/openid-configuration` | Discovery metadata (endpoints, supported grants, `S256`, `ES256`) | anonymous |
@@ -258,7 +261,8 @@ sequenceDiagram
     AC-->>SPA: {access_token (DPoP), refresh_token, capabilities?}
 ```
 
-**Login-time signing capabilities.** When the upstream's userinfo carries a
+**Login-time signing capabilities.** When the sign-in comes through a client
+whose row says `signing: true` and the upstream's userinfo carries a
 sign-identity catalog (the eParaksts profile requests the sign-identity profile
 scope by default), the login also captures the session's signing capabilities:
 the signing identity the login method uses, its certificate, the paired
@@ -272,7 +276,7 @@ leaves fields out, absent capabilities mean "unknown" rather than "none"
 (`seals_known` marks a read catalog, so an empty seal list is authoritative),
 and a signing service falls back to resolving identities itself when fields are
 missing. Certificates carry personal data: they are never logged and die with
-the session.
+the session. A sign-in through any other client fetches and keeps none of it.
 
 **The refresh token is a value of its own.** The first code exchange of a session answers a new random `refresh_token`; the session's internal id never leaves the service, and the store keeps the token only as a hash, under which it records the session and the client it was issued to. A step-up's code exchange answers no new one (the client keeps the token it holds). A refresh (`grant_type=refresh_token`, `refresh_token`, `client_id`) re-issues a user token only for the client the token was issued to and only when the caller presents the **same DPoP key** the session was bound to at the code exchange, so a refresh token taken from its client is useless. Tokens are not rotated: two refreshes of one session at the same moment both succeed. A session lives `SESSION_TTL` (12h) from its sign-in and nothing saved on it later extends that; at its end every refresh is refused. A refresh token that is gone, another client's, or whose session has ended is refused `401`. A session store that cannot be read answers `503` `err:upstream:unavailable`, because it says nothing about the session: a caller that ends its own session on a refusal keeps it through an outage here.
 
@@ -303,7 +307,7 @@ All tokens are ES256 JWTs (RFC 7519) minted in `issuer/`, DPoP sender-constraine
 
 | Token | Grant | Subject | Carries |
 |---|---|---|---|
-| **User** | `authorization_code` / `refresh_token` | internal person subject | `scope`, `loa`, `login_method`, name parts, `serial_number`, `tenant` (membership deployments only), `cnf.jkt` |
+| **User** | `authorization_code` / `refresh_token` | internal person subject | `aud` (the sign-in client's own `audience`), `client_id` (that client, [RFC 9068 §2.2]), `scope`, `loa`, `login_method`, the name parts and `serial_number` only as the client's row lists them in `claims`, `tenant` (membership deployments only), `cnf.jkt` |
 | **Service** | `client_credentials` | client id | `client_id`, `scope`, `cnf.jkt` — scoped to one audience by the registry; plus `tenant` when the client named the organisation it is a member of (a service account) |
 | **Delegated** | `token-exchange` (RFC 8693) | the end user named in the subject token | `scope`, `loa`, `login_method`, `serial_number`, `tenant` (carried forward), `act` (acting client), `cnf.jkt` |
 
@@ -359,7 +363,6 @@ Non-secret values come from environment variables; secrets are loaded from the s
 |---|---|---|
 | `AUTH_ISSUER_URL` | — (required) | This service's `iss` / public base |
 | `AUTH_JWKS_URL` | — (⇒ derived from issuer) | Internal JWKS URL override, when the public issuer is unreachable in-cluster |
-| `AUTH_USER_AUDIENCE` | `portal-api` | Audience stamped into user tokens and required when validating them |
 | `BASE_URL` | `http://localhost:8080` | Externally reachable root, used to build the absolute callback URI |
 
 **Upstream identity provider (the generic OIDC connector)**
@@ -462,7 +465,7 @@ can be stated alongside the country.
 | `CACHE_KEY_PREFIX` | — | A prefix for every key, when several services share one database |
 | `CACHE_CLIENT_CACHE` | `false` | Client-side caching; off, because the store never reads through it and a server or user that refuses it would refuse the connection |
 | `SESSION_TTL` | `12h` | A session's whole lifetime from its sign-in. Nothing saved on the session later extends it; at its end every refresh is refused |
-| `SERVICE_CLIENT_REGISTRY` (`_FILE`) | — | Declarative client ↔ audience ↔ scope document (secret store) |
+| `SERVICE_CLIENT_REGISTRY` (`_FILE`) | — | The client registry (below): every service client and every sign-in client (secret store) |
 
 **TLS is selected by the URL scheme.** `rediss://…` connects over TLS; `redis://…` does not. `skip_verify=true` only relaxes certificate verification on a `rediss://` address; on a `redis://` address the start is refused (`skip_verify requires a TLS connection string scheme`) rather than the connection being upgraded silently, so a TLS endpoint must always be addressed as `rediss://`.
 
@@ -477,11 +480,48 @@ can be stated alongside the country.
 | `AUDIT_ISSUER_URL` | — (⇒ `AUTH_ISSUER_URL`) | Issuer base for the outbound token mint (set to an in-cluster URL when the public issuer is unreachable) |
 | `WEBEID_ENGINE_URL` | — (empty ⇒ `/webeid/*` not registered) | web-eid engine base; `/auth/validate` is called server-to-server with a service token |
 | `WEBEID_AUDIENCE` / `WEBEID_SCOPE` | `svc:web-eid` / `webeid:validate` | Audience/scope for the engine call |
-| `ROLEBYTE_URL` | — (empty ⇒ standalone: static baseline scopes, no service accounts) | Membership register base — setting it wires the register (see "Supported configurations"). When set, every token issue of a person whose client requires a membership (first issue and refresh) claims the person's pending invitations and mints their register-resolved `group:level` scopes and tenant instead of the static set — no membership is **refused** (403 `err:membership:notMember`), several are the person's to choose from (the token response's `tenants`), and an unreachable register fails the issuance closed (502), never an empty-scope token; a client whose row says `membership_required: false` keeps its people on the baseline and never touches the register. Every tenant-named `client_credentials` issue is resolved here too. The address is the register's **sign-in listener** (`http://rolebyte:8081` in the stacks), not its main port. Each call carries a token this service mints for it, naming the person and `AUDIT_CLIENT_ID` as the acting client, which must be the register's `SIGN_IN_CLIENT`; no registry grant for `membership:claim` or `membership:resolve` is needed, and none may exist |
+| `ROLEBYTE_URL` | — (empty ⇒ standalone: each client's baseline scopes, no service accounts) | Membership register base — setting it wires the register (see "Supported configurations"). When set, every token issue of a person whose client requires a membership (first issue and refresh) claims the person's pending invitations and mints their register-resolved `group:level` scopes and tenant instead of a baseline — no membership is **refused** (403 `err:membership:notMember`), several are the person's to choose from (the token response's `tenants`), and an unreachable register fails the issuance closed (502), never an empty-scope token; a client whose row says `membership_required: false` keeps its people on the baseline and never touches the register. Every tenant-named `client_credentials` issue is resolved here too. The address is the register's **sign-in listener** (`http://rolebyte:8081` in the stacks), not its main port. Each call carries a token this service mints for it, naming the person and `AUDIT_CLIENT_ID` as the acting client, which must be the register's `SIGN_IN_CLIENT`; no registry grant for `membership:claim` or `membership:resolve` is needed, and none may exist |
 | `ROLEBYTE_AUDIENCE` | `svc:rolebyte` | Audience for the membership calls |
 | `DEMO_DIR` | — | Serve a static demo SPA under `/demo` — development |
 
 Registry client secrets resolve per client via the `literal:`/`env:`/`file:` schemes in the `secret_ref`, or the convention `AUTHBYTE_CLIENT_SECRET_<CLIENT_ID>` read from the environment or the secret store. `literal:VALUE` carries the secret inline in the registry document itself — for when the whole registry is delivered as a single secret (a secret-store entry) rather than resolved reference-by-reference; a failed `literal:` ref is redacted in errors so the value is never logged. Schemes may be mixed per client.
+
+**The client registry.** One document names every client. `service_clients` are machines: each
+proves itself with its secret and is minted tokens for the audiences and scopes its `grants`
+allow (`act_from` names the user audiences whose tokens it may exchange). `sign_in_clients` sign
+people in, and each row carries everything its product needs, so one deployment serves several
+products. The names follow the client metadata of [RFC 7591 §2] and the OpenID logout
+specifications where one exists:
+
+```yaml
+sign_in_clients:
+  - client_id: portal-spa
+    enabled: true
+    type: confidential            # holds a secret (secret_ref); or public: none, PKCE alone
+    secret_ref: env:PORTAL_SECRET
+    audience: portal-api          # the aud of this client's user tokens
+    membership_required: false    # see "Supported configurations"
+    baseline_scopes: [envelopes:read, documents:read]   # only where no membership is asked
+    claims: [name, given_name, family_name, serial_number]   # the personal claims its tokens carry
+    methods: [eparakstsMobile, eidScan, webEid]               # the sign-in methods it allows
+    step_up_methods: [eparakstsMobile, eidScan, webEid]       # a subset of methods; none: no step-up
+    signing: true                 # told the signing flows; its sign-ins capture signing identities
+    client_name: Example Portal   # kept for a hosted sign-in page; nothing shows it yet
+    logo_uri: https://portal.example/logo.svg
+    redirect_uris: [https://portal.example/callback]
+    post_logout_redirect_uris: [https://portal.example/]
+    backchannel_logout_uri: https://portal.example/backchannel-logout   # kept; nothing calls it yet
+```
+
+The document is read once at the start, and anything wrong in it stops the start: an unknown key
+(the earlier `public_clients` and `allowed_redirect_uris` included), a row without an
+`audience`, a confidential row without a secret or a public row with one, a step-up method that
+is not among the row's methods, a claim other than the four listed above, one id in both
+sections, a `logo_uri` that is not `https`, and an address that is not absolute or carries a
+fragment. A sign-out or back-channel address may use `http` only for a confidential client. A
+row none of whose methods this deployment offers is logged as a warning: one file can serve
+deployments whose providers differ, and such a row's sign-ins are refused where they are asked
+for.
 
 ---
 

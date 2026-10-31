@@ -3,6 +3,7 @@ package routes
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/go-make-bytes/authbyte/identity"
@@ -83,17 +84,28 @@ func (r *router) authorize(ctx *azugo.Context) {
 	}
 
 	// The methods the client asks for (acr_values) must be ones this provider
-	// offers. A request that can never be met is answered at the client's own
-	// address, before any flow is stored or the browser is sent on.
+	// offers and the client is allowed. A request that names none may complete
+	// with any of those. A request that can never be met is answered at the
+	// client's own address, before any flow is stored or the browser is sent on.
 	acrValues := ""
 	if acr := ctx.Query.StringOptional("acr_values"); acr != nil {
 		acrValues = *acr
 	}
-	requested, ok := requestedMethods(r.Upstream().Resolver(), r.Upstream().MethodAllowed, acrValues)
+	client, _ := r.Registry().SignInClient(clientID)
+	allowed := func(m string) bool { return r.Upstream().MethodAllowed(m) && slices.Contains(client.Methods, m) }
+	requested, ok := requestedMethods(r.Upstream().Resolver(), allowed, acrValues)
 	if !ok {
-		ctx.RedirectUnsafe(appendErrorState(redirectURI, "unmet_authentication_requirements", "acr_values names no login method this server offers", spaState))
+		ctx.RedirectUnsafe(appendErrorState(redirectURI, "unmet_authentication_requirements", "acr_values names no login method this client may use here", spaState))
 
 		return
+	}
+	if len(requested) == 0 {
+		requested = slices.DeleteFunc(slices.Clone(client.Methods), func(m string) bool { return !allowed(m) })
+		if len(requested) == 0 {
+			ctx.RedirectUnsafe(appendErrorState(redirectURI, "unmet_authentication_requirements", "this client may use no login method this server offers", spaState))
+
+			return
+		}
 	}
 
 	// The organisation the person asks to act under, when they belong to more
@@ -273,7 +285,8 @@ func (r *router) callback(ctx *azugo.Context) {
 	// capabilities from it while the upstream token is still at hand. Assigned
 	// unconditionally: capabilities describe the CURRENT login method, so a
 	// step-up replaces (or clears) whatever the previous login captured.
-	sess.Capabilities = r.captureCapabilities(ctx, tokens.AccessToken, info, id.LoginMethod)
+	client, _ := r.Registry().SignInClient(flow.ClientID)
+	sess.Capabilities = r.captureCapabilities(ctx, client, tokens.AccessToken, info, id.LoginMethod)
 
 	if !r.saveEstablishedSession(ctx, flow, sid, sess) {
 		return
@@ -350,7 +363,6 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 		SerialNumber: id.SerialNumber,
 		LoA:          id.LoA,
 		LoginMethod:  id.LoginMethod,
-		Scopes:       defaultUserScopes,
 		// The directory the login came through, for the register's admission
 		// door at token issue ("" for a card login).
 		DirectoryIssuer: id.Issuer,
@@ -449,10 +461,6 @@ func samePerson(sess *session.Session, id identity.Identity) bool {
 func stepUpMethodMatches(requested, achieved string) bool {
 	return requested == "" || achieved == requested
 }
-
-// defaultUserScopes is the baseline scope set granted to an authenticated user.
-// A richer authorization policy would derive these per-user.
-var defaultUserScopes = []string{"envelopes:read", "envelopes:write", "documents:read"}
 
 func (r *router) entrustRedirectURI() string {
 	return r.Config().RedirectURI()

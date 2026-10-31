@@ -3,6 +3,7 @@ package routes
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/gmb-lib/go-authbyte/claims"
 	pkerrors "github.com/gmb-lib/go-platform-kit/errors"
@@ -40,7 +41,7 @@ type membershipOutcome struct {
 // userScopes answers what a user token should carry. The public client the
 // token is issued to decides whether the register is asked at all: a client
 // registered without a membership requirement (a public portal) keeps its
-// people on the session's static baseline with no tenant; a client that
+// people on its own baseline scopes with no tenant; a client that
 // requires one has the person resolved from the register at EVERY issue (first
 // issue and refresh alike, so a revoked membership dies at the next refresh) —
 // no membership is refused, one is minted, several are the person's to choose
@@ -51,7 +52,10 @@ type membershipOutcome struct {
 func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID, tenantHint string, moment issueMoment) (membershipOutcome, bool) {
 	resolver := r.ScopeResolver()
 	if resolver == nil || !r.Registry().MembershipRequired(clientID, resolver != nil) {
-		return membershipOutcome{scopes: sess.Scopes}, true
+		// Its people get the client's own baseline, whatever product it is.
+		client, _ := r.Registry().SignInClient(clientID)
+
+		return membershipOutcome{scopes: client.BaselineScopes}, true
 	}
 
 	// The register key of a person is their platform subject, typed — the
@@ -241,6 +245,13 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
+	// The client proves itself before the code is spent, so a caller holding a
+	// stolen code but not the client's secret cannot use it up.
+	signIn, ok := r.authenticateSignIn(ctx, clientID)
+	if !ok {
+		return
+	}
+
 	appCode, err := r.Session().ConsumeAppCode(ctx, code)
 	if err != nil {
 		ctx.Error(corehttp.UnauthorizedError{})
@@ -315,14 +326,15 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 
 	tok, exp, err := r.Issuer().IssueUser(issuer.UserTokenInput{
 		Subject:      sess.Subject,
-		Audience:     r.Config().UserAudience,
+		Audience:     signIn.Audience,
+		ClientID:     signIn.ClientID,
 		Scopes:       outcome.scopes,
 		LoA:          sess.LoA,
 		LoginMethod:  sess.LoginMethod,
-		Name:         sess.Name,
-		GivenName:    sess.GivenName,
-		FamilyName:   sess.FamilyName,
-		SerialNumber: sess.SerialNumber,
+		Name:         listedClaim(signIn, registry.ClaimName, sess.Name),
+		GivenName:    listedClaim(signIn, registry.ClaimGivenName, sess.GivenName),
+		FamilyName:   listedClaim(signIn, registry.ClaimFamilyName, sess.FamilyName),
+		SerialNumber: listedClaim(signIn, registry.ClaimSerialNumber, sess.SerialNumber),
 		Tenant:       outcome.tenant,
 		Thumbprint:   thumbprint,
 	})
@@ -332,7 +344,7 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, r.Config().UserAudience, outcome.scopes)
+	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, signIn.Audience, outcome.scopes)
 
 	ctx.JSON(&response.Token{
 		AccessToken:  tok,
@@ -381,9 +393,13 @@ func (r *router) grantClientCredentials(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	secret, err := ctx.Form.String("client_secret")
-	if err != nil {
-		ctx.Error(err)
+	// A service client proves itself with its secret, by HTTP Basic or in the form.
+	secret, presented, ok := clientSecret(ctx, clientID)
+	if !ok {
+		return
+	}
+	if !presented {
+		ctx.Error(corehttp.UnauthorizedError{})
 
 		return
 	}
@@ -528,6 +544,11 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
+	signIn, ok := r.authenticateSignIn(ctx, clientID)
+	if !ok {
+		return
+	}
+
 	sess, _, ok := refreshBoundSession(ctx, r.Session(), refresh, clientID, thumbprint)
 	if !ok {
 		return
@@ -543,14 +564,15 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 
 	tok, exp, err := r.Issuer().IssueUser(issuer.UserTokenInput{
 		Subject:      sess.Subject,
-		Audience:     r.Config().UserAudience,
+		Audience:     signIn.Audience,
+		ClientID:     signIn.ClientID,
 		Scopes:       outcome.scopes,
 		LoA:          sess.LoA,
 		LoginMethod:  sess.LoginMethod,
-		Name:         sess.Name,
-		GivenName:    sess.GivenName,
-		FamilyName:   sess.FamilyName,
-		SerialNumber: sess.SerialNumber,
+		Name:         listedClaim(signIn, registry.ClaimName, sess.Name),
+		GivenName:    listedClaim(signIn, registry.ClaimGivenName, sess.GivenName),
+		FamilyName:   listedClaim(signIn, registry.ClaimFamilyName, sess.FamilyName),
+		SerialNumber: listedClaim(signIn, registry.ClaimSerialNumber, sess.SerialNumber),
 		Tenant:       outcome.tenant,
 		Thumbprint:   thumbprint,
 	})
@@ -560,7 +582,7 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, r.Config().UserAudience, outcome.scopes)
+	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, signIn.Audience, outcome.scopes)
 
 	ctx.JSON(&response.Token{
 		AccessToken:  tok,
@@ -594,9 +616,13 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	secret, err := ctx.Form.String("client_secret")
-	if err != nil {
-		ctx.Error(err)
+	// A service client proves itself with its secret, by HTTP Basic or in the form.
+	secret, presented, ok := clientSecret(ctx, clientID)
+	if !ok {
+		return
+	}
+	if !presented {
+		ctx.Error(corehttp.UnauthorizedError{})
 
 		return
 	}
@@ -708,4 +734,15 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 		ExpiresIn:       exp,
 		IssuedTokenType: tokenTypeAccessToken,
 	})
+}
+
+// listedClaim answers value when the client's row lists claim, and nothing
+// otherwise: a token carries only the personal claims its client asks for, and the
+// identity code only where the row asks for it. The session keeps them all.
+func listedClaim(c registry.SignInClient, claim, value string) string {
+	if slices.Contains(c.Claims, claim) {
+		return value
+	}
+
+	return ""
 }

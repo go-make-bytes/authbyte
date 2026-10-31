@@ -108,15 +108,19 @@ func TestAllowedScopesDeniesUngrantedScope(t *testing.T) {
 
 const docPublic = `
 service_clients: []
-public_clients:
+sign_in_clients:
   - client_id: portal-spa
+    type: public
+    audience: portal-api
     enabled: true
-    allowed_redirect_uris:
+    redirect_uris:
       - https://app.example.com/callback
       - https://app.example.com/other
   - client_id: portal-disabled
+    type: public
+    audience: portal-api
     enabled: false
-    allowed_redirect_uris:
+    redirect_uris:
       - https://app.example.com/callback
 `
 
@@ -146,15 +150,15 @@ func TestValidateRedirectURIValid(t *testing.T) {
 func TestValidateRedirectURIUnknownClient(t *testing.T) {
 	r := loadPublic(t)
 
-	if err := r.ValidateRedirectURI("portal-unknown", "https://app.example.com/callback"); !errors.Is(err, ErrUnknownPublicClient) {
-		t.Fatalf("expected ErrUnknownPublicClient, got %v", err)
+	if err := r.ValidateRedirectURI("portal-unknown", "https://app.example.com/callback"); !errors.Is(err, ErrUnknownSignInClient) {
+		t.Fatalf("expected ErrUnknownSignInClient, got %v", err)
 	}
 }
 
 func TestValidateRedirectURIDisabledClient(t *testing.T) {
 	r := loadPublic(t)
 
-	if err := r.ValidateRedirectURI("portal-disabled", "https://app.example.com/callback"); !errors.Is(err, ErrUnknownPublicClient) {
+	if err := r.ValidateRedirectURI("portal-disabled", "https://app.example.com/callback"); !errors.Is(err, ErrUnknownSignInClient) {
 		t.Fatalf("disabled public client must be rejected, got %v", err)
 	}
 }
@@ -181,18 +185,24 @@ func TestLoadEmpty(t *testing.T) {
 // can authenticate, and a product portal that leaves the requirement unset.
 const publicDoc = `
 service_clients: []
-public_clients:
+sign_in_clients:
   - client_id: portal-spa
+    type: public
+    audience: portal-api
     enabled: true
     membership_required: false
-    allowed_redirect_uris: [https://portal.example/callback]
+    redirect_uris: [https://portal.example/callback]
   - client_id: product-spa
+    type: public
+    audience: portal-api
     enabled: true
-    allowed_redirect_uris: [https://product.example/callback]
+    redirect_uris: [https://product.example/callback]
   - client_id: strict-spa
+    type: public
+    audience: portal-api
     enabled: true
     membership_required: true
-    allowed_redirect_uris: [https://strict.example/callback]
+    redirect_uris: [https://strict.example/callback]
 `
 
 func loadMembershipDoc(t *testing.T) *Registry {
@@ -237,14 +247,18 @@ func TestRequiresMembershipSomewhere(t *testing.T) {
 	}
 
 	r, err := Load([]byte(`
-public_clients:
+sign_in_clients:
   - client_id: portal-spa
+    type: public
+    audience: portal-api
     enabled: true
     membership_required: false
-    allowed_redirect_uris: [https://portal.example/callback]
+    redirect_uris: [https://portal.example/callback]
   - client_id: product-spa
+    type: public
+    audience: portal-api
     enabled: true
-    allowed_redirect_uris: [https://product.example/callback]
+    redirect_uris: [https://product.example/callback]
 `), nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)

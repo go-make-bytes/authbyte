@@ -5,6 +5,73 @@ runs the service or integrates against it.
 
 ## v0.3.0
 
+### Changed — each sign-in client is a registry row of its own, so one deployment serves several products
+
+**Breaking for every deployment: the client registry takes a new shape, and the start refuses the old one by name.**
+What was one setting for the whole deployment, or written in the code, is now each sign-in client's own. Move a
+registry like this:
+- `public_clients` becomes **`sign_in_clients`**, and `allowed_redirect_uris` becomes **`redirect_uris`**.
+- Every row gains **`type`**: `public` (no secret, PKCE alone) or `confidential` with a **`secret_ref`** resolved like
+  a service client's.
+- Every row gains **`audience`**, the `aud` of its user tokens. **`AUTH_USER_AUDIENCE` is no longer read**: put its
+  value on each row that used it.
+- Sign-out landings move from `redirect_uris` to **`post_logout_redirect_uris`**. `/logout` accepts only those: a
+  sign-in return is no longer a sign-out landing.
+- A row lists what its people get, and gets nothing it does not list:
+  - **`baseline_scopes`**: the scopes minted where no membership is asked. The signing scopes are no longer written
+    in the service. A row whose people need a membership, explicitly or because a register is wired and it leaves
+    `membership_required` unset, may not list any: the start is refused.
+  - **`claims`**: which of `name`, `given_name`, `family_name` and `serial_number` its tokens carry. The national
+    identity code goes only where it is listed. The session still keeps it, so a step-up still compares the person.
+  - **`methods`**: the sign-in methods it allows. **`step_up_methods`**: those it may step up to, a subset; none
+    means no step-up.
+  - **`signing`**: whether `/identity` tells its tokens the signing flows, and whether its sign-ins capture the
+    person's signing identities and certificates.
+- **`client_name`**, **`logo_uri`** and **`backchannel_logout_uri`** are kept for later use; nothing shows or calls
+  them yet.
+
+The start is also refused for a confidential row without a secret, a public row with one, a step-up method outside
+the row's methods, an unknown claim, one id under both sections, a `logo_uri` that is not `https`, and an address
+that is not absolute or carries a fragment. A sign-out or back-channel address may use `http` only for a
+confidential client. A row none of whose methods the deployment offers starts with a warning.
+
+### Changed — a token carries its client's audience, scopes and personal claims
+
+- A user token's `aud` is its client's `audience`, at the code exchange and at refresh, and the audit's token-issued
+  record names it. A user token now carries **`client_id`**, the client it was issued to ([RFC 9068 §2.2]).
+- A refresh after the client was disabled or removed is refused `401`.
+- `/identity` accepts a token for any enabled sign-in client's audience, and no other. It answers `permitted_flows`
+  only to a token of a client whose row says `signing: true`.
+
+### Changed — the sign-in methods are the client's
+
+- `/authorize`: `acr_values` naming a method the client is not allowed is answered at the client's address with
+  `error=unmet_authentication_requirements`, as a method nobody offers was. A request naming none may complete only
+  with a method the client allows that the provider offers, and a client allowed none of those gets the same answer.
+- `GET /webeid/challenge` answers `403` to a client not allowed `webEid`, before any flow is stored.
+- `POST /step-up` accepts a `method` only from the client's `step_up_methods`. Another answers `422`, as a method
+  outside the fixed list did.
+
+### Added — a confidential client proves itself at the token endpoint
+
+- At every grant a confidential client sends its secret by HTTP Basic (`client_secret_basic`, the id and secret each
+  form-encoded first, [RFC 6749 §2.3.1]) or in the form (`client_secret_post`). Both in one request is refused
+  ([RFC 6749 §2.3]). A public client that sends a secret is refused.
+- The code exchange checks the client before the code is spent, so a stolen code is useless without the secret.
+- `/revoke` needs the secret too ([RFC 7009 §2.1]), and `POST /step-up` takes it as `client_secret` in its body,
+  since its `Authorization` header carries the person's token.
+- A missing secret at `client_credentials` or token exchange now answers `401` where it answered `400`.
+- Discovery lists `client_secret_basic`, `client_secret_post` and `none` for the token and revocation endpoints.
+
+### Fixed — a service that registers a person is recorded as a service
+
+The access audit's record of `POST /identity/persons` names a caller whose id begins `svc:` as a service, on the
+`background` channel. It recorded every caller as a person, on the `interactive` channel.
+
+### Changed — dependencies, again
+
+go-authbyte v0.35.0 (from v0.32.0: the audience list the identity door's check needs) and pgx v5.12.0.
+
 ### Changed — the refresh token is a value of its own, bound to its client
 
 **Breaking for every client.** The `refresh_token` a code exchange answers used to be the session's internal id,

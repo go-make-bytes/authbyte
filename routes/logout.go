@@ -21,7 +21,8 @@ import (
 //
 //	client_id (required) — the client, used to scope the redirect_uri allowlist.
 //	redirect_uri (required) — where to land after logout; validated against the
-//	 client's registered redirect allowlist (open-redirect guard).
+//	 client's registered sign-out landings, a list apart from its sign-in
+//	 returns (open-redirect guard).
 //	login_method (optional) — the method the session was signed in with; it
 //	 decides whether the provider's logout is visited.
 //
@@ -41,11 +42,12 @@ func (r *router) logout(ctx *azugo.Context) {
 		return
 	}
 
-	// Validate the post-logout redirect_uri against the registered allowlist
-	// BEFORE redirecting — it is reflected in both our 302 and the IdP's
+	// Validate the post-logout redirect_uri against the client's sign-out
+	// landings BEFORE redirecting — it is reflected in both our 302 and the IdP's
 	// redirect_uri bounce, so an unvalidated value is an open redirect
-	// ([RFC 6749 §10.6]).
-	if err := r.Registry().ValidateRedirectURI(clientID, redirectURI); err != nil {
+	// ([RFC 6749 §10.6]); a sign-in return is not a landing
+	// ([OIDC RP-Initiated Logout §3.1]).
+	if err := r.Registry().ValidatePostLogoutURI(clientID, redirectURI); err != nil {
 		ctx.Error(azugo.ParamInvalidError{Name: "redirect_uri", Tag: "registered"})
 
 		return

@@ -202,6 +202,39 @@ func TestIdentityCodeReadRecordsTheServiceAndThePerson(t *testing.T) {
 	qt.Check(t, qt.Equals(str(ev.Attributes["what"]), "identityCode"))
 }
 
+// A person registered by a service is recorded with the service as its actor, on
+// a system-to-system channel; registered by an administrator, as a user acting
+// interactively.
+func TestIdentityRegisteredNamesAServiceCallerAsAService(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		got []*broker.Envelope
+	)
+	gc, err := gdpr.New(gdpr.Configuration{}, gdpr.PosterFunc(func(_ context.Context, rec *broker.Envelope) error {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, rec)
+
+		return nil
+	}))
+	qt.Assert(t, qt.IsNil(err))
+	rec := audit.New(secevents.NewEmitter(&captureSink{}), gc, zap.NewNop())
+
+	const person = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	withCtx(t, func(ctx *azugo.Context) {
+		rec.IdentityRegistered(ctx, "svc:register", "", person, true)
+		rec.IdentityRegistered(ctx, "01ARZ3NDEKTSV4RRFFQ69G5FAW", "high", person, false)
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	qt.Assert(t, qt.HasLen(got, 2))
+	qt.Check(t, qt.Equals(got[0].Actor.Type, "service"))
+	qt.Check(t, qt.Equals(str(got[0].Attributes[gdpr.AttrChannel]), gdpr.ChannelBackground))
+	qt.Check(t, qt.Equals(got[1].Actor.Type, "user"))
+	qt.Check(t, qt.Equals(str(got[1].Attributes[gdpr.AttrChannel]), gdpr.ChannelInteractive))
+}
+
 // Without an access audit set up, a code read records nothing and does not fail.
 func TestIdentityCodeReadNoopWithoutGDPR(t *testing.T) {
 	rec := audit.New(secevents.NewEmitter(&captureSink{}), nil, zap.NewNop())

@@ -6,14 +6,14 @@ require (
 	azugo.io/azugo v0.40.2
 	azugo.io/core v0.40.1
 	azugo.io/opentelemetry v0.40.1
-	github.com/gmb-lib/go-authbyte v0.32.0
+	github.com/gmb-lib/go-authbyte v0.35.0
 	github.com/gmb-lib/go-gdpr-audit v1.1.8
 	github.com/gmb-lib/go-platform-kit v1.11.6
 	github.com/gmb-lib/go-sec-events v1.2.3
 	github.com/go-jose/go-jose/v4 v4.1.7
 	github.com/go-quicktest/qt v1.102.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/valkey-io/valkey-go v1.0.79

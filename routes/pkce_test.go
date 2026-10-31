@@ -15,10 +15,13 @@ func pkceApp(t *testing.T) *azugo.TestApp {
 	t.Helper()
 
 	t.Setenv("SERVICE_CLIENT_REGISTRY", `
-public_clients:
+sign_in_clients:
   - client_id: app
+    type: public
+    audience: portal-api
     enabled: true
-    allowed_redirect_uris: [https://app.example/cb]
+    methods: [eparakstsMobile, eidScan, webEid]
+    redirect_uris: [https://app.example/cb]
 `)
 	// The card routes exist only with an engine named; nothing calls it here.
 	t.Setenv("WEBEID_ENGINE_URL", "http://localhost:9998")

@@ -52,14 +52,14 @@ func TestDiscoveryNamesWhatTheServerTakes(t *testing.T) {
 	doc := discoveryDocument(t)
 
 	qt.Check(t, qt.DeepEquals(doc["code_challenge_methods_supported"], any([]any{"S256"})))
-	qt.Check(t, qt.DeepEquals(doc["token_endpoint_auth_methods_supported"], any([]any{"none", "client_secret_post"})))
+	qt.Check(t, qt.DeepEquals(doc["token_endpoint_auth_methods_supported"], any([]any{"client_secret_basic", "client_secret_post", "none"})))
 }
 
 // The revocation endpoint a client ends its session at is published, with the one
-// way a client proves itself there: by the session's own key, no secret.
+// ways a client proves itself there, the same as at the token endpoint.
 func TestDiscoveryNamesTheRevocationEndpoint(t *testing.T) {
 	doc := discoveryDocument(t)
 
 	qt.Check(t, qt.Equals(doc["revocation_endpoint"], any(strings.TrimSuffix(doc["issuer"].(string), "/")+"/revoke")))
-	qt.Check(t, qt.DeepEquals(doc["revocation_endpoint_auth_methods_supported"], any([]any{"none"})))
+	qt.Check(t, qt.DeepEquals(doc["revocation_endpoint_auth_methods_supported"], any([]any{"client_secret_basic", "client_secret_post", "none"})))
 }

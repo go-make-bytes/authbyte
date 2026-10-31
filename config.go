@@ -29,9 +29,6 @@ type Configuration struct {
 	// Useful when the public IssuerURL is not reachable from inside the container.
 	// Defaults to IssuerURL + "/.well-known/jwks.json".
 	JWKSURL string `mapstructure:"jwks_url"`
-	// UserAudience is the logical audience stamped into user tokens (the portal
-	// API surface) and required when validating tokens on protected endpoints.
-	UserAudience string `mapstructure:"user_audience" validate:"required"`
 	// BaseURL is the externally reachable root of this service, used to
 	// construct absolute callback URIs (e.g. https://auth.example.com).
 	BaseURL string `mapstructure:"base_url" validate:"required,url"`
@@ -226,7 +223,6 @@ func NewConfiguration() *Configuration {
 func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	c.BaseConfiguration.Bind("", v)
 
-	v.SetDefault("user_audience", "portal-api")
 	v.SetDefault("token_signing_alg", "ES256")
 	v.SetDefault("user_token_ttl", 15*time.Minute)
 	v.SetDefault("service_token_ttl", 5*time.Minute)
@@ -272,7 +268,6 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 
 	_ = v.BindEnv("issuer_url", "AUTH_ISSUER_URL")
 	_ = v.BindEnv("jwks_url", "AUTH_JWKS_URL")
-	_ = v.BindEnv("user_audience", "AUTH_USER_AUDIENCE")
 	_ = v.BindEnv("oidc_upstream_authority_url", "OIDC_UPSTREAM_AUTHORITY_URL")
 	_ = v.BindEnv("oidc_upstream_client_id", "OIDC_UPSTREAM_CLIENT_ID")
 	_ = v.BindEnv("oidc_upstream_client_secret", "OIDC_UPSTREAM_CLIENT_SECRET")
@@ -564,13 +559,13 @@ func splitList(s string) []string {
 
 // AuthClientConfig builds the auth-client configuration the service uses to
 // protect its own endpoints (validating user tokens). It never calls out, so
-// no client id/secret is needed.
+// no client id/secret is needed. The audiences it accepts are the registry's
+// sign-in clients', set at the start (inboundAuthConfig).
 func (c *Configuration) AuthClientConfig() *authclient.Configuration {
 	return &authclient.Configuration{
 		IssuerURL:                c.IssuerURL,
 		JWKSURL:                  c.jwksURL(),
 		JWKSCacheTTL:             10 * time.Minute,
-		ServiceAudience:          c.UserAudience,
 		ServiceTokenEarlyRefresh: 30 * time.Second,
 		DPoPProofMaxAge:          c.DPoPProofMaxAge,
 		TokenClockSkewLeeway:     c.TokenClockSkewLeeway,
@@ -610,15 +605,14 @@ func (c *Configuration) auditIssuer() string {
 
 // AuditAuthClientConfig builds the OUTBOUND auth-client configuration the audit
 // Poster uses to mint DPoP-bound service tokens (client-credentials against this
-// service's own /token) for calling access-audit. ServiceAudience is required by
-// validation but is only consulted on the inbound path; outbound uses the
-// per-call audience.
+// service's own /token) for calling access-audit. It names no audience of its
+// own: that is read only for tokens a service takes in, and this client only
+// sends, each call to its own audience.
 func (c *Configuration) AuditAuthClientConfig() *authclient.Configuration {
 	return &authclient.Configuration{
 		IssuerURL:                c.auditIssuer(),
 		JWKSURL:                  c.jwksURL(),
 		JWKSCacheTTL:             10 * time.Minute,
-		ServiceAudience:          c.UserAudience,
 		ServiceClientID:          c.AuditClientID,
 		ServiceClientSecret:      c.AuditClientSecret,
 		ServiceTokenEarlyRefresh: 30 * time.Second,

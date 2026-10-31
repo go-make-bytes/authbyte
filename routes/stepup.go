@@ -1,6 +1,8 @@
 package routes
 
 import (
+	"slices"
+
 	"github.com/go-make-bytes/authbyte/identity"
 	"github.com/go-make-bytes/authbyte/routes/request"
 	"github.com/go-make-bytes/authbyte/session"
@@ -58,6 +60,19 @@ func (r *router) stepUp(ctx *azugo.Context) {
 		return
 	}
 
+	// The client proves itself as its type requires before anything is read on
+	// its behalf.
+	secret, presented := "", req.ClientSecret != nil
+	if presented {
+		secret = *req.ClientSecret
+	}
+	client, err := r.Registry().AuthenticateSignIn(req.ClientID, secret, presented)
+	if err != nil {
+		ctx.Error(corehttp.UnauthorizedError{})
+
+		return
+	}
+
 	// The session must exist, named by the refresh token its own client holds
 	// (auth = existing session). The internal session id never leaves the
 	// authority, so it names nothing here.
@@ -65,6 +80,16 @@ func (r *router) stepUp(ctx *azugo.Context) {
 	if !ok {
 		return
 	}
+
+	// A step-up goes only to a method on the client's own list; a client with no
+	// list cannot step up. The flow keeps the list's string, not the request's.
+	i := slices.Index(client.StepUpMethods, req.Method)
+	if i < 0 {
+		ctx.Error(azugo.ParamInvalidError{Name: "method", Tag: "registered"})
+
+		return
+	}
+	method := client.StepUpMethods[i]
 
 	// Validate the redirect_uri against the registered allowlist BEFORE saving
 	// any state — the callback/login later returns the app code here, so an
@@ -79,7 +104,7 @@ func (r *router) stepUp(ctx *azugo.Context) {
 	// to a step-up flow (no acr_values, no Entrust redirect).
 	// /webeid/login then matches the achieved login_method against RequestedLogin
 	// and elevates the existing session via establishSession's step-up branch.
-	if req.Method == identity.LoginWebEID {
+	if method == identity.LoginWebEID {
 		nonce, err := webeidNonce()
 		if err != nil {
 			ctx.Error(err)
@@ -94,7 +119,7 @@ func (r *router) stepUp(ctx *azugo.Context) {
 			AppRedirectURI:      req.RedirectURI,
 			SPAState:            req.State,
 			StepUp:              true,
-			RequestedLogin:      req.Method,
+			RequestedLogin:      method,
 			SessionID:           sid,
 			ClientID:            req.ClientID,
 			WebEIDNonce:         nonce,
@@ -127,7 +152,7 @@ func (r *router) stepUp(ctx *azugo.Context) {
 		SPAState:            req.State,
 		EntrustRedirectURI:  entrustRedirect,
 		StepUp:              true,
-		RequestedLogin:      req.Method,
+		RequestedLogin:      method,
 		SessionID:           sid,
 		ClientID:            req.ClientID,
 		Nonce:               oidcNonce,
@@ -142,7 +167,7 @@ func (r *router) stepUp(ctx *azugo.Context) {
 	url := r.Upstream().AuthorizeURL(upstream.AuthorizeParams{
 		State:       state,
 		RedirectURI: entrustRedirect,
-		ACRValues:   r.Config().ACRForMethod(req.Method),
+		ACRValues:   r.Config().ACRForMethod(method),
 		Prompt:      "login", // force fresh authentication
 		Nonce:       oidcNonce,
 	})

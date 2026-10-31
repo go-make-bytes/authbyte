@@ -123,6 +123,11 @@ func (r *router) revoke(ctx *azugo.Context) {
 		return
 	}
 
+	// The client proves itself first, as at the token endpoint [RFC 7009 §2.1].
+	if _, ok := r.authenticateSignIn(ctx, clientID); !ok {
+		return
+	}
+
 	thumbprint, ok := r.verifyEndpointDPoP(ctx, "")
 	if !ok {
 		return

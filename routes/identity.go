@@ -13,13 +13,20 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// identity returns the internal Identity plus loa, login_method and the signing
-// flows the login method permits, for the authenticated user token.
+// identity returns the internal Identity plus loa, login_method and, to a
+// signing client's token, the signing flows the login method permits.
 //
 // @route /identity [get].
 func (r *router) identity(ctx *azugo.Context) {
 	u := ctx.User()
 	loginMethod := u.ClaimValue("login_method")
+
+	// The token names the client it was issued to [RFC 9068 §2.2]; one that names
+	// none, or a client that does not sign, is told no signing flows.
+	var flows []string
+	if client, ok := r.Registry().SignInClient(u.ClaimValue("client_id")); ok && client.Signing {
+		flows = r.Binding().PermittedFlows(loginMethod)
+	}
 
 	ctx.JSON(&response.Identity{
 		Subject:        u.ID(),
@@ -29,7 +36,7 @@ func (r *router) identity(ctx *azugo.Context) {
 		LoA:            u.ClaimValue("loa"),
 		LoginMethod:    loginMethod,
 		Scopes:         []string(u.Claim("scope")),
-		PermittedFlows: r.Binding().PermittedFlows(loginMethod),
+		PermittedFlows: flows,
 	})
 }
 

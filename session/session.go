@@ -64,14 +64,13 @@ type AppCode struct {
 
 // Session is the server-side user session.
 type Session struct {
-	Subject      string   `json:"subject"`
-	Name         string   `json:"name"`
-	GivenName    string   `json:"given_name"`
-	FamilyName   string   `json:"family_name"`
-	SerialNumber string   `json:"serial_number"`
-	LoA          string   `json:"loa"`
-	LoginMethod  string   `json:"login_method"`
-	Scopes       []string `json:"scopes"`
+	Subject      string `json:"subject"`
+	Name         string `json:"name"`
+	GivenName    string `json:"given_name"`
+	FamilyName   string `json:"family_name"`
+	SerialNumber string `json:"serial_number"`
+	LoA          string `json:"loa"`
+	LoginMethod  string `json:"login_method"`
 	// ClientID is the public client the session's tokens are issued to. Its
 	// registration says whether the people logging in through it need a
 	// membership in the register.

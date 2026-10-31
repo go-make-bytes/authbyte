@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -198,6 +199,11 @@ func (a *App) init() error {
 	if reg.RequiresMembershipSomewhere() && !cfg.RolebyteEnabled() {
 		return fmt.Errorf("registry: a public client requires a membership but no membership register is configured (ROLEBYTE_URL)")
 	}
+	// With a register wired, a client that leaves its membership need unset asks
+	// the register too, so a baseline written on it would never be minted.
+	if ids := reg.BaselinesNeverMinted(cfg.RolebyteEnabled()); len(ids) > 0 {
+		return fmt.Errorf("registry: sign-in clients %s list baseline_scopes, but their people need a membership, so the register's scopes are minted instead; set membership_required: false or remove the baseline", strings.Join(ids, ", "))
+	}
 	a.registry = reg
 
 	// Upstream OIDC provider + identity resolution. The provider is built from
@@ -248,7 +254,7 @@ func (a *App) init() error {
 
 	// Auth-client to protect this service's own endpoints (validates user
 	// tokens). It never calls out, so it carries no client id/secret.
-	ac, err := authclient.New(cfg.AuthClientConfig())
+	ac, err := authclient.New(inboundAuthConfig(cfg, reg))
 	if err != nil {
 		return err
 	}
@@ -307,6 +313,13 @@ func (a *App) init() error {
 		a.webeid = webeid.New(wc, cfg.WebEIDEngineURL, cfg.WebEIDAudience, cfg.WebEIDScope)
 	} else {
 		a.Log().Warn("WEBEID_ENGINE_URL not set — Web eID card-login routes (/webeid/*) are disabled")
+	}
+
+	// A sign-in client allowed none of the methods this deployment offers can sign
+	// nobody in here.
+	for _, id := range clientsOfferedNothing(reg, a.offersMethod) {
+		a.Log().Warn("sign-in client "+id+" is allowed no sign-in method this deployment offers; its sign-ins are refused",
+			zap.String("client_id", id))
 	}
 
 	// Membership-driven scopes (register-backed mode): at every user-token
@@ -519,4 +532,40 @@ func clientSecretResolver(clientID, secretRef string) (string, error) {
 		safeRef = "literal:<redacted>"
 	}
 	return "", fmt.Errorf("no secret resolved for client %q (ref %q)", clientID, safeRef)
+}
+
+// inboundAuthConfig is the check on tokens this service's own endpoints take. The
+// identity door answers for the people of every sign-in client, so a token for any
+// enabled client's audience is accepted there, and no other. With no sign-in
+// client the audience stays empty and accepts nothing: every token this service
+// mints names exactly one audience, and the registry refuses an empty one.
+func inboundAuthConfig(cfg *Configuration, reg *registry.Registry) *authclient.Configuration {
+	c := cfg.AuthClientConfig()
+	if audiences := reg.Audiences(); len(audiences) > 0 {
+		c.ServiceAudience = audiences[0]
+		c.AlsoAcceptedAudiences = audiences[1:]
+	}
+
+	return c
+}
+
+// offersMethod reports whether this deployment offers a sign-in method: one its
+// provider allows, or the card where the card engine is named.
+func (a *App) offersMethod(method string) bool {
+	return a.upstream.MethodAllowed(method) || (method == identity.LoginWebEID && a.webeid != nil)
+}
+
+// clientsOfferedNothing names the enabled sign-in clients none of whose methods
+// offered accepts. They are named for a warning, not refused: one registry file
+// serves every mode of a stack, and a row right in one mode can be empty in
+// another. Such a row's sign-in is refused where it is asked for.
+func clientsOfferedNothing(reg *registry.Registry, offered func(string) bool) []string {
+	var out []string
+	for _, c := range reg.SignInClients() {
+		if !slices.ContainsFunc(c.Methods, offered) {
+			out = append(out, c.ClientID)
+		}
+	}
+
+	return out
 }

@@ -39,7 +39,7 @@ func New(km *keys.Manager, issuerURL string, userTTL, serviceTTL time.Duration) 
 // UserTokenInput describes a user token to mint.
 type UserTokenInput struct {
 	Subject      string // internal subject id
-	Audience     string // portal API audience
+	Audience     string // the sign-in client's user audience
 	Scopes       []string
 	LoA          string
 	LoginMethod  string
@@ -49,6 +49,7 @@ type UserTokenInput struct {
 	SerialNumber string // eIDAS identity code, canonical (e.g. "PNOLV-XXXXXXXXXXX")
 	Tenant       string // the membership's tenant (register-resolved); empty on deployments without one
 	Thumbprint   string // DPoP key thumbprint (cnf.jkt); always set
+	ClientID     string // the sign-in client the token is issued to (client_id, [RFC 9068 §2.2])
 }
 
 // IssueUser mints a DPoP-bound user access token.
@@ -63,6 +64,7 @@ func (i *Issuer) IssueUser(in UserTokenInput) (string, int64, error) {
 		FamilyName:       in.FamilyName,
 		SerialNumber:     in.SerialNumber,
 		Tenant:           in.Tenant,
+		ClientID:         in.ClientID,
 	}
 	if in.Thumbprint != "" {
 		c.Confirmation = &claims.Confirmation{JKT: in.Thumbprint}
