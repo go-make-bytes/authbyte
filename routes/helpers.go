@@ -9,9 +9,10 @@ import (
 	"azugo.io/azugo"
 )
 
-// appendCodeState appends the application authorization code and state to a
-// redirect URI.
-func appendCodeState(redirectURI, code, state string) string {
+// appendCodeState appends the application authorization code, the state and
+// this server's issuer to a redirect URI. Every answer to the browser names
+// the issuer, so the client can tell which authority sent it ([RFC 9207 §2]).
+func appendCodeState(redirectURI, iss, code, state string) string {
 	u, err := url.Parse(redirectURI)
 	if err != nil {
 		return redirectURI
@@ -22,15 +23,18 @@ func appendCodeState(redirectURI, code, state string) string {
 	if state != "" {
 		q.Set("state", state)
 	}
+	q.Set("iss", iss)
 	u.RawQuery = q.Encode()
 
 	return u.String()
 }
 
-// appendErrorState appends an authorization error (and optional description) plus
-// the state to a redirect URI, so a cancelled or denied login is reported back to
-// the client that began it instead of failing as a raw missing-code error.
-func appendErrorState(redirectURI, errCode, errDescription, state string) string {
+// appendErrorState appends an authorization error (and optional description), the
+// state and this server's issuer to a redirect URI, so a cancelled or denied login
+// is reported back to the client that began it instead of failing as a raw
+// missing-code error, and the client can tell who reported it ([RFC 9207 §2]:
+// error responses included).
+func appendErrorState(redirectURI, iss, errCode, errDescription, state string) string {
 	u, err := url.Parse(redirectURI)
 	if err != nil {
 		return redirectURI
@@ -44,9 +48,17 @@ func appendErrorState(redirectURI, errCode, errDescription, state string) string
 	if state != "" {
 		q.Set("state", state)
 	}
+	q.Set("iss", iss)
 	u.RawQuery = q.Encode()
 
 	return u.String()
+}
+
+// noStore marks an answer that carries a token, a credential or personal data
+// as one no cache may keep ([RFC 6749 §5.1]).
+func noStore(ctx *azugo.Context) {
+	ctx.Header.Set("Cache-Control", "no-store")
+	ctx.Header.Set("Pragma", "no-cache")
 }
 
 // pkceS256 is the one PKCE method accepted: the plain form puts the verifier

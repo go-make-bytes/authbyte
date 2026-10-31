@@ -27,22 +27,17 @@ func discoveryDocument(t *testing.T) map[string]any {
 	return doc
 }
 
-// No ID token is issued, so the document names no ID-token field and does not
-// offer the openid scope, which are what an OpenID provider promises.
-func TestDiscoveryPromisesNoIDToken(t *testing.T) {
+// The document promises only what is issued: an ID token comes from the token
+// endpoint alone, so no response type returns one from the authorization
+// endpoint.
+func TestDiscoveryPromisesNoIDTokenFromTheAuthorizationEndpoint(t *testing.T) {
 	doc := discoveryDocument(t)
 
-	_, alg := doc["id_token_signing_alg_values_supported"]
-	qt.Check(t, qt.IsFalse(alg))
-
-	_, subjects := doc["subject_types_supported"]
-	qt.Check(t, qt.IsFalse(subjects))
-
-	if scopes, ok := doc["scopes_supported"].([]any); ok {
-		for _, s := range scopes {
-			qt.Check(t, qt.Not(qt.Equals(s, any("openid"))))
-		}
+	types, _ := doc["response_types_supported"].([]any)
+	for _, rt := range types {
+		qt.Check(t, qt.IsFalse(strings.Contains(rt.(string), "id_token")), qt.Commentf("%v", rt))
 	}
+	qt.Check(t, qt.HasLen(types, 1))
 }
 
 // The document names only S256, and the client authentication methods the

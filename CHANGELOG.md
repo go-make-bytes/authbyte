@@ -5,6 +5,45 @@ runs the service or integrates against it.
 
 ## v0.3.0
 
+### Added — OpenID Connect sign-ins: an ID token, the client's nonce, `prompt`, `max_age`, and the issuer on every return
+
+- **An ID token for a sign-in that asks `scope=openid`**, answered at its code exchange (by redirect or by card): `iss`,
+  `sub`, `aud` (the client alone), `iat`, `exp`, the client's `nonce`, `auth_time` when it is known, `acr` (the sign-in
+  method met), `amr` (registered means only: a card's are `hwk`, `mfa`, `pin`, `sc`) and `sid`, a public session name
+  of its own. Nothing personal beyond the subject; no `azp`. Signed with the deployment's key, ES256 only (the standard
+  asks RS256 be supported too; every client this release serves checks ES256). A refresh, a step-up's exchange, client
+  credentials and token exchange answer none.
+- **`prompt`:** `none` is answered `login_required` (this server holds no browser session yet); `none` beside another
+  value `invalid_request`; `consent` `consent_required` (no consent page); `login` and `select_account` are passed to the
+  provider; other values are ignored. **`max_age`** asks the provider to sign the person in again, is passed on, and a
+  sign-in older than it is refused with `unmet_authentication_requirements`; a malformed one is `invalid_request`.
+  A sign-in the provider was made to repeat (`prompt=login` or any `max_age`) whose own time is from before the
+  request is refused the same way: the provider answered from its own session.
+- **Refused rather than ignored:** `request` (`request_not_supported`), `request_uri` (`request_uri_not_supported`),
+  `id_token_hint` and a nonce over 512 characters (`invalid_request`). `display` and `ui_locales` cause no error, and
+  `ui_locales` is passed to the provider.
+- **Every return to the client through the browser names this issuer** (`iss`), code and error alike. The card
+  door's code answer is `Cache-Control: no-store`.
+- **One issuer value:** a trailing slash on `AUTH_ISSUER_URL` is dropped when the configuration loads, so discovery,
+  the browser's `iss` and every token name the same string.
+- **Discovery** lists the ID token's settings, the method names `acr_values` takes, the claims, and
+  `authorization_response_iss_parameter_supported: true`; it says `request_uri_parameter_supported: false`.
+
+### Changed — `acr_values` speaks this server's method names
+
+**Breaking for every client that names a method:** `acr_values` takes this server's own method names
+(`eparakstsMobile`, `eidScan`, `upstream`, as a client's registry row lists them), exactly as written. A provider's own
+code, such as an eParaksts flow URN, is now refused with `unmet_authentication_requirements`; the server sends the
+provider its own code for each method named.
+
+### Fixed
+
+- **`/token` and `/identity` answers carry `Cache-Control: no-store` and `Pragma: no-cache`.** They carried no cache
+  header.
+- **Access tokens are typed `at+jwt`**, so a reader can tell them from ID tokens signed with the same key; a token
+  exchange refuses a subject token of any other type. **A registry row whose `client_id` is also an audience** is
+  refused at the start, since its ID tokens would be accepted there.
+
 ### Changed — each sign-in client is a registry row of its own, so one deployment serves several products
 
 **Breaking for every deployment: the client registry takes a new shape, and the start refuses the old one by name.**

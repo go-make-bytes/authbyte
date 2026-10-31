@@ -303,7 +303,11 @@ A card login permits the CSC signing flow that reads the card the same way the l
 
 ## Tokens
 
-All tokens are ES256 JWTs (RFC 7519) minted in `issuer/`, DPoP sender-constrained via the `cnf.jkt` confirmation claim (RFC 9449), and scoped to a single audience.
+All tokens are ES256 JWTs (RFC 7519) minted in `issuer/`. Access tokens are typed `at+jwt` (RFC 9068), DPoP sender-constrained via the `cnf.jkt` confirmation claim (RFC 9449), and scoped to a single audience; a token exchange takes only an access token as its subject.
+
+**ID tokens (OpenID Connect Core 1.0).** A sign-in whose `/authorize` (or card challenge) asked `scope=openid` gets an ID token at its code exchange, typed `JWT` and unbound: `iss`, `sub`, `aud` (the client alone, as a string), `iat`, `exp`, the client's `nonce` when it sent one, `auth_time` when it is known (a card sign-in, a provider that states it, or a sign-in the provider was made to repeat by `prompt=login` or `max_age`), `acr` (the method met, in this server's method names), `amr` (registered RFC 8176 means only; a card's are `hwk`, `mfa`, `pin`, `sc`) and `sid`, a public session name that is neither the refresh token nor the session's key. Nothing personal beyond the subject, and no `azp`. Refresh, step-up exchanges, client credentials and token exchange answer none. **ES256 only:** the standard asks an OpenID provider to support RS256 too; this server holds one EC key, and every client it serves checks ES256. A sign-in client's `client_id` may not also be an audience a door accepts, or its ID tokens would be accepted there.
+
+**What `/authorize` reads beyond OAuth.** `acr_values` names methods in this server's own names (a provider's code is refused) and the provider is sent its own code for each. `prompt=none` answers `login_required` (no browser session is held); `consent` answers `consent_required`; `login` and `select_account` reach the provider. `max_age` makes the provider sign the person in again and refuses a sign-in older than it; a provider time from before the request refuses a sign-in it was made to repeat. `request`, `request_uri` and `id_token_hint` are refused. Every return to the client through the browser, code or error, carries `iss` (RFC 9207); the issuer is `AUTH_ISSUER_URL` without a trailing slash, the same string everywhere. Token, identity and card-login answers carry `Cache-Control: no-store`.
 
 | Token | Grant | Subject | Carries |
 |---|---|---|---|

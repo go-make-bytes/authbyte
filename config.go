@@ -343,6 +343,13 @@ func loadSecret(v *viper.Viper, key, name string) {
 // Validate validates the configuration. The base config validates the standard
 // fleet env (and recurses into the embedded Azugo config + Telemetry/Broker);
 // valid.Struct(c) then covers the service-specific fields.
+// issuerIdentifier is the issuer as discovery, every return to the browser and
+// every token state it: the configured address without a trailing slash, so
+// the three never differ.
+func issuerIdentifier(raw string) string {
+	return strings.TrimSuffix(strings.TrimSpace(raw), "/")
+}
+
 func (c *Configuration) Validate(valid *validation.Validate) error {
 	if err := refuseEmptyFileSecret("CACHE_PASSWORD", c.Cache.Password); err != nil {
 		return err
@@ -353,6 +360,7 @@ func (c *Configuration) Validate(valid *validation.Validate) error {
 	if err := valid.Struct(c); err != nil {
 		return err
 	}
+	c.IssuerURL = issuerIdentifier(c.IssuerURL)
 
 	return c.validateUpstream()
 }

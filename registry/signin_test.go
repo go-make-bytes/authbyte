@@ -261,3 +261,43 @@ sign_in_clients:
 		t.Errorf("without a register: %v, want none", got)
 	}
 }
+
+// A sign-in client's ID tokens name its client_id as their audience, so a
+// client_id that is also an audience some door accepts would let its ID tokens
+// through that door. The start is refused, naming the row.
+func TestLoadRefusesASignInClientNamedLikeAnAudience(t *testing.T) {
+	mustNotLoad(t, "a sign-in client named like another sign-in row's audience", `
+sign_in_clients:
+  - client_id: app-portal
+    enabled: true
+    type: public
+    audience: own-portal
+    redirect_uris: [https://a.example/callback]
+  - client_id: other
+    enabled: true
+    type: public
+    audience: app-portal
+    redirect_uris: [https://b.example/callback]
+`, `"app-portal"`)
+
+	mustNotLoad(t, "a sign-in client named like its own audience", signInRow(`    type: public
+    audience: row
+    redirect_uris: [https://a.example/callback]
+`), `"row"`)
+
+	mustNotLoad(t, "a sign-in client named like a service audience", `
+service_clients:
+  - client_id: svc:worker
+    secret_ref: env:W
+    enabled: true
+    grants:
+      - audience: svc:document
+        scopes: [documents:read]
+sign_in_clients:
+  - client_id: svc:document
+    enabled: true
+    type: public
+    audience: app-portal
+    redirect_uris: [https://a.example/callback]
+`, `"svc:document"`)
+}

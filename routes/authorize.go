@@ -78,31 +78,46 @@ func (r *router) authorize(ctx *azugo.Context) {
 	// ([RFC 7636 §4.4.1]).
 	challenge, method, ok := s256Challenge(ctx)
 	if !ok {
-		ctx.RedirectUnsafe(appendErrorState(redirectURI, "invalid_request", "code_challenge with code_challenge_method S256 required", spaState))
+		ctx.RedirectUnsafe(appendErrorState(redirectURI, r.issuerID(), "invalid_request", "code_challenge with code_challenge_method S256 required", spaState))
 
 		return
 	}
 
-	// The methods the client asks for (acr_values) must be ones this provider
-	// offers and the client is allowed. A request that names none may complete
-	// with any of those. A request that can never be met is answered at the
-	// client's own address, before any flow is stored or the browser is sent on.
+	// What the request asks of an ID token and of the sign-in. What can never be
+	// met here is answered at the client's own address before anything is stored.
+	idAsk, aerr := readIDTokenAsk(ctx)
+	var signAsk signInAsk
+	if aerr == nil {
+		signAsk, aerr = readSignInAsk(ctx)
+	}
+	if aerr != nil {
+		ctx.RedirectUnsafe(appendErrorState(redirectURI, r.issuerID(), aerr.code, aerr.description, spaState))
+
+		return
+	}
+
+	// The methods the client asks for (acr_values, in authbyte's own method
+	// names) must be ones this provider offers and the client is allowed. A
+	// request that names none may complete with any of those. A request that can
+	// never be met is answered at the client's own address, before any flow is
+	// stored or the browser is sent on.
 	acrValues := ""
 	if acr := ctx.Query.StringOptional("acr_values"); acr != nil {
 		acrValues = *acr
 	}
 	client, _ := r.Registry().SignInClient(clientID)
 	allowed := func(m string) bool { return r.Upstream().MethodAllowed(m) && slices.Contains(client.Methods, m) }
-	requested, ok := requestedMethods(r.Upstream().Resolver(), allowed, acrValues)
+	requested, ok := requestedMethods(allowed, acrValues)
+	named := requested
 	if !ok {
-		ctx.RedirectUnsafe(appendErrorState(redirectURI, "unmet_authentication_requirements", "acr_values names no login method this client may use here", spaState))
+		ctx.RedirectUnsafe(appendErrorState(redirectURI, r.issuerID(), "unmet_authentication_requirements", "acr_values names no login method this client may use here", spaState))
 
 		return
 	}
 	if len(requested) == 0 {
 		requested = slices.DeleteFunc(slices.Clone(client.Methods), func(m string) bool { return !allowed(m) })
 		if len(requested) == 0 {
-			ctx.RedirectUnsafe(appendErrorState(redirectURI, "unmet_authentication_requirements", "this client may use no login method this server offers", spaState))
+			ctx.RedirectUnsafe(appendErrorState(redirectURI, r.issuerID(), "unmet_authentication_requirements", "this client may use no login method this server offers", spaState))
 
 			return
 		}
@@ -137,6 +152,11 @@ func (r *router) authorize(ctx *azugo.Context) {
 		Tenant:              tenant,
 		Nonce:               nonce,
 		RequestedMethods:    requested,
+		OpenID:              idAsk.openID,
+		ClientNonce:         idAsk.nonce,
+		ForcedLogin:         signAsk.forcedLogin,
+		MaxAge:              signAsk.maxAge,
+		Started:             time.Now().Unix(),
 	}
 
 	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
@@ -145,13 +165,17 @@ func (r *router) authorize(ctx *azugo.Context) {
 		return
 	}
 
+	// The provider is asked in its own words: its own code for each method the
+	// request named, and a fresh sign-in when the client asked for one. Its
+	// nonce is authbyte's, never the client's.
 	params := upstream.AuthorizeParams{
 		State:       state,
 		RedirectURI: entrustRedirect,
 		Nonce:       nonce,
-	}
-	if acrValues != "" {
-		params.ACRValues = acrValues
+		ACRValues:   upstreamACR(r.Config().ACRForMethod, named),
+		Prompt:      signAsk.upstreamPrompt(),
+		MaxAge:      signAsk.maxAge,
+		UILocales:   signAsk.uiLocales,
 	}
 
 	// External IdP authorize endpoint — use the unsanitized redirect so the
@@ -180,7 +204,7 @@ func (r *router) callback(ctx *azugo.Context) {
 		if state := ctx.Query.StringOptional("state"); state != nil {
 			if flow, ferr := r.Session().ConsumeFlow(ctx, *state); ferr == nil {
 				// Client app redirect URI (cross-origin) — bypass same-origin sanitizing.
-				ctx.RedirectUnsafe(appendErrorState(flow.AppRedirectURI, *idpErr, desc, flow.SPAState))
+				ctx.RedirectUnsafe(appendErrorState(flow.AppRedirectURI, r.issuerID(), *idpErr, desc, flow.SPAState))
 
 				return
 			}
@@ -260,6 +284,17 @@ func (r *router) callback(ctx *azugo.Context) {
 		return
 	}
 
+	// When the person authenticated, held against the client's max_age before
+	// anything is written: a provider answering from a session older than the
+	// client allows refuses the sign-in at the client's address.
+	authTime, err := signInMoment(info, flow, time.Now())
+	if err != nil {
+		r.Audit().LoginFailure(ctx, "authentication older than the client allows")
+		ctx.RedirectUnsafe(appendErrorState(flow.AppRedirectURI, r.issuerID(), "unmet_authentication_requirements", "the sign-in is older than the request allows", flow.SPAState))
+
+		return
+	}
+
 	sess, sid, err := r.establishSession(ctx, flow, id)
 	if err != nil {
 		if flow.StepUp {
@@ -271,7 +306,7 @@ func (r *router) callback(ctx *azugo.Context) {
 			// The provider answered with a method the client did not ask for: no
 			// session, and the client hears it at its own address.
 			r.Audit().LoginFailure(ctx, "login method not requested: "+id.LoginMethod)
-			ctx.RedirectUnsafe(appendErrorState(flow.AppRedirectURI, "unmet_authentication_requirements", "the sign-in used a login method the request did not ask for", flow.SPAState))
+			ctx.RedirectUnsafe(appendErrorState(flow.AppRedirectURI, r.issuerID(), "unmet_authentication_requirements", "the sign-in used a login method the request did not ask for", flow.SPAState))
 		} else {
 			r.Audit().LoginFailure(ctx, "session establishment failed")
 			ctx.Error(err)
@@ -287,6 +322,9 @@ func (r *router) callback(ctx *azugo.Context) {
 	// step-up replaces (or clears) whatever the previous login captured.
 	client, _ := r.Registry().SignInClient(flow.ClientID)
 	sess.Capabilities = r.captureCapabilities(ctx, client, tokens.AccessToken, info, id.LoginMethod)
+	// What the sign-in's ID tokens will state: the moment, and the means the
+	// provider named that are registered ones; nothing authbyte did not see.
+	stampSignIn(flow, sess, authTime, registeredAMR(info.AMR))
 
 	if !r.saveEstablishedSession(ctx, flow, sid, sess) {
 		return
@@ -302,6 +340,8 @@ func (r *router) callback(ctx *azugo.Context) {
 		ClientID:            flow.ClientID,
 		RedirectURI:         flow.AppRedirectURI,
 		Tenant:              flow.Tenant,
+		OpenID:              flow.OpenID,
+		Nonce:               flow.ClientNonce,
 	}, appCodeTTL); err != nil {
 		ctx.Error(err)
 
@@ -315,7 +355,7 @@ func (r *router) callback(ctx *azugo.Context) {
 	}
 
 	// Client app redirect URI (cross-origin) — bypass same-origin sanitizing.
-	ctx.RedirectUnsafe(appendCodeState(flow.AppRedirectURI, appCode, flow.SPAState))
+	ctx.RedirectUnsafe(appendCodeState(flow.AppRedirectURI, r.issuerID(), appCode, flow.SPAState))
 }
 
 // establishSession either creates a new session (normal login) or updates the

@@ -10,17 +10,18 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// acr_values names authbyte's own methods.
 const (
-	acrMobile = "urn:eparaksts:authentication:flow:mobileid"
-	acrScan   = "urn:eparaksts:authentication:flow:mobile-eid"
+	acrMobile = identity.LoginEParakstsMobile
+	acrScan   = identity.LoginEIDScan
 )
 
 // The methods a request asks for are read from its acr_values, a space-separated
-// list in order of preference ([OIDC Core §3.1.2.1]). A value no method answers
-// to, or a method this provider does not offer, makes the request one that can
-// never be met.
+// list in order of preference ([OIDC Core §3.1.2.1]), in authbyte's own method
+// names. A value no method answers to, a provider's own code, another spelling,
+// or a method this provider does not offer makes the request one that can never
+// be met.
 func TestRequestedMethods(t *testing.T) {
-	res := identity.NewResolverPolicies(nil, nil, identity.LoginEParakstsMobile, "")
 	offered := func(m string) bool { return m == identity.LoginEParakstsMobile || m == identity.LoginEIDScan }
 
 	cases := []struct {
@@ -34,11 +35,13 @@ func TestRequestedMethods(t *testing.T) {
 		{"two asked, in order", acrScan + " " + acrMobile, []string{identity.LoginEIDScan, identity.LoginEParakstsMobile}, true},
 		{"the same asked twice", acrMobile + "  " + acrMobile, []string{identity.LoginEParakstsMobile}, true},
 		{"a value no method answers to", "urn:nobody:flow:fingerprint", nil, false},
-		{"a method this provider does not offer", "sc_plugin", nil, false},
+		{"a method this provider does not offer", identity.LoginWebEID, nil, false},
 		{"one good, one unknown", acrMobile + " urn:nobody:flow:fingerprint", nil, false},
+		{"the provider's own code", "urn:eparaksts:authentication:flow:mobileid", nil, false},
+		{"another spelling", "EparakstsMobile", nil, false},
 	}
 	for _, c := range cases {
-		methods, ok := requestedMethods(res, offered, c.acr)
+		methods, ok := requestedMethods(offered, c.acr)
 		qt.Check(t, qt.DeepEquals(methods, c.methods), qt.Commentf("%s", c.name))
 		qt.Check(t, qt.Equals(ok, c.ok), qt.Commentf("%s", c.name))
 	}

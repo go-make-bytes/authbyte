@@ -102,6 +102,8 @@ type edge struct {
 	mu    sync.Mutex
 	// basic, when set, is sent as HTTP Basic client credentials: id, secret.
 	basic []string
+	// cacheControl and pragma are the last answer's cache headers.
+	cacheControl, pragma string
 }
 
 func newEdge(t *testing.T, app *azugo.TestApp) *edge {
@@ -140,6 +142,10 @@ func (e *edge) post(path string, form url.Values) (int, map[string]any) {
 
 		status := resp.StatusCode()
 		fresh := string(resp.Header.Peek("DPoP-Nonce"))
+		e.mu.Lock()
+		e.cacheControl = string(resp.Header.Peek("Cache-Control"))
+		e.pragma = string(resp.Header.Peek("Pragma"))
+		e.mu.Unlock()
 		body := append([]byte(nil), resp.Body()...)
 		fasthttp.ReleaseResponse(resp)
 

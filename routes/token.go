@@ -187,6 +187,10 @@ const (
 //
 // @route /token [post].
 func (r *router) token(ctx *azugo.Context) {
+	// Every answer here may carry a token: none may be stored by a cache on the
+	// way ([RFC 6749 §5.1], [OIDC Core §3.1.3.3]).
+	noStore(ctx)
+
 	grant, err := ctx.Form.String("grant_type")
 	if err != nil {
 		ctx.Error(err)
@@ -344,6 +348,26 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
+	// A sign-in that asked for an ID token gets one, stating what it proved;
+	// any other exchange, a step-up's included, gets none.
+	idToken := ""
+	if appCode.OpenID {
+		idToken, err = r.Issuer().IssueID(issuer.IDTokenInput{
+			Subject:  sess.Subject,
+			ClientID: signIn.ClientID,
+			Nonce:    appCode.Nonce,
+			AuthTime: sess.AuthTime,
+			ACR:      sess.LoginMethod,
+			AMR:      sess.AMR,
+			SID:      sess.SID,
+		})
+		if err != nil {
+			ctx.Error(err)
+
+			return
+		}
+	}
+
 	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, signIn.Audience, outcome.scopes)
 
 	ctx.JSON(&response.Token{
@@ -351,6 +375,7 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		TokenType:    tokenTypeDPoP,
 		ExpiresIn:    exp,
 		RefreshToken: refresh,
+		IDToken:      idToken,
 		Tenants:      outcome.choices,
 		// The login-captured signing capabilities ride the code exchange (and
 		// only the code exchange — a refresh re-issues a token, it is not a

@@ -4,8 +4,6 @@ import (
 	"errors"
 	"slices"
 	"strings"
-
-	"github.com/go-make-bytes/authbyte/identity"
 )
 
 // errMethodNotRequested is a sign-in completed with a method the request did not
@@ -15,19 +13,22 @@ var errMethodNotRequested = errors.New("login method not among the requested one
 
 // requestedMethods reads the methods a request's acr_values ask for: a
 // space-separated list in order of preference ([OIDC Core §3.1.2.1]), each value
-// named by the provider's own vocabulary. It answers false when a value names no
-// method, or a method this provider does not offer: such a request can never be
-// met. The methods returned are the vocabulary's own strings, never the
-// request's, so nothing read from the request outlives it.
-func requestedMethods(res *identity.Resolver, offered func(string) bool, acrValues string) ([]string, bool) {
+// one of authbyte's own method names, exactly and case-sensitively ([OIDC Core
+// §2]: acr is case-sensitive). A provider's own code names no method: the
+// provider is sent its code by authbyte. It answers false when a value names no
+// method offered here: such a request can never be met. The methods returned are
+// the vocabulary's own strings, never the request's, so nothing read from the
+// request outlives it.
+func requestedMethods(offered func(string) bool, acrValues string) ([]string, bool) {
 	var methods []string
 	for _, v := range strings.Fields(acrValues) {
-		m, ok := res.MethodFor(v)
-		if !ok || !offered(m) {
+		// offered answers for authbyte's own names only, exactly as written: a
+		// provider's code, or another spelling, is no method offered here.
+		if !offered(v) {
 			return nil, false
 		}
-		if !slices.Contains(methods, m) {
-			methods = append(methods, m)
+		if !slices.Contains(methods, v) {
+			methods = append(methods, strings.Clone(v))
 		}
 	}
 

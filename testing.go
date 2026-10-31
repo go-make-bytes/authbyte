@@ -32,7 +32,9 @@ func startTestApp(tb testing.TB) (*App, error) {
 	// sibling service.environment and the OTel deployment.environment.
 	tb.Setenv("SERVICE_NAME", "authbyte")
 	tb.Setenv("ENVIRONMENT", "development")
-	tb.Setenv("AUTH_ISSUER_URL", "http://localhost:8080")
+	if os.Getenv("AUTH_ISSUER_URL") == "" {
+		tb.Setenv("AUTH_ISSUER_URL", "http://localhost:8080")
+	}
 	// The eParaksts profile is the default upstream for tests. A test that puts the
 	// generic connector in the environment first (OIDC_UPSTREAM_AUTHORITY_URL, or
 	// the three explicit endpoints) gets that one instead — the service refuses to

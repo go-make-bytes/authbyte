@@ -197,3 +197,43 @@ func TestIssueServiceTokenCarriesTenant(t *testing.T) {
 		t.Fatalf("a platform service's token must carry no tenant, got %q", pc.Tenant)
 	}
 }
+
+// One key signs both kinds, so the type tells them apart: an access token is
+// typed at+jwt and is a subject a token exchange accepts; an ID token is not.
+func TestAnIDTokenIsNoSubjectTokenForAnExchange(t *testing.T) {
+	iss, _, _ := newStack(t)
+
+	access, _, err := iss.IssueUser(issuer.UserTokenInput{Subject: "sub:p", Audience: "app-api", ClientID: "app", Thumbprint: "jkt"})
+	if err != nil {
+		t.Fatalf("IssueUser: %v", err)
+	}
+	id, err := iss.IssueID(issuer.IDTokenInput{Subject: "sub:p", ClientID: "app", ACR: "webEid", SID: "s"})
+	if err != nil {
+		t.Fatalf("IssueID: %v", err)
+	}
+
+	if typ := headerType(t, access); typ != "at+jwt" {
+		t.Errorf("the access token is typed %q, want at+jwt", typ)
+	}
+	if typ := headerType(t, id); typ != "JWT" {
+		t.Errorf("the ID token is typed %q, want JWT", typ)
+	}
+	if _, err := iss.ParseSubjectToken(access); err != nil {
+		t.Errorf("the access token was refused as a subject: %v", err)
+	}
+	if _, err := iss.ParseSubjectToken(id); err == nil {
+		t.Error("the ID token was accepted as the subject of an exchange")
+	}
+}
+
+func headerType(t *testing.T, token string) string {
+	t.Helper()
+
+	tok, _, err := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
+	if err != nil {
+		t.Fatalf("ParseUnverified: %v", err)
+	}
+	typ, _ := tok.Header["typ"].(string)
+
+	return typ
+}

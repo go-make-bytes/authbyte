@@ -28,6 +28,8 @@ func (r *router) identity(ctx *azugo.Context) {
 		flows = r.Binding().PermittedFlows(loginMethod)
 	}
 
+	// The answer carries personal data: no cache may keep it.
+	noStore(ctx)
 	ctx.JSON(&response.Identity{
 		Subject:        u.ID(),
 		Name:           u.DisplayName(),

@@ -87,6 +87,9 @@ type UserInfo struct {
 	// DirectoryGuest is true when the provider says the person is a guest in
 	// its directory rather than a member of it.
 	DirectoryGuest bool `json:"-"`
+	// AuthTime is when the provider says the person authenticated (Unix
+	// seconds), read from its verified id_token only; 0 when it said nothing.
+	AuthTime int64 `json:"-"`
 }
 
 // Identity is the platform's normalized identity. Subject is the internal,

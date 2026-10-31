@@ -197,6 +197,23 @@ func Load(doc []byte, resolve SecretResolver) (*Registry, error) {
 		}
 	}
 
+	// A sign-in client's ID tokens are addressed to its client_id, so that id
+	// must be no audience a door accepts, or its ID tokens would open the door.
+	audiences := map[string]bool{}
+	for _, sc := range r.signInClients {
+		audiences[sc.Audience] = true
+	}
+	for _, c := range r.clients {
+		for _, g := range c.Grants {
+			audiences[g.Audience] = true
+		}
+	}
+	for id := range r.signInClients {
+		if audiences[id] {
+			return nil, fmt.Errorf("registry: sign-in client_id %q is also an audience; its ID tokens would be accepted there", id)
+		}
+	}
+
 	return r, nil
 }
 

@@ -47,6 +47,20 @@ type Flow struct {
 	// request; the id_token it issues must carry it back, which binds that
 	// token to this flow and nothing else. Empty for a card login.
 	Nonce string `json:"nonce,omitempty"`
+	// OpenID says the client asked for an ID token (openid in its scope), and
+	// ClientNonce is the nonce it sent for that token: the client's own value,
+	// never sent on to the provider, whose nonce is Nonce.
+	OpenID      bool   `json:"openid,omitempty"`
+	ClientNonce string `json:"client_nonce,omitempty"`
+	// ForcedLogin says the provider was asked to sign the person in again
+	// (prompt=login, or any max_age), so the moment the sign-in completes is
+	// the moment the person authenticated. MaxAge is the age in seconds the
+	// client accepts, when it named one.
+	ForcedLogin bool   `json:"forced_login,omitempty"`
+	MaxAge      *int64 `json:"max_age,omitempty"`
+	// Started is when the request was received, in Unix seconds: a sign-in
+	// the provider was made to repeat cannot have happened before it.
+	Started int64 `json:"started,omitempty"`
 }
 
 // AppCode binds an issued application authorization code (Auth→SPA) to the
@@ -60,6 +74,10 @@ type AppCode struct {
 	RedirectURI string `json:"redirect_uri"`
 	// Tenant is the organisation named when the login began, if any.
 	Tenant string `json:"tenant,omitempty"`
+	// OpenID and Nonce carry the client's ask for an ID token, and the nonce it
+	// must carry, from the flow to the code exchange that answers it.
+	OpenID bool   `json:"openid,omitempty"`
+	Nonce  string `json:"nonce,omitempty"`
 }
 
 // Session is the server-side user session.
@@ -107,6 +125,15 @@ type Session struct {
 	// the token; the token itself is never stored). Empty until the first code
 	// exchange answers one.
 	RefreshKey string `json:"refresh_key,omitempty"`
+	// AuthTime is when the person proved who they are at sign-in, in Unix
+	// seconds; 0 when it is not known (a provider that answered from a session
+	// of its own and said nothing of when). AMR are the registered means of
+	// that proof. Both are what the sign-in's ID token states.
+	AuthTime int64    `json:"auth_time,omitempty"`
+	AMR      []string `json:"amr,omitempty"`
+	// SID is the session's public name in ID tokens: a value of its own, never
+	// the session's key or its refresh token.
+	SID string `json:"sid,omitempty"`
 }
 
 // Expired reports whether the session's lifetime has run out at now. A session

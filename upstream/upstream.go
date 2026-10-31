@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -273,6 +274,18 @@ func (p *Provider) Resolver() *identity.Resolver {
 // the upstream login path fails closed.
 func (p *Provider) MethodAllowed(method string) bool { return p.okSet[method] }
 
+// Methods lists the sign-in methods this provider is allowed to complete with,
+// sorted.
+func (p *Provider) Methods() []string {
+	out := make([]string, 0, len(p.okSet))
+	for m := range p.okSet {
+		out = append(out, m)
+	}
+	slices.Sort(out)
+
+	return out
+}
+
 // FederatedMethod reports whether a sign-out after this method must also
 // travel through the provider, clearing the session cookie it keeps in the
 // browser. The set is the profile's or the deployment's choice
@@ -288,6 +301,8 @@ type AuthorizeParams struct {
 	ACRValues string
 	UILocales string
 	Prompt    string
+	// MaxAge passes a client's max_age on, in seconds, when it named one.
+	MaxAge *int64
 	// Nonce binds the id_token the provider issues to this very flow: the
 	// value is kept with the flow and must come back inside the token.
 	Nonce string
@@ -312,6 +327,9 @@ func (p *Provider) AuthorizeURL(params AuthorizeParams) string {
 	}
 	if params.Prompt != "" {
 		q.Set("prompt", params.Prompt)
+	}
+	if params.MaxAge != nil {
+		q.Set("max_age", strconv.FormatInt(*params.MaxAge, 10))
 	}
 
 	return p.cfg.AuthorizeURL + "?" + q.Encode()
@@ -449,6 +467,11 @@ func (p *Provider) Claims(ctx context.Context, tokens Tokens, nonce string) (ide
 			info.AMR = amr
 		}
 		info.AMR = append(info.AMR, claimTexts(idClaims["acrs"])...)
+		// When the person authenticated, as the provider states it in its
+		// verified token; never read from userinfo, which no key vouches for.
+		if at, ok := idClaims["auth_time"].(float64); ok && at > 0 {
+			info.AuthTime = int64(at)
+		}
 	}
 
 	info.DirectoryID = firstNonEmpty(

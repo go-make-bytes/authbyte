@@ -157,6 +157,11 @@ func (i *Issuer) ParseSubjectToken(raw string) (*claims.Claims, error) {
 
 	var c claims.Claims
 	if _, err := parser.ParseWithClaims(raw, &c, func(tok *jwt.Token) (any, error) {
+		// Only an access token is exchanged; an ID token signed with the same
+		// key is refused by its type [RFC 9068 §5].
+		if typ, _ := tok.Header["typ"].(string); typ != typeAccessToken {
+			return nil, fmt.Errorf("issuer: a subject token typed %q is not an access token", typ)
+		}
 		kid, _ := tok.Header["kid"].(string)
 		pk, ok := i.km.PublicKeyByKID(kid)
 		if !ok {
@@ -185,13 +190,82 @@ func (i *Issuer) base(subject, audience string, ttl time.Duration) jwt.Registere
 	}
 }
 
+// sign signs an access token, typed as one [RFC 9068 §2.1].
 func (i *Issuer) sign(c claims.Claims, ttl time.Duration) (string, int64, error) {
-	tok, err := i.km.Sign(c)
+	tok, err := i.km.SignTyped(c, typeAccessToken)
 	if err != nil {
 		return "", 0, err
 	}
 
 	return tok, int64(ttl.Seconds()), nil
+}
+
+// The JOSE typ of each kind of token this issuer signs. They share one key, so
+// the type is what tells an access token from an ID token [RFC 9068 §5].
+const (
+	typeAccessToken = "at+jwt"
+	typeIDToken     = "JWT"
+)
+
+// IDTokenInput is what an ID token states about one sign-in [OIDC Core §2].
+type IDTokenInput struct {
+	Subject  string   // the person, as the access token names them
+	ClientID string   // the client the sign-in was for: the token's only audience
+	Nonce    string   // the client's nonce; "" when it sent none
+	AuthTime int64    // when the person authenticated, Unix seconds; 0 when unknown
+	ACR      string   // the sign-in method met
+	AMR      []string // the registered means of the authentication
+	SID      string   // the session's public name
+}
+
+// idTokenClaims are an ID token's claims. aud is the one client, written as a
+// string; nothing personal beyond the subject is carried.
+type idTokenClaims struct {
+	Issuer    string   `json:"iss"`
+	Subject   string   `json:"sub"`
+	Audience  string   `json:"aud"`
+	IssuedAt  int64    `json:"iat"`
+	ExpiresAt int64    `json:"exp"`
+	AuthTime  int64    `json:"auth_time,omitempty"`
+	Nonce     string   `json:"nonce,omitempty"`
+	ACR       string   `json:"acr,omitempty"`
+	AMR       []string `json:"amr,omitempty"`
+	SID       string   `json:"sid,omitempty"`
+}
+
+func (c idTokenClaims) GetExpirationTime() (*jwt.NumericDate, error) {
+	return jwt.NewNumericDate(time.Unix(c.ExpiresAt, 0)), nil
+}
+
+func (c idTokenClaims) GetIssuedAt() (*jwt.NumericDate, error) {
+	return jwt.NewNumericDate(time.Unix(c.IssuedAt, 0)), nil
+}
+
+func (c idTokenClaims) GetNotBefore() (*jwt.NumericDate, error) { return nil, nil }
+func (c idTokenClaims) GetIssuer() (string, error)              { return c.Issuer, nil }
+func (c idTokenClaims) GetSubject() (string, error)             { return c.Subject, nil }
+func (c idTokenClaims) GetAudience() (jwt.ClaimStrings, error) {
+	return jwt.ClaimStrings{c.Audience}, nil
+}
+
+// IssueID signs the ID token of a sign-in [OIDC Core §2]: this issuer, the
+// person, the client as its only audience, the user token's lifetime, and what
+// the sign-in proved. No azp: the client is the audience alone.
+func (i *Issuer) IssueID(in IDTokenInput) (string, error) {
+	now := i.now()
+
+	return i.km.SignTyped(idTokenClaims{
+		Issuer:    i.issuerURL,
+		Subject:   in.Subject,
+		Audience:  in.ClientID,
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(i.userTTL).Unix(),
+		AuthTime:  in.AuthTime,
+		Nonce:     in.Nonce,
+		ACR:       in.ACR,
+		AMR:       in.AMR,
+		SID:       in.SID,
+	}, typeIDToken)
 }
 
 func randomJTI() string {

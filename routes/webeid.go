@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gmb-lib/go-authbyte/identitycode"
 	"github.com/go-make-bytes/authbyte/identity"
@@ -89,6 +91,15 @@ func (r *router) webeidChallenge(ctx *azugo.Context) {
 		spaState = *s
 	}
 
+	// A card sign-in may ask for an ID token as a redirect does: openid in its
+	// scope, with the nonce the token must carry.
+	idAsk, aerr := readIDTokenAsk(ctx)
+	if aerr != nil {
+		ctx.Error(azugo.ParamInvalidError{Name: "nonce", Tag: "max=" + strconv.Itoa(maxNonceLen)})
+
+		return
+	}
+
 	nonce, err := webeidNonce()
 	if err != nil {
 		ctx.Error(err)
@@ -104,6 +115,8 @@ func (r *router) webeidChallenge(ctx *azugo.Context) {
 		SPAState:            spaState,
 		ClientID:            clientID,
 		WebEIDNonce:         nonce,
+		OpenID:              idAsk.openID,
+		ClientNonce:         idAsk.nonce,
 	}
 	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
 		ctx.Error(err)
@@ -192,6 +205,9 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 	// method, so a step-up replaces what the previous login captured.
 	client, _ := r.Registry().SignInClient(flow.ClientID)
 	sess.Capabilities = cardCapabilities(client, req.AuthToken)
+	// The card signed this sign-in's own challenge just now: the person
+	// authenticated at this moment, by the card's key and its PIN.
+	stampSignIn(flow, sess, time.Now().Unix(), cardAMR)
 
 	if !r.saveEstablishedSession(ctx, flow, sid, sess) {
 		return
@@ -205,6 +221,8 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		ClientID:            flow.ClientID,
 		RedirectURI:         flow.AppRedirectURI,
 		Tenant:              flow.Tenant,
+		OpenID:              flow.OpenID,
+		Nonce:               flow.ClientNonce,
 	}, appCodeTTL); err != nil {
 		ctx.Error(err)
 
@@ -217,6 +235,8 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		r.Audit().LoginSuccess(ctx, sess.Subject, sess.LoA, sess.LoginMethod)
 	}
 
+	// The answer carries an authorization code: never kept by a cache.
+	noStore(ctx)
 	ctx.JSON(webeidLoginResponse{Code: appCode, State: flow.SPAState})
 }
 
