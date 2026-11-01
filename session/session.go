@@ -61,6 +61,17 @@ type Flow struct {
 	// Started is when the request was received, in Unix seconds: a sign-in
 	// the provider was made to repeat cannot have happened before it.
 	Started int64 `json:"started,omitempty"`
+	// Binding is the hash of the cookie that tied this sign-in to the browser
+	// that started it; the provider's answer completes it only in that browser.
+	// Empty for a flow a client's server started (a step-up), which no browser
+	// cookie of this service could have started.
+	Binding string `json:"binding,omitempty"`
+	// Picker says the person chose the method on this service's sign-in page,
+	// and Request is the client's authorization request, so a cancel or a
+	// provider failure brings the person back to that page rather than to the
+	// client.
+	Picker  bool   `json:"picker,omitempty"`
+	Request string `json:"request,omitempty"`
 }
 
 // AppCode binds an issued application authorization code (Auth→SPA) to the

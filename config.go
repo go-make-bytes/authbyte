@@ -11,6 +11,7 @@ import (
 	"github.com/go-make-bytes/authbyte/identity"
 	"github.com/go-make-bytes/authbyte/upstream"
 
+	azugoconfig "azugo.io/azugo/config"
 	corecfg "azugo.io/core/config"
 	"azugo.io/core/validation"
 	"github.com/spf13/viper"
@@ -201,11 +202,35 @@ type Configuration struct {
 	// public issuer is not reachable from inside the pod.
 	AuditIssuerURL string `mapstructure:"audit_issuer_url" validate:"omitempty,url"`
 
+	// The sign-in page, shown to a client whose request names no way.
+	//
+	// OIDCUpstreamDisplayName names the generic provider's way on the page; unset,
+	// the page names it in the person's language as their organisation's sign-in.
+	OIDCUpstreamDisplayName string `mapstructure:"oidc_upstream_display_name"`
+	// SignInOperatorName names who runs this sign-in at the page's foot; unset,
+	// the page has no foot line. SignInOperatorMarkFile is an SVG shown beside it.
+	SignInOperatorName     string `mapstructure:"sign_in_operator_name"`
+	SignInOperatorMarkFile string `mapstructure:"sign_in_operator_mark_file"`
+	// SignInRateLimit is how many sign-in requests one address may make in each
+	// SignInRateWindow; 0 turns the limit off.
+	SignInRateLimit  int           `mapstructure:"sign_in_rate_limit" validate:"gte=0"`
+	SignInRateWindow time.Duration `mapstructure:"sign_in_rate_window" validate:"gt=0"`
+
 	// Development conveniences (off by default).
 	//
 	// DemoDir, when set, serves the static demo SPA from that directory under
 	// /demo (same-origin, so the browser can read the DPoP-Nonce header).
 	DemoDir string `mapstructure:"demo_dir"`
+}
+
+// SignInRate is the sign-in routes' limit, per client address, in azugo's terms.
+func (c *Configuration) SignInRate() *azugoconfig.RateLimit {
+	return &azugoconfig.RateLimit{
+		Enabled:  c.SignInRateLimit > 0,
+		Strategy: "fixed-window",
+		Limit:    c.SignInRateLimit,
+		Window:   c.SignInRateWindow,
+	}
 }
 
 // NewConfiguration returns a new configuration.
@@ -245,6 +270,8 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	v.SetDefault("eparaksts_acr_mobile", "urn:eparaksts:authentication:flow:mobileid")
 	v.SetDefault("eparaksts_acr_eidscan", "urn:eparaksts:authentication:flow:mobile-eid")
 	v.SetDefault("eparaksts_logout_idp", upstream.EParakstsDefaultLogoutIDP)
+	v.SetDefault("sign_in_rate_limit", 60)
+	v.SetDefault("sign_in_rate_window", time.Minute)
 
 	// Audit (GDPR-audit) defaults; AccessAuditURL stays empty (feature off) until set.
 	v.SetDefault("access_audit_audience", "svc:access-audit")
@@ -288,6 +315,11 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("oidc_upstream_methods_allowed", "OIDC_UPSTREAM_METHODS_ALLOWED")
 	_ = v.BindEnv("oidc_upstream_methods_federated", "OIDC_UPSTREAM_METHODS_FEDERATED")
 	_ = v.BindEnv("oidc_upstream_loa_default", "OIDC_UPSTREAM_LOA_DEFAULT")
+	_ = v.BindEnv("oidc_upstream_display_name", "OIDC_UPSTREAM_DISPLAY_NAME")
+	_ = v.BindEnv("sign_in_operator_name", "SIGN_IN_OPERATOR_NAME")
+	_ = v.BindEnv("sign_in_operator_mark_file", "SIGN_IN_OPERATOR_MARK_FILE")
+	_ = v.BindEnv("sign_in_rate_limit", "SIGN_IN_RATE_LIMIT")
+	_ = v.BindEnv("sign_in_rate_window", "SIGN_IN_RATE_WINDOW")
 	_ = v.BindEnv("eparaksts_authority_url", "EPARAKSTS_AUTHORITY_URL")
 	_ = v.BindEnv("eparaksts_client_id", "EPARAKSTS_CLIENT_ID")
 	_ = v.BindEnv("eparaksts_client_secret", "EPARAKSTS_CLIENT_SECRET")

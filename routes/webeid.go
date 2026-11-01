@@ -79,7 +79,7 @@ func (r *router) webeidChallenge(ctx *azugo.Context) {
 
 	// PKCE is S256 only, as at /authorize; this door is called by the client's
 	// server, so the refusal is an error answer, not a redirect.
-	challenge, method, ok := s256Challenge(ctx)
+	challenge, method, ok := s256Challenge(queryParams(ctx))
 	if !ok {
 		ctx.Error(azugo.ParamInvalidError{Name: "code_challenge_method", Tag: "eq=" + pkceS256})
 
@@ -93,7 +93,7 @@ func (r *router) webeidChallenge(ctx *azugo.Context) {
 
 	// A card sign-in may ask for an ID token as a redirect does: openid in its
 	// scope, with the nonce the token must carry.
-	idAsk, aerr := readIDTokenAsk(ctx)
+	idAsk, aerr := readIDTokenAsk(queryParams(ctx))
 	if aerr != nil {
 		ctx.Error(azugo.ParamInvalidError{Name: "nonce", Tag: "max=" + strconv.Itoa(maxNonceLen)})
 

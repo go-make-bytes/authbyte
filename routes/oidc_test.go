@@ -36,6 +36,11 @@ func authorizeWith(t *testing.T, app *azugo.TestApp, extra url.Values) *url.URL 
 	q.Set("state", "spa-state")
 	q.Set("code_challenge", "challenge-of-forty-three-characters-long-aaaa")
 	q.Set("code_challenge_method", "S256")
+	// A request naming its way goes straight to the provider; one naming none is
+	// shown the sign-in page (signin_test.go).
+	if _, named := extra["acr_values"]; !named {
+		q.Set("acr_values", identity.LoginEParakstsMobile)
+	}
 	for k, vs := range extra {
 		for _, v := range vs {
 			q.Add(k, v)

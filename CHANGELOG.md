@@ -5,6 +5,31 @@ runs the service or integrates against it.
 
 ## v0.3.0
 
+### Added — this service's own sign-in page, for a request that names no way in
+
+- **A request to `/authorize` without `acr_values` is shown this service's sign-in page** instead of being sent
+  straight to the provider: *Sign in to {client}*, one button per method the client's registration lists that the
+  provider can start, in English or Latvian, under this service's name. The person's pick is sent to the provider with
+  that method's own code. A request that names a way, or `prompt=none`, never sees it. A client allowed no such method
+  is told on the page, where it used to get `unmet_authentication_requirements` at its address.
+- **Every sign-in is tied to the browser that started it** by an http-only cookie (`__Host-authbyte_signin` over TLS
+  and outside development): the provider's answer, code or error, is refused in any other browser before its code is
+  exchanged, and the page's choice needs the cookie, a token derived from it and this service's own `Origin`.
+- **A cancel or a provider failure** of a sign-in begun on the page brings the person back to the page, saying what
+  happened; one whose client named the way is answered at the client as before.
+- **A request this service cannot place** (an unknown client, an unregistered `redirect_uri`, a provider return it
+  does not know) gets a page saying so when it asks for HTML; other callers get the same error answers as before.
+- **`POST /authorize`** takes the request as a form, as OpenID Connect requires of an authorization endpoint. A post
+  that arrives without the browser's binding cookie (any post from another site, which the cookie's `SameSite=Lax`
+  keeps it from) sets none: it is answered `303` to the same request as a `GET`, so a browser keeps the binding it
+  holds and its sign-ins under way in other tabs still finish.
+- **Rate limit** on `/authorize` and the page's choice: `SIGN_IN_RATE_LIMIT` (60) per client address per
+  `SIGN_IN_RATE_WINDOW` (one minute), `429` with `Retry-After` past it; `0` turns it off.
+- **New settings:** `OIDC_UPSTREAM_DISPLAY_NAME` (the generic provider's button), `SIGN_IN_OPERATOR_NAME` and
+  `SIGN_IN_OPERATOR_MARK_FILE` (the page's foot line), and the two above. Discovery lists `ui_locales_supported`.
+- **Callers to move:** an application whose sign-in names no way now shows the page in between; one that should go
+  straight to its provider sends its way in `acr_values`.
+
 ### Added — OpenID Connect sign-ins: an ID token, the client's nonce, `prompt`, `max_age`, and the issuer on every return
 
 - **An ID token for a sign-in that asks `scope=openid`**, answered at its code exchange (by redirect or by card): `iss`,

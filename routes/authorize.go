@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-make-bytes/authbyte/identity"
+	"github.com/go-make-bytes/authbyte/registry"
 	"github.com/go-make-bytes/authbyte/session"
 	"github.com/go-make-bytes/authbyte/store"
 	"github.com/go-make-bytes/authbyte/upstream"
 
 	"azugo.io/azugo"
 	corehttp "azugo.io/core/http"
+	"github.com/valyala/fasthttp"
 )
 
 // TTLs for transient auth-flow artifacts.
@@ -33,104 +36,144 @@ var (
 	errStepUpPersonMismatch = errors.New("the step-up login is not the person the session belongs to")
 )
 
-// authorize begins user login. The SPA (via the BFF) calls this with its PKCE
-// challenge; the service starts an Authorization Code flow against Entrust and
-// redirects the browser to the IdP.
+// authorizeRequest is an authorization request that passed every check.
+type authorizeRequest struct {
+	// params is the request as it came, to repeat on the page's own addresses.
+	params      authParams
+	redirectURI string
+	clientID    string
+	spaState    string
+	challenge   string
+	method      string
+	idAsk       idTokenAsk
+	signAsk     signInAsk
+	// named are the methods acr_values asked for, in authbyte's own names. None
+	// means the person picks on this service's page.
+	named  []string
+	tenant string
+	client registry.SignInClient
+}
+
+// authorize begins a sign-in. A request that names a way (acr_values) is sent
+// straight to the provider; one that names none is shown this service's own
+// page, which lists the ways the client may use.
 //
 // @route /authorize [get].
+// @route /authorize [post].
 func (r *router) authorize(ctx *azugo.Context) {
-	rt := ctx.Query.StringOptional("response_type")
-	if rt == nil || *rt != "code" {
-		ctx.Error(azugo.ParamInvalidError{Name: "response_type", Tag: "oneof=code"})
+	req, ok := r.readAuthorize(ctx, requestParams(ctx))
+	if !ok {
+		return
+	}
+
+	// A form post from another site arrives without the Lax binding the browser
+	// may hold. A new one here would replace it and fail that browser's sign-ins
+	// under way in other tabs, so the post sets none: the browser asks again by
+	// GET, which carries the binding it holds.
+	if ctx.Method() == fasthttp.MethodPost && browserBinding(ctx) == "" {
+		ctx.StatusCode(fasthttp.StatusSeeOther)
+		ctx.Redirect("/authorize?" + req.params.encode())
 
 		return
 	}
 
-	redirectURI, err := ctx.Query.String("redirect_uri")
-	if err != nil {
-		ctx.Error(err)
+	binding := bindBrowser(ctx)
+	if len(req.named) == 0 {
+		r.showPage(ctx, req, binding, takeNotice(ctx))
 
 		return
 	}
+	r.startProvider(ctx, req, req.named, binding, req.signAsk.uiLocales)
+}
 
-	clientID, err := ctx.Query.String("client_id")
-	if err != nil {
-		ctx.Error(err)
+// readAuthorize checks an authorization request. What names no client or
+// return address this service knows gets the cannot-start page; anything else
+// that fails is answered at the client's own, validated address before anything
+// is stored. ok is false when the answer is written.
+func (r *router) readAuthorize(ctx *azugo.Context, p authParams) (*authorizeRequest, bool) {
+	next := ""
+	if ctx.Method() == fasthttp.MethodGet && strings.HasPrefix(ctx.Path(), "/authorize") {
+		next = "/authorize?" + p.encode()
+	}
 
-		return
+	if rt := p.opt("response_type"); rt == nil || *rt != "code" {
+		r.cannotStart(ctx, fasthttp.StatusBadRequest, azugo.ParamInvalidError{Name: "response_type", Tag: "oneof=code"}, next)
+
+		return nil, false
+	}
+
+	redirectURI := p.get("redirect_uri")
+	if redirectURI == "" {
+		r.cannotStart(ctx, fasthttp.StatusBadRequest, azugo.ParamRequiredError{Name: "redirect_uri"}, next)
+
+		return nil, false
+	}
+
+	clientID := p.get("client_id")
+	if clientID == "" {
+		r.cannotStart(ctx, fasthttp.StatusBadRequest, azugo.ParamRequiredError{Name: "client_id"}, next)
+
+		return nil, false
 	}
 
 	// Validate the redirect_uri against the registered allowlist BEFORE saving
 	// any state or redirecting — prevents open-redirect attacks ([RFC 6749 §10.6]).
 	if err := r.Registry().ValidateRedirectURI(clientID, redirectURI); err != nil {
-		ctx.Error(azugo.ParamInvalidError{Name: "redirect_uri", Tag: "registered"})
+		r.cannotStart(ctx, fasthttp.StatusBadRequest, azugo.ParamInvalidError{Name: "redirect_uri", Tag: "registered"}, next)
 
-		return
+		return nil, false
 	}
 
-	spaState := ""
-	if s := ctx.Query.StringOptional("state"); s != nil {
-		spaState = *s
+	req := &authorizeRequest{
+		params:      p,
+		redirectURI: redirectURI,
+		clientID:    clientID,
+		spaState:    p.get("state"),
+		// The organisation the person asks to act under, when they belong to
+		// more than one. Optional; it is checked against their memberships at the
+		// token issue, never trusted on its own.
+		tenant: p.get("tenant"),
+	}
+	refuse := func(code, description string) (*authorizeRequest, bool) {
+		ctx.RedirectUnsafe(appendErrorState(redirectURI, r.issuerID(), code, description, req.spaState))
+
+		return nil, false
 	}
 
 	// PKCE is S256 only. A missing challenge or any other method is answered at
 	// the client's own (now validated) address, before any flow is stored
 	// ([RFC 7636 §4.4.1]).
-	challenge, method, ok := s256Challenge(ctx)
-	if !ok {
-		ctx.RedirectUnsafe(appendErrorState(redirectURI, r.issuerID(), "invalid_request", "code_challenge with code_challenge_method S256 required", spaState))
-
-		return
+	var ok bool
+	if req.challenge, req.method, ok = s256Challenge(p); !ok {
+		return refuse("invalid_request", "code_challenge with code_challenge_method S256 required")
 	}
 
 	// What the request asks of an ID token and of the sign-in. What can never be
 	// met here is answered at the client's own address before anything is stored.
-	idAsk, aerr := readIDTokenAsk(ctx)
-	var signAsk signInAsk
-	if aerr == nil {
-		signAsk, aerr = readSignInAsk(ctx)
+	var aerr *authError
+	if req.idAsk, aerr = readIDTokenAsk(p); aerr == nil {
+		req.signAsk, aerr = readSignInAsk(p)
 	}
 	if aerr != nil {
-		ctx.RedirectUnsafe(appendErrorState(redirectURI, r.issuerID(), aerr.code, aerr.description, spaState))
-
-		return
+		return refuse(aerr.code, aerr.description)
 	}
 
 	// The methods the client asks for (acr_values, in authbyte's own method
 	// names) must be ones this provider offers and the client is allowed. A
-	// request that names none may complete with any of those. A request that can
-	// never be met is answered at the client's own address, before any flow is
-	// stored or the browser is sent on.
-	acrValues := ""
-	if acr := ctx.Query.StringOptional("acr_values"); acr != nil {
-		acrValues = *acr
-	}
-	client, _ := r.Registry().SignInClient(clientID)
-	allowed := func(m string) bool { return r.Upstream().MethodAllowed(m) && slices.Contains(client.Methods, m) }
-	requested, ok := requestedMethods(allowed, acrValues)
-	named := requested
-	if !ok {
-		ctx.RedirectUnsafe(appendErrorState(redirectURI, r.issuerID(), "unmet_authentication_requirements", "acr_values names no login method this client may use here", spaState))
-
-		return
-	}
-	if len(requested) == 0 {
-		requested = slices.DeleteFunc(slices.Clone(client.Methods), func(m string) bool { return !allowed(m) })
-		if len(requested) == 0 {
-			ctx.RedirectUnsafe(appendErrorState(redirectURI, r.issuerID(), "unmet_authentication_requirements", "this client may use no login method this server offers", spaState))
-
-			return
-		}
+	// request that can never be met is answered at the client's own address.
+	req.client, _ = r.Registry().SignInClient(clientID)
+	pickable := r.pickable(req.client)
+	if req.named, ok = requestedMethods(func(m string) bool { return slices.Contains(pickable, m) }, p.get("acr_values")); !ok {
+		return refuse("unmet_authentication_requirements", "acr_values names no login method this client may use here")
 	}
 
-	// The organisation the person asks to act under, when they belong to more
-	// than one. Optional; it is checked against their memberships at the token
-	// issue, never trusted on its own.
-	tenant := ""
-	if t := ctx.Query.StringOptional("tenant"); t != nil {
-		tenant = *t
-	}
+	return req, true
+}
 
+// startProvider stores the flow, bound to this browser, and sends the browser to
+// the provider asking for methods in the provider's own words. A flow started on
+// the page keeps the client's request, so a cancel brings the person back to it.
+func (r *router) startProvider(ctx *azugo.Context, req *authorizeRequest, methods []string, binding, uiLocales string) {
 	entrustRedirect := r.entrustRedirectURI()
 	if entrustRedirect == "" {
 		ctx.Error(corehttp.NotFoundError{Resource: "eParaksts redirect uri"})
@@ -138,25 +181,31 @@ func (r *router) authorize(ctx *azugo.Context) {
 		return
 	}
 
+	picker := len(req.named) == 0
 	state := randomToken(24)
 	// The nonce binds the id_token the provider issues to this flow: it travels
 	// out with the authorize request and must come back inside the token.
 	nonce := randomToken(24)
 	flow := &session.Flow{
-		CodeChallenge:       challenge,
-		CodeChallengeMethod: method,
-		AppRedirectURI:      redirectURI,
-		SPAState:            spaState,
+		CodeChallenge:       req.challenge,
+		CodeChallengeMethod: req.method,
+		AppRedirectURI:      req.redirectURI,
+		SPAState:            req.spaState,
 		EntrustRedirectURI:  entrustRedirect,
-		ClientID:            clientID,
-		Tenant:              tenant,
+		ClientID:            req.clientID,
+		Tenant:              req.tenant,
 		Nonce:               nonce,
-		RequestedMethods:    requested,
-		OpenID:              idAsk.openID,
-		ClientNonce:         idAsk.nonce,
-		ForcedLogin:         signAsk.forcedLogin,
-		MaxAge:              signAsk.maxAge,
+		RequestedMethods:    methods,
+		OpenID:              req.idAsk.openID,
+		ClientNonce:         req.idAsk.nonce,
+		ForcedLogin:         req.signAsk.forcedLogin,
+		MaxAge:              req.signAsk.maxAge,
 		Started:             time.Now().Unix(),
+		Binding:             bindingHash(binding),
+		Picker:              picker,
+	}
+	if picker {
+		flow.Request = req.params.encode()
 	}
 
 	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
@@ -165,19 +214,23 @@ func (r *router) authorize(ctx *azugo.Context) {
 		return
 	}
 
-	// The provider is asked in its own words: its own code for each method the
-	// request named, and a fresh sign-in when the client asked for one. Its
-	// nonce is authbyte's, never the client's.
+	// The provider is asked in its own words: its own code for each method, and
+	// a fresh sign-in when the client asked for one. Its nonce is authbyte's,
+	// never the client's.
 	params := upstream.AuthorizeParams{
 		State:       state,
 		RedirectURI: entrustRedirect,
 		Nonce:       nonce,
-		ACRValues:   upstreamACR(r.Config().ACRForMethod, named),
-		Prompt:      signAsk.upstreamPrompt(),
-		MaxAge:      signAsk.maxAge,
-		UILocales:   signAsk.uiLocales,
+		ACRValues:   upstreamACR(r.Config().ACRForMethod, methods),
+		Prompt:      req.signAsk.upstreamPrompt(),
+		MaxAge:      req.signAsk.maxAge,
+		UILocales:   uiLocales,
 	}
 
+	// The page's choice is a form post, answered by sending the browser on.
+	if picker {
+		ctx.StatusCode(fasthttp.StatusSeeOther)
+	}
 	// External IdP authorize endpoint — use the unsanitized redirect so the
 	// cross-origin target is preserved (a same-origin-only redirect would drop it).
 	ctx.RedirectUnsafe(r.Upstream().AuthorizeURL(params))
@@ -203,6 +256,21 @@ func (r *router) callback(ctx *azugo.Context) {
 		// Resolve the originating client so the error lands where login began.
 		if state := ctx.Query.StringOptional("state"); state != nil {
 			if flow, ferr := r.Session().ConsumeFlow(ctx, *state); ferr == nil {
+				if !r.returnedHere(ctx, flow) {
+					return
+				}
+				// A sign-in begun on this service's page goes back to the page,
+				// which says what happened; the client is not told.
+				if flow.Picker {
+					notice := noticeProvider
+					if *idpErr == "access_denied" {
+						notice = noticeCancelled
+					}
+					setCookie(ctx, noticeCookie, notice, noticeLifetime)
+					ctx.Redirect("/authorize?" + flow.Request)
+
+					return
+				}
 				// Client app redirect URI (cross-origin) — bypass same-origin sanitizing.
 				ctx.RedirectUnsafe(appendErrorState(flow.AppRedirectURI, r.issuerID(), *idpErr, desc, flow.SPAState))
 
@@ -210,7 +278,7 @@ func (r *router) callback(ctx *azugo.Context) {
 			}
 		}
 		// Unknown/expired state — cannot safely bounce to a client; fail closed.
-		ctx.Error(corehttp.UnauthorizedError{})
+		r.cannotStart(ctx, fasthttp.StatusUnauthorized, corehttp.UnauthorizedError{}, "")
 
 		return
 	}
@@ -232,7 +300,13 @@ func (r *router) callback(ctx *azugo.Context) {
 	flow, err := r.Session().ConsumeFlow(ctx, state)
 	if err != nil {
 		// Unknown/expired state — fail closed.
-		ctx.Error(corehttp.UnauthorizedError{})
+		r.cannotStart(ctx, fasthttp.StatusUnauthorized, corehttp.UnauthorizedError{}, "")
+
+		return
+	}
+	// Checked before the provider's code is exchanged: a return that reached
+	// another browser sends nothing to the provider.
+	if !r.returnedHere(ctx, flow) {
 
 		return
 	}
@@ -504,4 +578,17 @@ func stepUpMethodMatches(requested, achieved string) bool {
 
 func (r *router) entrustRedirectURI() string {
 	return r.Config().RedirectURI()
+}
+
+// returnedHere reports whether the provider's answer reached the browser that
+// started the sign-in, and answers the refusal when it did not. A flow a
+// client's server started (a step-up) carries no binding and is not checked.
+func (r *router) returnedHere(ctx *azugo.Context, flow *session.Flow) bool {
+	if flow.Binding == "" || boundHere(ctx, flow.Binding) {
+		return true
+	}
+	r.Audit().LoginFailure(ctx, "the provider's answer reached a browser that did not start the sign-in")
+	r.cannotStart(ctx, fasthttp.StatusUnauthorized, corehttp.UnauthorizedError{}, "")
+
+	return false
 }

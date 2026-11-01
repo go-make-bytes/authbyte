@@ -68,9 +68,9 @@ const pkceS256 = "S256"
 // s256Challenge reads the request's PKCE challenge. ok is false when the
 // challenge is missing or the method is anything but S256, an absent method
 // included: absent means plain ([RFC 7636 §4.3]).
-func s256Challenge(ctx *azugo.Context) (challenge, method string, ok bool) {
-	c := ctx.Query.StringOptional("code_challenge")
-	m := ctx.Query.StringOptional("code_challenge_method")
+func s256Challenge(p authParams) (challenge, method string, ok bool) {
+	c := p.opt("code_challenge")
+	m := p.opt("code_challenge_method")
 	if c == nil || *c == "" || m == nil || *m != pkceS256 {
 		return "", "", false
 	}

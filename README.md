@@ -6,7 +6,7 @@ It is the only service that talks to the upstream identity providers, and the on
 
 It resolves a login to a **person**, not to a credential: the same human authenticating by eParaksts Mobile one day and a Web eID card the next — different upstream subjects — maps to one internal subject, keyed on the eIDAS national identity code. It also carries a **login-method to signing-flow binding**: the method someone logged in with determines which signing flows their token may later drive, so a signature can only be produced by a login strong enough to authorise it.
 
-It renders no human UI (a bundled static demo aside, off in production). Its surface is OAuth/OIDC-shaped for the browser SPA and its backend-for-frontend, plus a token endpoint used server-to-server by the rest of the fleet. Built on [`azugo.io/azugo`](https://azugo.io); module `github.com/go-make-bytes/authbyte`.
+It renders one human page, its own sign-in page, shown to a client whose request names no way in (and a bundled static demo, off in production). Its surface is OAuth/OIDC-shaped for the browser SPA and its backend-for-frontend, plus a token endpoint used server-to-server by the rest of the fleet. Built on [`azugo.io/azugo`](https://azugo.io); module `github.com/go-make-bytes/authbyte`.
 
 ---
 
@@ -149,7 +149,10 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 
 | Method + path | Purpose | Auth |
 |---|---|---|
-| `GET /authorize` | Begin user login (Authorization Code + PKCE, RFC 7636, `S256` only: another method or none is answered at the client's `redirect_uri` with `error=invalid_request`). Validates `redirect_uri` against the client's `redirect_uris`, saves flow state, redirects to the identity provider. Optional `acr_values`: the methods the client accepts, in order; a value naming no method the provider offers and the client's row allows (`methods`) is answered with `error=unmet_authentication_requirements`, and a sign-in the provider completes with another method gets the same answer instead of a code. With none named, the sign-in may complete with any method the row allows that the provider offers, and a row allowed none of those gets the same answer. Optional `tenant=<id>`: the organisation a person with several memberships chooses to act under (checked at the token issue) | anonymous |
+| `GET /authorize`, `POST /authorize` | Begin user login, the request in the query or as a form (Authorization Code + PKCE, RFC 7636, `S256` only: another method or none is answered at the client's `redirect_uri` with `error=invalid_request`). Validates `redirect_uri` against the client's `redirect_uris`, saves flow state, redirects to the identity provider. Optional `acr_values`: the methods the client accepts, in order; a value naming no method the provider offers and the client's row allows (`methods`) is answered with `error=unmet_authentication_requirements`, and a sign-in the provider completes with another method gets the same answer instead of a code. A `POST` that arrives without the browser's binding cookie is answered `303` to the same request as a `GET`, which carries it. With none named, the browser is shown this service's sign-in page (below), listing the methods the row allows that the provider offers, or saying none is set up. An unknown client or an unregistered `redirect_uri` gets a page saying the sign-in cannot start when the request asks for HTML, and the error answer otherwise; never a redirect. Optional `tenant=<id>`: the organisation a person with several memberships chooses to act under (checked at the token issue) | anonymous |
+| `POST /authorize/choice` | The sign-in page's answer: the method the person picked. Its address carries the client's request, checked again as `/authorize` checks it; it needs the browser's binding cookie, the page's token and an `Origin` equal to `BASE_URL`'s (a default port written there is left out, as browsers leave it out), and a method the page offered; it then sends the browser to the provider (303) | anonymous (the page's browser) |
+| `GET /signin/language` | Keeps the language the person picked (`lang`) and shows the page again (`next`, this service's own `/authorize` only, rebuilt from its parsed query) | anonymous |
+| `GET /signin/{name}` | The page's stylesheet and typeface, and the operator's mark | anonymous |
 | `GET /callback` | Handle the identity-provider redirect: exchange the code, read claims, resolve the person, establish a session, mint a single-use app authorization code | state-verified (path configurable) |
 | `GET /logout` | The browser's leg of a sign-out (`client_id`, `redirect_uri`, optional `login_method`): send the browser to `redirect_uri`, which must be on the client's `post_logout_redirect_uris` (a sign-in return is not a sign-out landing). For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone. It ends no session and takes no value naming one: the client ends the session with `POST /revoke` first | anonymous (`redirect_uri` allowlisted) |
 | `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` (with the `client_id` the token was issued to) \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof. A confidential client proves itself at every grant with its secret, by HTTP Basic (`client_secret_basic`) or in the form (`client_secret_post`), never both in one request, and at the code exchange before the code is spent; a public client sends none | PKCE / client secret / refresh token + client + session key / subject token — all + DPoP |
@@ -170,6 +173,26 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 The `/metrics` VictoriaMetrics registry and standard tracing/logging are provided by the shared platform base (`go-platform-kit`), gated by `METRICS_ENABLED`; there are no service-specific custom metrics.
 
 ---
+
+## The sign-in page
+
+A request to `/authorize` that names no way in (`acr_values` absent) is shown this service's own page: *Sign in to {client}*, one button per method the client's registration lists (`methods`, in that order, the first the main one) that this deployment's provider can start, each with a one-line hint, in English or Latvian. A request that names a way skips it, and `prompt=none` never shows it. A client allowed no such method is told so on the page; the card joins the page when it is read there.
+
+- **Tied to the browser.** Every `/authorize` sets an http-only cookie, `__Host-authbyte_signin` (the plain name only on a development server over plain HTTP), holding a random value that lives ten minutes and is kept across sign-ins, so two tabs both finish. Each flow keeps its hash; the page's choice and the provider's return (code or error) are refused without it, before the provider's code is exchanged. A flow a client's server started (a step-up) carries none and is not checked.
+- **The choice** is a form post with a token derived from that cookie and an `Origin` that must be this service's own (`BASE_URL`); a method the page did not offer is refused. A choice whose cookie has run out shows the page again, saying the sign-in took too long.
+- **A cancel or a provider failure** of a sign-in begun on the page brings the person back to the page with what happened, once; a sign-in whose client named the way is answered at the client, as before.
+- **Headers:** `Content-Security-Policy: default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; form-action 'self' <the provider's authorization origin>; frame-ancestors 'none'; base-uri 'none'`, `X-Frame-Options: DENY`, `Cache-Control: no-store`, `Referrer-Policy: same-origin` (the page's address goes to no other host; `no-referrer` would make browsers send `Origin: null` on the page's own form, which the choice refuses), `X-Content-Type-Options: nosniff`. The page runs no script and loads nothing from another host.
+- **Language:** the person's own pick (kept a year in `__Host-authbyte_lang`), then the client's `ui_locales`, then `Accept-Language`, then English; the provider is asked in the same language.
+- **Rate limit:** `/authorize` and the choice allow `SIGN_IN_RATE_LIMIT` requests per client address per `SIGN_IN_RATE_WINDOW` (60 a minute), counted in the application cache; the next answers `429` with `Retry-After`. The provider's return is not limited. An office behind one address that signs in more people than that in a window needs a higher number.
+
+**Sign-in page settings**
+
+| Env | Default | Meaning |
+|---|---|---|
+| `SIGN_IN_OPERATOR_NAME` | — (⇒ no foot line) | Who runs this sign-in, named at the page's foot |
+| `SIGN_IN_OPERATOR_MARK_FILE` | — | An SVG shown beside it; named but unreadable stops the start |
+| `SIGN_IN_RATE_LIMIT` | `60` | Sign-in requests one client address may make per window; `0` turns the limit off |
+| `SIGN_IN_RATE_WINDOW` | `1m` | The window |
 
 ## Architecture
 
@@ -430,6 +453,7 @@ can be stated alongside the country.
 | `OIDC_UPSTREAM_METHODS_ALLOWED` | — (⇒ the default method) | Comma-separated set a callback may resolve to; anything else is refused (fail closed) |
 | `OIDC_UPSTREAM_METHODS_FEDERATED` | — (none) | Comma-separated methods whose sign-out also goes through the provider's end-session endpoint, ending the session it keeps in the browser. Unset, signing out ends this service's session and leaves the provider's alone — a directory provider's session is the person's whole estate. The eParaksts profile lists its own methods regardless |
 | `OIDC_UPSTREAM_LOA_DEFAULT` | `low` | Assurance level when no `LOA_POLICY` token matches — raise deliberately for an IdP that enforces MFA |
+| `OIDC_UPSTREAM_DISPLAY_NAME` | — (⇒ "Your organisation's sign-in", in the page's language) | The generic provider's name on the sign-in page's button, e.g. `Microsoft Entra` |
 | `LOA_POLICY` | — (⇒ built-in) | Override the `acr`/`amr` → assurance-level vocabulary (`substr=loa,…`) |
 
 | Env (eParaksts profile) | Default | Meaning |
@@ -547,9 +571,12 @@ authbyte/
 ├── app.go, config.go, auditposter.go   — App container, configuration, GDPR poster
 ├── testing.go                          — TestApp harness (lazy backing-store clients)
 ├── cmd/server/                         — CLI entrypoint (web, health subcommands)
+├── signin/                            — the sign-in page's words, language choice, headers and files
 ├── routes/                             — HTTP handlers
 │   ├── router.go       — route registration (optional surfaces fail-closed by absence)
 │   ├── authorize.go    — /authorize · /callback · session establishment + step-up branch
+│   ├── signin.go       — the sign-in page: its ways, the choice, the language, its files
+│   ├── cookies.go      — the browser's binding, the page's token, the one-shot notice
 │   ├── token.go        — /token: 4 grants (code, client-credentials, refresh, exchange)
 │   ├── refresh.go      — refresh grants (the token's hash → session + client) · /revoke
 │   ├── dpop.go         — inbound DPoP verify + server-nonce challenge + jti replay

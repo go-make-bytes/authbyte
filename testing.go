@@ -44,11 +44,18 @@ func startTestApp(tb testing.TB) (*App, error) {
 		tb.Setenv("EPARAKSTS_CLIENT_ID", "test-client")
 	}
 	tb.Setenv("BASE_URL", "http://localhost:8080")
+	// The sign-in limit counts in the application's cache, which tests reach
+	// lazily or not at all; a test of the limit itself names a live Valkey.
+	if os.Getenv("SIGN_IN_RATE_LIMIT") == "" {
+		tb.Setenv("SIGN_IN_RATE_LIMIT", "0")
+	}
 	tb.Setenv("POSTGRES_DSN", "postgres://localhost:5432/authbyte_test?sslmode=disable")
 	// The service refuses an in-memory session store, so tests name a Valkey; it
 	// is dialled lazily, and tests that need the store set their own.
 	tb.Setenv("CACHE_TYPE", "redis")
-	tb.Setenv("CACHE_CONNECTION", "redis://localhost:6379/0")
+	if os.Getenv("CACHE_CONNECTION") == "" {
+		tb.Setenv("CACHE_CONNECTION", "redis://localhost:6379/0")
+	}
 
 	return New(nil, "0.0.0-test")
 }

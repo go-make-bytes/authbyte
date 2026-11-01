@@ -1,7 +1,6 @@
 package routes
 
 import (
-	"context"
 	"encoding/json"
 	"net/url"
 	"testing"
@@ -110,39 +109,8 @@ func TestAuthorizeRefusesAMethodTheClientIsNotAllowed(t *testing.T) {
 	qt.Check(t, qt.Equals(flowCount(mem), 1))
 }
 
-// Case 34: a request that names no method may complete only with one its client
-// allows that the provider offers. Those become the flow's requested methods, so
-// the completion's one check (TestMethodRequested, case 8 of the C0 task) refuses
-// any other method the provider answers with. The card has a door of its own.
-func TestAnUnnamedMethodMeansTheClientsOwn(t *testing.T) {
-	app, mem := methodsApp(t)
-
-	for _, tc := range []struct {
-		client, redirect string
-		want             []string
-	}{
-		{"mobile-only", mobileReturn, []string{identity.LoginEParakstsMobile}},
-		{"every-way", everyReturn, []string{identity.LoginEParakstsMobile, identity.LoginEIDScan}},
-	} {
-		loc := authorizeAs(t, app, tc.client, tc.redirect, "")
-		qt.Assert(t, qt.Equals(loc.Host, "localhost:9999"), qt.Commentf("%s", tc.client))
-
-		flow, err := mem.ConsumeFlow(context.Background(), loc.Query().Get("state"))
-		qt.Assert(t, qt.IsNil(err))
-		qt.Check(t, qt.DeepEquals(flow.RequestedMethods, tc.want), qt.Commentf("%s", tc.client))
-	}
-
-	qt.Check(t, qt.IsFalse(methodRequested([]string{identity.LoginEParakstsMobile}, identity.LoginEIDScan)))
-}
-
-// Case 36: a client none of whose methods the provider offers can never sign in
-// through it; /authorize says so at its address and stores nothing.
-func TestAuthorizeRefusesAClientAllowedNothingTheProviderOffers(t *testing.T) {
-	app, mem := methodsApp(t)
-
-	checkUnmet(t, authorizeAs(t, app, "card-only", cardReturn, ""), "card.example")
-	qt.Check(t, qt.Equals(flowCount(mem), 0))
-}
+// A request that names no method is shown the sign-in page, which lists the
+// methods its client may use (signin_test.go).
 
 // cardChallenge asks the card door to begin a sign-in for clientID and answers
 // its status.

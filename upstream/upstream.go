@@ -263,6 +263,17 @@ func (p *Provider) IDTokenVerified() bool { return p.keys != nil }
 // Issuer is the identity provider's issuer as discovered or configured.
 func (p *Provider) Issuer() string { return p.cfg.Issuer }
 
+// AuthorizationOrigin is the origin of the provider's authorization endpoint:
+// where a sign-in started from this service's own page is sent on to.
+func (p *Provider) AuthorizationOrigin() string {
+	u, err := url.Parse(p.cfg.AuthorizeURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+
+	return u.Scheme + "://" + u.Host
+}
+
 // Resolver builds the identity resolver carrying this provider's acr/amr
 // vocabularies and defaults.
 func (p *Provider) Resolver() *identity.Resolver {

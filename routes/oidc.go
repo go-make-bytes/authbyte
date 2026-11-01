@@ -9,8 +9,6 @@ import (
 
 	"github.com/go-make-bytes/authbyte/identity"
 	"github.com/go-make-bytes/authbyte/session"
-
-	"azugo.io/azugo"
 )
 
 const (
@@ -53,12 +51,12 @@ type idTokenAsk struct {
 // readIDTokenAsk reads scope and nonce. Other scope values are not this
 // server's to read and are ignored; the nonce is kept exactly as sent, and only
 // bounded.
-func readIDTokenAsk(ctx *azugo.Context) (idTokenAsk, *authError) {
+func readIDTokenAsk(p authParams) (idTokenAsk, *authError) {
 	var ask idTokenAsk
-	if s := ctx.Query.StringOptional("scope"); s != nil {
+	if s := p.opt("scope"); s != nil {
 		ask.openID = slices.Contains(strings.Fields(*s), scopeOpenID)
 	}
-	if n := ctx.Query.StringOptional("nonce"); n != nil {
+	if n := p.opt("nonce"); n != nil {
 		if len(*n) > maxNonceLen {
 			return ask, &authError{"invalid_request", "nonce is longer than " + strconv.Itoa(maxNonceLen) + " characters"}
 		}
@@ -86,24 +84,24 @@ type signInAsk struct {
 // readSignInAsk reads what an authorization request asks beyond OAuth and
 // refuses, as [OIDC Core §3.1.2.6] codes, what can never be met here. Every
 // refusal is decided before anything is stored.
-func readSignInAsk(ctx *azugo.Context) (signInAsk, *authError) {
+func readSignInAsk(p authParams) (signInAsk, *authError) {
 	var ask signInAsk
 
 	// What this server does not support is refused, not ignored.
-	if ctx.Query.StringOptional("request") != nil {
+	if p.opt("request") != nil {
 		return ask, &authError{"request_not_supported", "request objects are not supported"}
 	}
-	if ctx.Query.StringOptional("request_uri") != nil {
+	if p.opt("request_uri") != nil {
 		return ask, &authError{"request_uri_not_supported", "request objects are not supported"}
 	}
 	// A hint names the person the client expects; until a sign-in can be held
 	// to it, a hint is refused, since ignoring it could answer for another
 	// person.
-	if ctx.Query.StringOptional("id_token_hint") != nil {
+	if p.opt("id_token_hint") != nil {
 		return ask, &authError{"invalid_request", "id_token_hint is not supported"}
 	}
 
-	if v := ctx.Query.StringOptional("max_age"); v != nil {
+	if v := p.opt("max_age"); v != nil {
 		age, err := strconv.ParseInt(*v, 10, 64)
 		if err != nil || age < 0 {
 			return ask, &authError{"invalid_request", "max_age must be a whole number of seconds"}
@@ -112,7 +110,7 @@ func readSignInAsk(ctx *azugo.Context) (signInAsk, *authError) {
 		ask.forcedLogin = true
 	}
 
-	if p := ctx.Query.StringOptional("prompt"); p != nil {
+	if p := p.opt("prompt"); p != nil {
 		values := strings.Fields(*p)
 		if slices.Contains(values, "none") {
 			if len(values) > 1 {
@@ -132,7 +130,7 @@ func readSignInAsk(ctx *azugo.Context) (signInAsk, *authError) {
 		// A value outside the set is ignored [OIDC Core §3.1.2.1].
 	}
 
-	if l := ctx.Query.StringOptional("ui_locales"); l != nil {
+	if l := p.opt("ui_locales"); l != nil {
 		ask.uiLocales = *l
 	}
 

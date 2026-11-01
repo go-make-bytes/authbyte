@@ -5,6 +5,8 @@ import (
 
 	"github.com/go-make-bytes/authbyte/identity"
 
+	"github.com/go-make-bytes/authbyte/signin"
+
 	"azugo.io/azugo"
 )
 
@@ -55,6 +57,8 @@ func (r *router) discovery(ctx *azugo.Context) {
 		"id_token_signing_alg_values_supported": []string{r.Keys().Alg()},
 		"claims_supported":                      claimsSupported,
 		"acr_values_supported":                  r.offeredMethods(),
+		// The sign-in page speaks these [OIDC Discovery §3].
+		"ui_locales_supported": signin.Languages,
 		// Every answer to the browser names this issuer ([RFC 9207 §2.3]); request
 		// objects are not taken, which must be said, since unsaid means yes.
 		"authorization_response_iss_parameter_supported": true,
