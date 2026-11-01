@@ -1,17 +1,12 @@
 // Package session holds short-lived auth-flow state (the SPA↔Auth PKCE/state
-// and the Auth↔Entrust leg) and server-side user sessions / refresh material,
-// in Redis.
+// and the Auth↔Entrust leg), server-side user sessions and the refresh grants
+// that name them, in the application's shared cache (Valkey or Redis).
 package session
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // ErrNotFound is returned when a flow or session key is absent or expired.
@@ -32,6 +27,10 @@ type Flow struct {
 	// Whether this flow is a step-up (re-auth) and the method requested.
 	StepUp         bool   `json:"step_up"`
 	RequestedLogin string `json:"requested_login"`
+	// RequestedMethods are the login methods an ordinary sign-in's acr_values
+	// asked for, in order; empty when it asked for none. The sign-in completes only
+	// with one of them.
+	RequestedMethods []string `json:"requested_methods,omitempty"`
 	// ExistingSession id to update on step-up completion.
 	SessionID string `json:"session_id"`
 	// ClientID of the public client that initiated the authorization request.
@@ -48,6 +47,31 @@ type Flow struct {
 	// request; the id_token it issues must carry it back, which binds that
 	// token to this flow and nothing else. Empty for a card login.
 	Nonce string `json:"nonce,omitempty"`
+	// OpenID says the client asked for an ID token (openid in its scope), and
+	// ClientNonce is the nonce it sent for that token: the client's own value,
+	// never sent on to the provider, whose nonce is Nonce.
+	OpenID      bool   `json:"openid,omitempty"`
+	ClientNonce string `json:"client_nonce,omitempty"`
+	// ForcedLogin says the provider was asked to sign the person in again
+	// (prompt=login, or any max_age), so the moment the sign-in completes is
+	// the moment the person authenticated. MaxAge is the age in seconds the
+	// client accepts, when it named one.
+	ForcedLogin bool   `json:"forced_login,omitempty"`
+	MaxAge      *int64 `json:"max_age,omitempty"`
+	// Started is when the request was received, in Unix seconds: a sign-in
+	// the provider was made to repeat cannot have happened before it.
+	Started int64 `json:"started,omitempty"`
+	// Binding is the hash of the cookie that tied this sign-in to the browser
+	// that started it; the provider's answer completes it only in that browser.
+	// Empty for a flow a client's server started (a step-up), which no browser
+	// cookie of this service could have started.
+	Binding string `json:"binding,omitempty"`
+	// Picker says the person chose the method on this service's sign-in page,
+	// and Request is the client's authorization request, so a cancel or a
+	// provider failure brings the person back to that page rather than to the
+	// client.
+	Picker  bool   `json:"picker,omitempty"`
+	Request string `json:"request,omitempty"`
 }
 
 // AppCode binds an issued application authorization code (Auth→SPA) to the
@@ -61,18 +85,21 @@ type AppCode struct {
 	RedirectURI string `json:"redirect_uri"`
 	// Tenant is the organisation named when the login began, if any.
 	Tenant string `json:"tenant,omitempty"`
+	// OpenID and Nonce carry the client's ask for an ID token, and the nonce it
+	// must carry, from the flow to the code exchange that answers it.
+	OpenID bool   `json:"openid,omitempty"`
+	Nonce  string `json:"nonce,omitempty"`
 }
 
 // Session is the server-side user session.
 type Session struct {
-	Subject      string   `json:"subject"`
-	Name         string   `json:"name"`
-	GivenName    string   `json:"given_name"`
-	FamilyName   string   `json:"family_name"`
-	SerialNumber string   `json:"serial_number"`
-	LoA          string   `json:"loa"`
-	LoginMethod  string   `json:"login_method"`
-	Scopes       []string `json:"scopes"`
+	Subject      string `json:"subject"`
+	Name         string `json:"name"`
+	GivenName    string `json:"given_name"`
+	FamilyName   string `json:"family_name"`
+	SerialNumber string `json:"serial_number"`
+	LoA          string `json:"loa"`
+	LoginMethod  string `json:"login_method"`
 	// ClientID is the public client the session's tokens are issued to. Its
 	// registration says whether the people logging in through it need a
 	// membership in the register.
@@ -96,6 +123,41 @@ type Session struct {
 	// visitors; such a login is refused exactly as any other stranger's.
 	DirectoryIssuer string `json:"directory_issuer,omitempty"`
 	DirectoryGuest  bool   `json:"directory_guest,omitempty"`
+	// ProviderSubject and ProviderIssuer name the credential the session's login
+	// used: the provider's handle for the person and the provider ("" for a card
+	// login). A step-up of a session without an identity code must come back with
+	// the same pair, since nothing else says it is the same person.
+	ProviderSubject string `json:"provider_subject,omitempty"`
+	ProviderIssuer  string `json:"provider_issuer,omitempty"`
+	// ExpiresAt is the end of the session's lifetime, fixed when it is created. A
+	// later save keeps it: nothing but a new sign-in gives a person more time.
+	ExpiresAt time.Time `json:"expires_at"`
+	// RefreshKey is the key the session's refresh token is kept under (a hash of
+	// the token; the token itself is never stored). Empty until the first code
+	// exchange answers one.
+	RefreshKey string `json:"refresh_key,omitempty"`
+	// AuthTime is when the person proved who they are at sign-in, in Unix
+	// seconds; 0 when it is not known (a provider that answered from a session
+	// of its own and said nothing of when). AMR are the registered means of
+	// that proof. Both are what the sign-in's ID token states.
+	AuthTime int64    `json:"auth_time,omitempty"`
+	AMR      []string `json:"amr,omitempty"`
+	// SID is the session's public name in ID tokens: a value of its own, never
+	// the session's key or its refresh token.
+	SID string `json:"sid,omitempty"`
+}
+
+// Expired reports whether the session's lifetime has run out at now. A session
+// with no end recorded is treated as ended.
+func (s *Session) Expired(now time.Time) bool {
+	return s.ExpiresAt.IsZero() || !now.Before(s.ExpiresAt)
+}
+
+// RefreshGrant is what a refresh token stands for: the session it renews and the
+// client it was issued to. It is kept under the token's hash.
+type RefreshGrant struct {
+	SessionID string `json:"session_id"`
+	ClientID  string `json:"client_id"`
 }
 
 // DisplayName is the name a register shows for the person: the full name the
@@ -139,110 +201,4 @@ type Seal struct {
 	ID          string `json:"id"`
 	Label       string `json:"label"`
 	Certificate string `json:"certificate,omitempty"`
-}
-
-// Store persists flows, app codes and sessions in Redis.
-type Store struct {
-	c redis.UniversalClient
-}
-
-// New creates a session store from a Redis client.
-func New(c redis.UniversalClient) *Store {
-	return &Store{c: c}
-}
-
-func (s *Store) put(ctx context.Context, key string, v any, ttl time.Duration) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	return s.c.Set(ctx, key, b, ttl).Err()
-}
-
-func (s *Store) get(ctx context.Context, key string, v any) error {
-	b, err := s.c.Get(ctx, key).Bytes()
-	if errors.Is(err, redis.Nil) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-
-	return json.Unmarshal(b, v)
-}
-
-// getDel atomically reads and deletes a key (Redis GETDEL), so a single-use
-// artifact (login flow, app authorization code) cannot be consumed twice by
-// concurrent callers racing a non-atomic GET-then-DEL.
-func (s *Store) getDel(ctx context.Context, key string, v any) error {
-	b, err := s.c.GetDel(ctx, key).Bytes()
-	if errors.Is(err, redis.Nil) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-
-	return json.Unmarshal(b, v)
-}
-
-// SaveFlow stores login-flow state under the Entrust state value.
-func (s *Store) SaveFlow(ctx context.Context, state string, f *Flow, ttl time.Duration) error {
-	return s.put(ctx, "flow:"+state, f, ttl)
-}
-
-// ConsumeFlow atomically loads and deletes flow state (single use).
-func (s *Store) ConsumeFlow(ctx context.Context, state string) (*Flow, error) {
-	var f Flow
-	if err := s.getDel(ctx, "flow:"+state, &f); err != nil {
-		return nil, err
-	}
-
-	return &f, nil
-}
-
-// SaveAppCode stores an issued application authorization code.
-func (s *Store) SaveAppCode(ctx context.Context, code string, c *AppCode, ttl time.Duration) error {
-	return s.put(ctx, "code:"+code, c, ttl)
-}
-
-// ConsumeAppCode atomically loads and deletes an application authorization code
-// (single use — prevents authorization-code replay under a race).
-func (s *Store) ConsumeAppCode(ctx context.Context, code string) (*AppCode, error) {
-	var c AppCode
-	if err := s.getDel(ctx, "code:"+code, &c); err != nil {
-		return nil, err
-	}
-
-	return &c, nil
-}
-
-// SaveSession stores a user session.
-func (s *Store) SaveSession(ctx context.Context, sid string, sess *Session, ttl time.Duration) error {
-	return s.put(ctx, "sess:"+sid, sess, ttl)
-}
-
-// LoadSession loads a user session.
-func (s *Store) LoadSession(ctx context.Context, sid string) (*Session, error) {
-	var sess Session
-	if err := s.get(ctx, "sess:"+sid, &sess); err != nil {
-		return nil, err
-	}
-
-	return &sess, nil
-}
-
-// DeleteSession invalidates a session (blocks refresh).
-func (s *Store) DeleteSession(ctx context.Context, sid string) error {
-	return s.c.Del(ctx, "sess:"+sid).Err()
-}
-
-// Ping verifies connectivity.
-func (s *Store) Ping(ctx context.Context) error {
-	if err := s.c.Ping(ctx).Err(); err != nil {
-		return fmt.Errorf("session: redis ping: %w", err)
-	}
-
-	return nil
 }

@@ -2,6 +2,7 @@ package routes
 
 import (
 	"github.com/go-make-bytes/authbyte/identity"
+	"github.com/go-make-bytes/authbyte/registry"
 	"github.com/go-make-bytes/authbyte/session"
 
 	"azugo.io/azugo"
@@ -18,10 +19,14 @@ import (
 // is returned when there is nothing to capture (no catalog in the response, or
 // capture disabled) — absent capabilities mean "unknown", never "none".
 //
+// Only a sign-in through a signing client captures anything: another product's
+// sign-in has no use for the person's signing identities, so nothing of them is
+// fetched or kept.
+//
 // The certificates and the catalog carry personal data: log identity ids at
 // most, never payloads.
-func (r *router) captureCapabilities(ctx *azugo.Context, idpToken string, info identity.UserInfo, loginMethod string) *session.Capabilities {
-	if !r.Upstream().IdentityCatalogEnabled() || info.SignIdentities == nil {
+func (r *router) captureCapabilities(ctx *azugo.Context, client registry.SignInClient, idpToken string, info identity.UserInfo, loginMethod string) *session.Capabilities {
+	if !client.Signing || !r.Upstream().IdentityCatalogEnabled() || info.SignIdentities == nil {
 		return nil
 	}
 

@@ -11,6 +11,7 @@ import (
 	"github.com/go-make-bytes/authbyte/identity"
 	"github.com/go-make-bytes/authbyte/upstream"
 
+	azugoconfig "azugo.io/azugo/config"
 	corecfg "azugo.io/core/config"
 	"azugo.io/core/validation"
 	"github.com/spf13/viper"
@@ -29,9 +30,6 @@ type Configuration struct {
 	// Useful when the public IssuerURL is not reachable from inside the container.
 	// Defaults to IssuerURL + "/.well-known/jwks.json".
 	JWKSURL string `mapstructure:"jwks_url"`
-	// UserAudience is the logical audience stamped into user tokens (the portal
-	// API surface) and required when validating tokens on protected endpoints.
-	UserAudience string `mapstructure:"user_audience" validate:"required"`
 	// BaseURL is the externally reachable root of this service, used to
 	// construct absolute callback URIs (e.g. https://auth.example.com).
 	BaseURL string `mapstructure:"base_url" validate:"required,url"`
@@ -69,7 +67,11 @@ type Configuration struct {
 	// OIDCUpstreamClaimAccountStatus names the claim telling a member of the
 	// provider's directory from a guest in it (Entra: acct), and
 	// OIDCUpstreamAccountStatusGuest the value marking a guest (default 1).
-	OIDCUpstreamClaimDirectoryID   string `mapstructure:"oidc_upstream_claim_directory_id"`
+	OIDCUpstreamClaimDirectoryID string `mapstructure:"oidc_upstream_claim_directory_id"`
+	// OIDCUpstreamClaimEmail names the claim carrying the person's email address
+	// (default email). It is kept only for a person who signs in through a
+	// directory and holds no national identity code.
+	OIDCUpstreamClaimEmail         string `mapstructure:"oidc_upstream_claim_email"`
 	OIDCUpstreamClaimAccountStatus string `mapstructure:"oidc_upstream_claim_account_status"`
 	OIDCUpstreamAccountStatusGuest string `mapstructure:"oidc_upstream_account_status_guest"`
 	// OIDCUpstreamMethodPolicy maps acr/amr tokens to login methods
@@ -136,6 +138,10 @@ type Configuration struct {
 	DPoPProofMaxAge      time.Duration `mapstructure:"dpop_proof_max_age" validate:"required,gt=0"`
 	TokenClockSkewLeeway time.Duration `mapstructure:"token_clock_skew_leeway" validate:"gte=0"`
 
+	// SessionTTL is a session's whole lifetime from its sign-in: refreshes are
+	// refused once it has run out, whatever was saved on the session since.
+	SessionTTL time.Duration `mapstructure:"session_ttl" validate:"required,gt=0"`
+
 	// Server DPoP-Nonce (required from day one; spec decision A-3).
 	DPoPNonceEnabled bool          `mapstructure:"dpop_nonce_enabled"`
 	DPoPNonceTTL     time.Duration `mapstructure:"dpop_nonce_ttl" validate:"required,gt=0"`
@@ -144,9 +150,9 @@ type Configuration struct {
 	// loaded from Vault.
 	ServiceClientRegistry string `mapstructure:"service_client_registry"`
 
-	// Backing stores.
+	// Backing stores. Sessions and login state are kept in the application's
+	// cache, configured by azugo's CACHE_* settings.
 	PostgresDSN string `mapstructure:"postgres_dsn" validate:"required"`
-	RedisURL    string `mapstructure:"redis_url" validate:"required"`
 
 	// Audit — GDPR personal-data access logging (GDPR-audit) to the access-audit
 	// service. OPTIONAL: when AccessAuditURL is empty the GDPR client is not wired
@@ -176,10 +182,12 @@ type Configuration struct {
 	// the membership register for the person's scopes instead: the first
 	// login claims their pending invitation, and the resolved group:level set
 	// is minted into the token. A person with no membership is refused — the
-	// register, not the login, grants access. The calls ride the same
-	// outbound service-client as the audit poster (AuditClientID), so that
-	// client also needs grants for RolebyteAudience with membership:claim +
-	// membership:resolve.
+	// register, not the login, grants access. RolebyteURL is the register's
+	// SIGN-IN listener (its own port, reachable from this service alone). Each
+	// call carries a token this service mints itself, naming the person and
+	// AuditClientID as the acting client, proven with the outbound client's key:
+	// no registry grant is needed, and none may give membership:claim or
+	// membership:resolve to any client.
 	RolebyteURL      string `mapstructure:"rolebyte_url" validate:"omitempty,url"`
 	RolebyteAudience string `mapstructure:"rolebyte_audience"`
 	// AuditClientID / AuditClientSecret authenticate this service's OUTBOUND
@@ -194,11 +202,35 @@ type Configuration struct {
 	// public issuer is not reachable from inside the pod.
 	AuditIssuerURL string `mapstructure:"audit_issuer_url" validate:"omitempty,url"`
 
+	// The sign-in page, shown to a client whose request names no way.
+	//
+	// OIDCUpstreamDisplayName names the generic provider's way on the page; unset,
+	// the page names it in the person's language as their organisation's sign-in.
+	OIDCUpstreamDisplayName string `mapstructure:"oidc_upstream_display_name"`
+	// SignInOperatorName names who runs this sign-in at the page's foot; unset,
+	// the page has no foot line. SignInOperatorMarkFile is an SVG shown beside it.
+	SignInOperatorName     string `mapstructure:"sign_in_operator_name"`
+	SignInOperatorMarkFile string `mapstructure:"sign_in_operator_mark_file"`
+	// SignInRateLimit is how many sign-in requests one address may make in each
+	// SignInRateWindow; 0 turns the limit off.
+	SignInRateLimit  int           `mapstructure:"sign_in_rate_limit" validate:"gte=0"`
+	SignInRateWindow time.Duration `mapstructure:"sign_in_rate_window" validate:"gt=0"`
+
 	// Development conveniences (off by default).
 	//
 	// DemoDir, when set, serves the static demo SPA from that directory under
 	// /demo (same-origin, so the browser can read the DPoP-Nonce header).
 	DemoDir string `mapstructure:"demo_dir"`
+}
+
+// SignInRate is the sign-in routes' limit, per client address, in azugo's terms.
+func (c *Configuration) SignInRate() *azugoconfig.RateLimit {
+	return &azugoconfig.RateLimit{
+		Enabled:  c.SignInRateLimit > 0,
+		Strategy: "fixed-window",
+		Limit:    c.SignInRateLimit,
+		Window:   c.SignInRateWindow,
+	}
 }
 
 // NewConfiguration returns a new configuration.
@@ -216,10 +248,10 @@ func NewConfiguration() *Configuration {
 func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	c.BaseConfiguration.Bind("", v)
 
-	v.SetDefault("user_audience", "portal-api")
 	v.SetDefault("token_signing_alg", "ES256")
 	v.SetDefault("user_token_ttl", 15*time.Minute)
 	v.SetDefault("service_token_ttl", 5*time.Minute)
+	v.SetDefault("session_ttl", 12*time.Hour)
 	v.SetDefault("dpop_proof_max_age", 60*time.Second)
 	v.SetDefault("token_clock_skew_leeway", 30*time.Second)
 	v.SetDefault("dpop_nonce_enabled", true)
@@ -238,6 +270,8 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	v.SetDefault("eparaksts_acr_mobile", "urn:eparaksts:authentication:flow:mobileid")
 	v.SetDefault("eparaksts_acr_eidscan", "urn:eparaksts:authentication:flow:mobile-eid")
 	v.SetDefault("eparaksts_logout_idp", upstream.EParakstsDefaultLogoutIDP)
+	v.SetDefault("sign_in_rate_limit", 60)
+	v.SetDefault("sign_in_rate_window", time.Minute)
 
 	// Audit (GDPR-audit) defaults; AccessAuditURL stays empty (feature off) until set.
 	v.SetDefault("access_audit_audience", "svc:access-audit")
@@ -261,7 +295,6 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 
 	_ = v.BindEnv("issuer_url", "AUTH_ISSUER_URL")
 	_ = v.BindEnv("jwks_url", "AUTH_JWKS_URL")
-	_ = v.BindEnv("user_audience", "AUTH_USER_AUDIENCE")
 	_ = v.BindEnv("oidc_upstream_authority_url", "OIDC_UPSTREAM_AUTHORITY_URL")
 	_ = v.BindEnv("oidc_upstream_client_id", "OIDC_UPSTREAM_CLIENT_ID")
 	_ = v.BindEnv("oidc_upstream_client_secret", "OIDC_UPSTREAM_CLIENT_SECRET")
@@ -274,6 +307,7 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("oidc_upstream_issuer", "OIDC_UPSTREAM_ISSUER")
 	_ = v.BindEnv("oidc_upstream_jwks_url", "OIDC_UPSTREAM_JWKS_URL")
 	_ = v.BindEnv("oidc_upstream_claim_directory_id", "OIDC_UPSTREAM_CLAIM_DIRECTORY_ID")
+	_ = v.BindEnv("oidc_upstream_claim_email", "OIDC_UPSTREAM_CLAIM_EMAIL")
 	_ = v.BindEnv("oidc_upstream_claim_account_status", "OIDC_UPSTREAM_CLAIM_ACCOUNT_STATUS")
 	_ = v.BindEnv("oidc_upstream_account_status_guest", "OIDC_UPSTREAM_ACCOUNT_STATUS_GUEST")
 	_ = v.BindEnv("oidc_upstream_method_policy", "OIDC_UPSTREAM_METHOD_POLICY")
@@ -281,6 +315,11 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("oidc_upstream_methods_allowed", "OIDC_UPSTREAM_METHODS_ALLOWED")
 	_ = v.BindEnv("oidc_upstream_methods_federated", "OIDC_UPSTREAM_METHODS_FEDERATED")
 	_ = v.BindEnv("oidc_upstream_loa_default", "OIDC_UPSTREAM_LOA_DEFAULT")
+	_ = v.BindEnv("oidc_upstream_display_name", "OIDC_UPSTREAM_DISPLAY_NAME")
+	_ = v.BindEnv("sign_in_operator_name", "SIGN_IN_OPERATOR_NAME")
+	_ = v.BindEnv("sign_in_operator_mark_file", "SIGN_IN_OPERATOR_MARK_FILE")
+	_ = v.BindEnv("sign_in_rate_limit", "SIGN_IN_RATE_LIMIT")
+	_ = v.BindEnv("sign_in_rate_window", "SIGN_IN_RATE_WINDOW")
 	_ = v.BindEnv("eparaksts_authority_url", "EPARAKSTS_AUTHORITY_URL")
 	_ = v.BindEnv("eparaksts_client_id", "EPARAKSTS_CLIENT_ID")
 	_ = v.BindEnv("eparaksts_client_secret", "EPARAKSTS_CLIENT_SECRET")
@@ -297,13 +336,18 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("signing_key_reload_interval", "SIGNING_KEY_RELOAD_INTERVAL")
 	_ = v.BindEnv("user_token_ttl", "USER_TOKEN_TTL")
 	_ = v.BindEnv("service_token_ttl", "SERVICE_TOKEN_TTL")
+	_ = v.BindEnv("session_ttl", "SESSION_TTL")
 	_ = v.BindEnv("dpop_proof_max_age", "DPOP_PROOF_MAX_AGE")
 	_ = v.BindEnv("token_clock_skew_leeway", "TOKEN_CLOCK_SKEW_LEEWAY")
 	_ = v.BindEnv("dpop_nonce_enabled", "DPOP_NONCE_ENABLED")
 	_ = v.BindEnv("dpop_nonce_ttl", "DPOP_NONCE_TTL")
 	_ = v.BindEnv("service_client_registry", "SERVICE_CLIENT_REGISTRY")
 	_ = v.BindEnv("postgres_dsn", "POSTGRES_DSN")
-	_ = v.BindEnv("redis_url", "REDIS_URL")
+	// The session store is the application's cache (CACHE_TYPE, CACHE_CONNECTION,
+	// CACHE_PASSWORD_FILE, CACHE_KEY_PREFIX). Client-side caching stays off: the
+	// store never reads through it, and a server or user that refuses it would
+	// refuse the whole connection.
+	v.SetDefault("cache.client_cache", false)
 	_ = v.BindEnv("demo_dir", "DEMO_DIR")
 
 	_ = v.BindEnv("access_audit_url", "ACCESS_AUDIT_URL")
@@ -331,13 +375,24 @@ func loadSecret(v *viper.Viper, key, name string) {
 // Validate validates the configuration. The base config validates the standard
 // fleet env (and recurses into the embedded Azugo config + Telemetry/Broker);
 // valid.Struct(c) then covers the service-specific fields.
+// issuerIdentifier is the issuer as discovery, every return to the browser and
+// every token state it: the configured address without a trailing slash, so
+// the three never differ.
+func issuerIdentifier(raw string) string {
+	return strings.TrimSuffix(strings.TrimSpace(raw), "/")
+}
+
 func (c *Configuration) Validate(valid *validation.Validate) error {
+	if err := refuseEmptyFileSecret("CACHE_PASSWORD", c.Cache.Password); err != nil {
+		return err
+	}
 	if err := c.BaseConfiguration.Validate(valid); err != nil {
 		return err
 	}
 	if err := valid.Struct(c); err != nil {
 		return err
 	}
+	c.IssuerURL = issuerIdentifier(c.IssuerURL)
 
 	return c.validateUpstream()
 }
@@ -405,6 +460,7 @@ func (c *Configuration) UpstreamConfig() upstream.Config {
 		cfg.ClaimSerial = c.OIDCUpstreamClaimSerial
 	}
 	cfg.ClaimDirectoryID = c.OIDCUpstreamClaimDirectoryID
+	cfg.ClaimEmail = c.OIDCUpstreamClaimEmail
 	cfg.ClaimAccountStatus = c.OIDCUpstreamClaimAccountStatus
 	cfg.AccountStatusGuest = c.OIDCUpstreamAccountStatusGuest
 	cfg.ClockSkewLeeway = c.TokenClockSkewLeeway
@@ -543,13 +599,13 @@ func splitList(s string) []string {
 
 // AuthClientConfig builds the auth-client configuration the service uses to
 // protect its own endpoints (validating user tokens). It never calls out, so
-// no client id/secret is needed.
+// no client id/secret is needed. The audiences it accepts are the registry's
+// sign-in clients', set at the start (inboundAuthConfig).
 func (c *Configuration) AuthClientConfig() *authclient.Configuration {
 	return &authclient.Configuration{
 		IssuerURL:                c.IssuerURL,
 		JWKSURL:                  c.jwksURL(),
 		JWKSCacheTTL:             10 * time.Minute,
-		ServiceAudience:          c.UserAudience,
 		ServiceTokenEarlyRefresh: 30 * time.Second,
 		DPoPProofMaxAge:          c.DPoPProofMaxAge,
 		TokenClockSkewLeeway:     c.TokenClockSkewLeeway,
@@ -589,15 +645,14 @@ func (c *Configuration) auditIssuer() string {
 
 // AuditAuthClientConfig builds the OUTBOUND auth-client configuration the audit
 // Poster uses to mint DPoP-bound service tokens (client-credentials against this
-// service's own /token) for calling access-audit. ServiceAudience is required by
-// validation but is only consulted on the inbound path; outbound uses the
-// per-call audience.
+// service's own /token) for calling access-audit. It names no audience of its
+// own: that is read only for tokens a service takes in, and this client only
+// sends, each call to its own audience.
 func (c *Configuration) AuditAuthClientConfig() *authclient.Configuration {
 	return &authclient.Configuration{
 		IssuerURL:                c.auditIssuer(),
 		JWKSURL:                  c.jwksURL(),
 		JWKSCacheTTL:             10 * time.Minute,
-		ServiceAudience:          c.UserAudience,
 		ServiceClientID:          c.AuditClientID,
 		ServiceClientSecret:      c.AuditClientSecret,
 		ServiceTokenEarlyRefresh: 30 * time.Second,

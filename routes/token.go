@@ -1,7 +1,9 @@
 package routes
 
 import (
+	"context"
 	"errors"
+	"slices"
 
 	"github.com/gmb-lib/go-authbyte/claims"
 	pkerrors "github.com/gmb-lib/go-platform-kit/errors"
@@ -14,6 +16,16 @@ import (
 	"azugo.io/azugo"
 	corehttp "azugo.io/core/http"
 	"github.com/valyala/fasthttp"
+)
+
+// issueMoment is why a user token is being issued: a sign-in, where an
+// authorization code is exchanged right after the person authenticated, or a
+// refresh within a session they already hold.
+type issueMoment int
+
+const (
+	atSignIn issueMoment = iota
+	atRefresh
 )
 
 // membershipOutcome is what a user token is minted with: the scopes and the
@@ -29,17 +41,21 @@ type membershipOutcome struct {
 // userScopes answers what a user token should carry. The public client the
 // token is issued to decides whether the register is asked at all: a client
 // registered without a membership requirement (a public portal) keeps its
-// people on the session's static baseline with no tenant; a client that
+// people on its own baseline scopes with no tenant; a client that
 // requires one has the person resolved from the register at EVERY issue (first
 // issue and refresh alike, so a revoked membership dies at the next refresh) —
 // no membership is refused, one is minted, several are the person's to choose
-// from (tenantHint names their choice; it is checked, never trusted). Any
+// from (tenantHint names their choice; it is checked, never trusted). Only a
+// sign-in may admit a person through their organisation's directory. Any
 // resolution failure fails the issuance closed: an error is written and ok is
 // false — a token with guessed or empty-by-error scopes is never minted.
-func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID, tenantHint string) (membershipOutcome, bool) {
+func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID, tenantHint string, moment issueMoment) (membershipOutcome, bool) {
 	resolver := r.ScopeResolver()
 	if resolver == nil || !r.Registry().MembershipRequired(clientID, resolver != nil) {
-		return membershipOutcome{scopes: sess.Scopes}, true
+		// Its people get the client's own baseline, whatever product it is.
+		client, _ := r.Registry().SignInClient(clientID)
+
+		return membershipOutcome{scopes: client.BaselineScopes}, true
 	}
 
 	// The register key of a person is their platform subject, typed — the
@@ -47,26 +63,29 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 	key := rolebyte.PersonKey(sess.Subject)
 	memberships, err := resolver.Memberships(ctx, key)
 	if err != nil {
-		return r.registerUnavailable(ctx, err)
+		return r.registerUnavailable(ctx, key, err)
 	}
 
-	// A person who came through an organisation's own directory and holds no
-	// membership yet is offered to the register's admission door: the tenant
-	// that attached that issuer as its directory admits them as a member with
-	// no grants, and they are asked about again. Somebody the provider calls a
-	// guest in that directory is not offered — a tenant attached its own
-	// people, not its visitors — and is refused below like any other stranger.
-	if len(memberships) == 0 && sess.DirectoryIssuer != "" && !sess.DirectoryGuest {
+	// A person who has just signed in through an organisation's own directory
+	// and holds no membership yet is offered to the register's admission door:
+	// the tenant that attached that issuer as its directory admits them as a
+	// member with no grants, and they are asked about again. Somebody the
+	// provider calls a guest in that directory is not offered — a tenant
+	// attached its own people, not its visitors — and is refused below like any
+	// other stranger. A refresh is never offered either: nobody authenticated
+	// just now, so a session that resolves to nothing — its person removed, or
+	// a register that no longer holds them — is refused, not admitted again.
+	if len(memberships) == 0 && moment == atSignIn && sess.DirectoryIssuer != "" && !sess.DirectoryGuest {
 		admitted, err := resolver.Admit(ctx, key, rolebyte.DirectoryLogin{
 			Issuer:      sess.DirectoryIssuer,
 			DisplayName: sess.DisplayName(),
 		})
 		if err != nil {
-			return r.registerUnavailable(ctx, err)
+			return r.registerUnavailable(ctx, key, err)
 		}
 		if admitted {
 			if memberships, err = resolver.Memberships(ctx, key); err != nil {
-				return r.registerUnavailable(ctx, err)
+				return r.registerUnavailable(ctx, key, err)
 			}
 		}
 	}
@@ -94,8 +113,13 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 // unreachable or answered garbage. The outbound helper surfaces no downstream
 // body, so this is a produced upstream failure, not a relay — an empty-scope or
 // guessed-scope token is never minted.
-func (r *router) registerUnavailable(ctx *azugo.Context, err error) (membershipOutcome, bool) {
+// An answer about another subject than the one asked about is also a security
+// event.
+func (r *router) registerUnavailable(ctx *azugo.Context, asked string, err error) (membershipOutcome, bool) {
 	ctx.Log().Warn("membership resolve failed — refusing token issue: " + err.Error())
+	if errors.Is(err, rolebyte.ErrAnswerForAnotherSubject) {
+		r.Audit().SignInAnsweredForAnother(ctx, asked)
+	}
 	ctx.Error(pkerrors.NewProblem("err:upstream:unavailable",
 		pkerrors.WithStatus(fasthttp.StatusBadGateway)))
 
@@ -163,6 +187,10 @@ const (
 //
 // @route /token [post].
 func (r *router) token(ctx *azugo.Context) {
+	// Every answer here may carry a token: none may be stored by a cache on the
+	// way ([RFC 6749 §5.1], [OIDC Core §3.1.3.3]).
+	noStore(ctx)
+
 	grant, err := ctx.Form.String("grant_type")
 	if err != nil {
 		ctx.Error(err)
@@ -221,6 +249,13 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
+	// The client proves itself before the code is spent, so a caller holding a
+	// stolen code but not the client's secret cannot use it up.
+	signIn, ok := r.authenticateSignIn(ctx, clientID)
+	if !ok {
+		return
+	}
+
 	appCode, err := r.Session().ConsumeAppCode(ctx, code)
 	if err != nil {
 		ctx.Error(corehttp.UnauthorizedError{})
@@ -257,7 +292,7 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		hint = sess.Tenant
 	}
 
-	outcome, ok := r.userScopes(ctx, sess, clientID, hint)
+	outcome, ok := r.userScopes(ctx, sess, clientID, hint, atSignIn)
 	if !ok {
 		return
 	}
@@ -268,22 +303,42 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 	sess.Thumbprint = thumbprint
 	sess.ClientID = clientID
 	sess.Tenant = outcome.tenant
-	if err := r.Session().SaveSession(ctx, appCode.SessionID, sess, sessionTTL); err != nil {
-		ctx.Error(err)
+
+	// The first exchange of a session answers its refresh token: a value of its
+	// own, bound to this client, kept only as a hash. A step-up's exchange finds
+	// one already issued and answers none; the client keeps the one it holds
+	// ([RFC 6749 §5.1] makes it optional).
+	refresh := ""
+	if sess.RefreshKey == "" {
+		refresh = randomToken(refreshTokenBytes)
+		sess.RefreshKey = refreshKey(refresh)
+		if err := r.Session().SaveRefresh(ctx, sess.RefreshKey, &session.RefreshGrant{
+			SessionID: appCode.SessionID,
+			ClientID:  clientID,
+		}, sess.ExpiresAt); err != nil {
+			storeRefusal(ctx, err)
+
+			return
+		}
+	}
+
+	if err := r.Session().ReplaceSession(ctx, appCode.SessionID, sess); err != nil {
+		storeRefusal(ctx, err)
 
 		return
 	}
 
 	tok, exp, err := r.Issuer().IssueUser(issuer.UserTokenInput{
 		Subject:      sess.Subject,
-		Audience:     r.Config().UserAudience,
+		Audience:     signIn.Audience,
+		ClientID:     signIn.ClientID,
 		Scopes:       outcome.scopes,
 		LoA:          sess.LoA,
 		LoginMethod:  sess.LoginMethod,
-		Name:         sess.Name,
-		GivenName:    sess.GivenName,
-		FamilyName:   sess.FamilyName,
-		SerialNumber: sess.SerialNumber,
+		Name:         listedClaim(signIn, registry.ClaimName, sess.Name),
+		GivenName:    listedClaim(signIn, registry.ClaimGivenName, sess.GivenName),
+		FamilyName:   listedClaim(signIn, registry.ClaimFamilyName, sess.FamilyName),
+		SerialNumber: listedClaim(signIn, registry.ClaimSerialNumber, sess.SerialNumber),
 		Tenant:       outcome.tenant,
 		Thumbprint:   thumbprint,
 	})
@@ -293,13 +348,34 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, r.Config().UserAudience, outcome.scopes)
+	// A sign-in that asked for an ID token gets one, stating what it proved;
+	// any other exchange, a step-up's included, gets none.
+	idToken := ""
+	if appCode.OpenID {
+		idToken, err = r.Issuer().IssueID(issuer.IDTokenInput{
+			Subject:  sess.Subject,
+			ClientID: signIn.ClientID,
+			Nonce:    appCode.Nonce,
+			AuthTime: sess.AuthTime,
+			ACR:      sess.LoginMethod,
+			AMR:      sess.AMR,
+			SID:      sess.SID,
+		})
+		if err != nil {
+			ctx.Error(err)
+
+			return
+		}
+	}
+
+	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, signIn.Audience, outcome.scopes)
 
 	ctx.JSON(&response.Token{
 		AccessToken:  tok,
 		TokenType:    tokenTypeDPoP,
 		ExpiresIn:    exp,
-		RefreshToken: appCode.SessionID,
+		RefreshToken: refresh,
+		IDToken:      idToken,
 		Tenants:      outcome.choices,
 		// The login-captured signing capabilities ride the code exchange (and
 		// only the code exchange — a refresh re-issues a token, it is not a
@@ -342,9 +418,13 @@ func (r *router) grantClientCredentials(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	secret, err := ctx.Form.String("client_secret")
-	if err != nil {
-		ctx.Error(err)
+	// A service client proves itself with its secret, by HTTP Basic or in the form.
+	secret, presented, ok := clientSecret(ctx, clientID)
+	if !ok {
+		return
+	}
+	if !presented {
+		ctx.Error(corehttp.UnauthorizedError{})
 
 		return
 	}
@@ -435,6 +515,9 @@ func (r *router) serviceAccountScopes(ctx *azugo.Context, clientID, tenant strin
 	memberships, err := resolver.Memberships(ctx, clientID)
 	if err != nil {
 		ctx.Log().Warn("membership resolve failed — refusing token issue: " + err.Error())
+		if errors.Is(err, rolebyte.ErrAnswerForAnotherSubject) {
+			r.Audit().SignInAnsweredForAnother(ctx, clientID)
+		}
 		problem := pkerrors.NewProblem("err:upstream:unavailable", pkerrors.WithStatus(fasthttp.StatusBadGateway))
 		ctx.Error(problem)
 
@@ -463,8 +546,14 @@ func (r *router) serviceAccountScopes(ctx *azugo.Context, clientID, tenant strin
 	return scopes, nil
 }
 
+// sessionLoader is the store call that loads a session by its internal id.
+type sessionLoader interface {
+	LoadSession(ctx context.Context, sid string) (*session.Session, error)
+}
+
 // grantRefreshToken re-issues a user token within an existing session. The
-// caller must present the same DPoP key the session is bound to.
+// caller must be the client the refresh token was issued to and present the same
+// DPoP key the session is bound to.
 func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 	refresh, err := ctx.Form.String("refresh_token")
 	if err != nil {
@@ -473,37 +562,42 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	sess, err := r.Session().LoadSession(ctx, refresh)
+	clientID, err := ctx.Form.String("client_id")
 	if err != nil {
-		ctx.Error(corehttp.UnauthorizedError{})
+		ctx.Error(err)
 
 		return
 	}
 
-	if sess.Thumbprint == "" || sess.Thumbprint != thumbprint {
-		ctx.Error(corehttp.UnauthorizedError{})
+	signIn, ok := r.authenticateSignIn(ctx, clientID)
+	if !ok {
+		return
+	}
 
+	sess, _, ok := refreshBoundSession(ctx, r.Session(), refresh, clientID, thumbprint)
+	if !ok {
 		return
 	}
 
 	// Re-resolved on every refresh, for the client and the membership the
 	// session was issued for: this is where a revoked membership actually dies
 	// (the leaver guarantee rides short sessions).
-	outcome, ok := r.userScopes(ctx, sess, sess.ClientID, sess.Tenant)
+	outcome, ok := r.userScopes(ctx, sess, sess.ClientID, sess.Tenant, atRefresh)
 	if !ok {
 		return
 	}
 
 	tok, exp, err := r.Issuer().IssueUser(issuer.UserTokenInput{
 		Subject:      sess.Subject,
-		Audience:     r.Config().UserAudience,
+		Audience:     signIn.Audience,
+		ClientID:     signIn.ClientID,
 		Scopes:       outcome.scopes,
 		LoA:          sess.LoA,
 		LoginMethod:  sess.LoginMethod,
-		Name:         sess.Name,
-		GivenName:    sess.GivenName,
-		FamilyName:   sess.FamilyName,
-		SerialNumber: sess.SerialNumber,
+		Name:         listedClaim(signIn, registry.ClaimName, sess.Name),
+		GivenName:    listedClaim(signIn, registry.ClaimGivenName, sess.GivenName),
+		FamilyName:   listedClaim(signIn, registry.ClaimFamilyName, sess.FamilyName),
+		SerialNumber: listedClaim(signIn, registry.ClaimSerialNumber, sess.SerialNumber),
 		Tenant:       outcome.tenant,
 		Thumbprint:   thumbprint,
 	})
@@ -513,7 +607,7 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, r.Config().UserAudience, outcome.scopes)
+	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, signIn.Audience, outcome.scopes)
 
 	ctx.JSON(&response.Token{
 		AccessToken:  tok,
@@ -547,9 +641,13 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	secret, err := ctx.Form.String("client_secret")
-	if err != nil {
-		ctx.Error(err)
+	// A service client proves itself with its secret, by HTTP Basic or in the form.
+	secret, presented, ok := clientSecret(ctx, clientID)
+	if !ok {
+		return
+	}
+	if !presented {
+		ctx.Error(corehttp.UnauthorizedError{})
 
 		return
 	}
@@ -610,6 +708,17 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
+	// The subject token must have been issued for the client itself or for an
+	// audience it acts from (registry act_from): a token one product's edge holds
+	// cannot be exchanged by another product's edge, nor a token delegated to one
+	// service by a different one.
+	if !r.Registry().MayActFrom(clientID, subject.Audience) {
+		r.Audit().DelegationRefused(ctx, clientID, subject.Subject, "the subject token was issued for an audience this client does not act from")
+		ctx.Error(corehttp.ForbiddenError{})
+
+		return
+	}
+
 	// The target audience + scopes are authorized against the same grant matrix
 	// that governs client-credentials.
 	scopes, err := r.Registry().AllowedScopes(clientID, audience, requested)
@@ -650,4 +759,15 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 		ExpiresIn:       exp,
 		IssuedTokenType: tokenTypeAccessToken,
 	})
+}
+
+// listedClaim answers value when the client's row lists claim, and nothing
+// otherwise: a token carries only the personal claims its client asks for, and the
+// identity code only where the row asks for it. The session keeps them all.
+func listedClaim(c registry.SignInClient, claim, value string) string {
+	if slices.Contains(c.Claims, claim) {
+		return value
+	}
+
+	return ""
 }

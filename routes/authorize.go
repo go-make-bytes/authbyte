@@ -1,95 +1,179 @@
 package routes
 
 import (
+	"context"
 	"errors"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-make-bytes/authbyte/identity"
+	"github.com/go-make-bytes/authbyte/registry"
 	"github.com/go-make-bytes/authbyte/session"
 	"github.com/go-make-bytes/authbyte/store"
 	"github.com/go-make-bytes/authbyte/upstream"
 
 	"azugo.io/azugo"
 	corehttp "azugo.io/core/http"
+	"github.com/valyala/fasthttp"
 )
 
 // TTLs for transient auth-flow artifacts.
 const (
 	flowTTL    = 10 * time.Minute
 	appCodeTTL = 60 * time.Second
-	sessionTTL = 12 * time.Hour
 )
 
-// Step-up elevation can fail two distinguishable ways. They are surfaced as
+// Step-up elevation can fail three distinguishable ways. They are surfaced as
 // separate errors so the audit trail records the true cause instead of
-// attributing every failure to a method mismatch: either the session to elevate
-// is gone (it expired between starting the step-up and completing it), or the
-// login method actually achieved did not match the one requested.
+// attributing every failure to a method mismatch: the session to elevate is gone
+// (it expired or was signed out between starting the step-up and completing
+// it), the login was another person's, or the login method actually achieved
+// did not match the one requested.
 var (
 	errStepUpSessionGone    = errors.New("step-up session not found or expired")
 	errStepUpMethodMismatch = errors.New("achieved login method did not match the requested step-up method")
+	errStepUpPersonMismatch = errors.New("the step-up login is not the person the session belongs to")
 )
 
-// authorize begins user login. The SPA (via the BFF) calls this with its PKCE
-// challenge; the service starts an Authorization Code flow against Entrust and
-// redirects the browser to the IdP.
+// authorizeRequest is an authorization request that passed every check.
+type authorizeRequest struct {
+	// params is the request as it came, to repeat on the page's own addresses.
+	params      authParams
+	redirectURI string
+	clientID    string
+	spaState    string
+	challenge   string
+	method      string
+	idAsk       idTokenAsk
+	signAsk     signInAsk
+	// named are the methods acr_values asked for, in authbyte's own names. None
+	// means the person picks on this service's page.
+	named  []string
+	tenant string
+	client registry.SignInClient
+}
+
+// authorize begins a sign-in. A request that names a way (acr_values) is sent
+// straight to the provider; one that names none is shown this service's own
+// page, which lists the ways the client may use.
 //
 // @route /authorize [get].
+// @route /authorize [post].
 func (r *router) authorize(ctx *azugo.Context) {
-	rt := ctx.Query.StringOptional("response_type")
-	if rt == nil || *rt != "code" {
-		ctx.Error(azugo.ParamInvalidError{Name: "response_type", Tag: "oneof=code"})
+	req, ok := r.readAuthorize(ctx, requestParams(ctx))
+	if !ok {
+		return
+	}
+
+	// A form post from another site arrives without the Lax binding the browser
+	// may hold. A new one here would replace it and fail that browser's sign-ins
+	// under way in other tabs, so the post sets none: the browser asks again by
+	// GET, which carries the binding it holds.
+	if ctx.Method() == fasthttp.MethodPost && browserBinding(ctx) == "" {
+		ctx.StatusCode(fasthttp.StatusSeeOther)
+		ctx.Redirect("/authorize?" + req.params.encode())
 
 		return
 	}
 
-	challenge, err := ctx.Query.String("code_challenge")
-	if err != nil {
-		ctx.Error(err)
+	binding := bindBrowser(ctx)
+	if len(req.named) == 0 {
+		r.showPage(ctx, req, binding, takeNotice(ctx))
 
 		return
 	}
+	r.startProvider(ctx, req, req.named, binding, req.signAsk.uiLocales)
+}
 
-	method := "S256"
-	if m := ctx.Query.StringOptional("code_challenge_method"); m != nil {
-		method = *m
+// readAuthorize checks an authorization request. What names no client or
+// return address this service knows gets the cannot-start page; anything else
+// that fails is answered at the client's own, validated address before anything
+// is stored. ok is false when the answer is written.
+func (r *router) readAuthorize(ctx *azugo.Context, p authParams) (*authorizeRequest, bool) {
+	next := ""
+	if ctx.Method() == fasthttp.MethodGet && strings.HasPrefix(ctx.Path(), "/authorize") {
+		next = "/authorize?" + p.encode()
 	}
 
-	redirectURI, err := ctx.Query.String("redirect_uri")
-	if err != nil {
-		ctx.Error(err)
+	if rt := p.opt("response_type"); rt == nil || *rt != "code" {
+		r.cannotStart(ctx, fasthttp.StatusBadRequest, azugo.ParamInvalidError{Name: "response_type", Tag: "oneof=code"}, next)
 
-		return
+		return nil, false
 	}
 
-	clientID, err := ctx.Query.String("client_id")
-	if err != nil {
-		ctx.Error(err)
+	redirectURI := p.get("redirect_uri")
+	if redirectURI == "" {
+		r.cannotStart(ctx, fasthttp.StatusBadRequest, azugo.ParamRequiredError{Name: "redirect_uri"}, next)
 
-		return
+		return nil, false
+	}
+
+	clientID := p.get("client_id")
+	if clientID == "" {
+		r.cannotStart(ctx, fasthttp.StatusBadRequest, azugo.ParamRequiredError{Name: "client_id"}, next)
+
+		return nil, false
 	}
 
 	// Validate the redirect_uri against the registered allowlist BEFORE saving
 	// any state or redirecting — prevents open-redirect attacks ([RFC 6749 §10.6]).
 	if err := r.Registry().ValidateRedirectURI(clientID, redirectURI); err != nil {
-		ctx.Error(azugo.ParamInvalidError{Name: "redirect_uri", Tag: "registered"})
+		r.cannotStart(ctx, fasthttp.StatusBadRequest, azugo.ParamInvalidError{Name: "redirect_uri", Tag: "registered"}, next)
 
-		return
+		return nil, false
 	}
 
-	spaState := ""
-	if s := ctx.Query.StringOptional("state"); s != nil {
-		spaState = *s
+	req := &authorizeRequest{
+		params:      p,
+		redirectURI: redirectURI,
+		clientID:    clientID,
+		spaState:    p.get("state"),
+		// The organisation the person asks to act under, when they belong to
+		// more than one. Optional; it is checked against their memberships at the
+		// token issue, never trusted on its own.
+		tenant: p.get("tenant"),
+	}
+	refuse := func(code, description string) (*authorizeRequest, bool) {
+		ctx.RedirectUnsafe(appendErrorState(redirectURI, r.issuerID(), code, description, req.spaState))
+
+		return nil, false
 	}
 
-	// The organisation the person asks to act under, when they belong to more
-	// than one. Optional; it is checked against their memberships at the token
-	// issue, never trusted on its own.
-	tenant := ""
-	if t := ctx.Query.StringOptional("tenant"); t != nil {
-		tenant = *t
+	// PKCE is S256 only. A missing challenge or any other method is answered at
+	// the client's own (now validated) address, before any flow is stored
+	// ([RFC 7636 §4.4.1]).
+	var ok bool
+	if req.challenge, req.method, ok = s256Challenge(p); !ok {
+		return refuse("invalid_request", "code_challenge with code_challenge_method S256 required")
 	}
 
+	// What the request asks of an ID token and of the sign-in. What can never be
+	// met here is answered at the client's own address before anything is stored.
+	var aerr *authError
+	if req.idAsk, aerr = readIDTokenAsk(p); aerr == nil {
+		req.signAsk, aerr = readSignInAsk(p)
+	}
+	if aerr != nil {
+		return refuse(aerr.code, aerr.description)
+	}
+
+	// The methods the client asks for (acr_values, in authbyte's own method
+	// names) must be ones this provider offers and the client is allowed. A
+	// request that can never be met is answered at the client's own address.
+	req.client, _ = r.Registry().SignInClient(clientID)
+	pickable := r.pickable(req.client)
+	if req.named, ok = requestedMethods(func(m string) bool { return slices.Contains(pickable, m) }, p.get("acr_values")); !ok {
+		return refuse("unmet_authentication_requirements", "acr_values names no login method this client may use here")
+	}
+
+	return req, true
+}
+
+// startProvider stores the flow, bound to this browser, and sends the browser to
+// the provider asking for methods in the provider's own words. A flow started on
+// the page keeps the client's request, so a cancel brings the person back to it.
+func (r *router) startProvider(ctx *azugo.Context, req *authorizeRequest, methods []string, binding, uiLocales string) {
 	entrustRedirect := r.entrustRedirectURI()
 	if entrustRedirect == "" {
 		ctx.Error(corehttp.NotFoundError{Resource: "eParaksts redirect uri"})
@@ -97,19 +181,31 @@ func (r *router) authorize(ctx *azugo.Context) {
 		return
 	}
 
+	picker := len(req.named) == 0
 	state := randomToken(24)
 	// The nonce binds the id_token the provider issues to this flow: it travels
 	// out with the authorize request and must come back inside the token.
 	nonce := randomToken(24)
 	flow := &session.Flow{
-		CodeChallenge:       challenge,
-		CodeChallengeMethod: method,
-		AppRedirectURI:      redirectURI,
-		SPAState:            spaState,
+		CodeChallenge:       req.challenge,
+		CodeChallengeMethod: req.method,
+		AppRedirectURI:      req.redirectURI,
+		SPAState:            req.spaState,
 		EntrustRedirectURI:  entrustRedirect,
-		ClientID:            clientID,
-		Tenant:              tenant,
+		ClientID:            req.clientID,
+		Tenant:              req.tenant,
 		Nonce:               nonce,
+		RequestedMethods:    methods,
+		OpenID:              req.idAsk.openID,
+		ClientNonce:         req.idAsk.nonce,
+		ForcedLogin:         req.signAsk.forcedLogin,
+		MaxAge:              req.signAsk.maxAge,
+		Started:             time.Now().Unix(),
+		Binding:             bindingHash(binding),
+		Picker:              picker,
+	}
+	if picker {
+		flow.Request = req.params.encode()
 	}
 
 	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
@@ -118,15 +214,23 @@ func (r *router) authorize(ctx *azugo.Context) {
 		return
 	}
 
+	// The provider is asked in its own words: its own code for each method, and
+	// a fresh sign-in when the client asked for one. Its nonce is authbyte's,
+	// never the client's.
 	params := upstream.AuthorizeParams{
 		State:       state,
 		RedirectURI: entrustRedirect,
 		Nonce:       nonce,
-	}
-	if acr := ctx.Query.StringOptional("acr_values"); acr != nil {
-		params.ACRValues = *acr
+		ACRValues:   upstreamACR(r.Config().ACRForMethod, methods),
+		Prompt:      req.signAsk.upstreamPrompt(),
+		MaxAge:      req.signAsk.maxAge,
+		UILocales:   uiLocales,
 	}
 
+	// The page's choice is a form post, answered by sending the browser on.
+	if picker {
+		ctx.StatusCode(fasthttp.StatusSeeOther)
+	}
 	// External IdP authorize endpoint — use the unsanitized redirect so the
 	// cross-origin target is preserved (a same-origin-only redirect would drop it).
 	ctx.RedirectUnsafe(r.Upstream().AuthorizeURL(params))
@@ -152,14 +256,29 @@ func (r *router) callback(ctx *azugo.Context) {
 		// Resolve the originating client so the error lands where login began.
 		if state := ctx.Query.StringOptional("state"); state != nil {
 			if flow, ferr := r.Session().ConsumeFlow(ctx, *state); ferr == nil {
+				if !r.returnedHere(ctx, flow) {
+					return
+				}
+				// A sign-in begun on this service's page goes back to the page,
+				// which says what happened; the client is not told.
+				if flow.Picker {
+					notice := noticeProvider
+					if *idpErr == "access_denied" {
+						notice = noticeCancelled
+					}
+					setCookie(ctx, noticeCookie, notice, noticeLifetime)
+					ctx.Redirect("/authorize?" + flow.Request)
+
+					return
+				}
 				// Client app redirect URI (cross-origin) — bypass same-origin sanitizing.
-				ctx.RedirectUnsafe(appendErrorState(flow.AppRedirectURI, *idpErr, desc, flow.SPAState))
+				ctx.RedirectUnsafe(appendErrorState(flow.AppRedirectURI, r.issuerID(), *idpErr, desc, flow.SPAState))
 
 				return
 			}
 		}
 		// Unknown/expired state — cannot safely bounce to a client; fail closed.
-		ctx.Error(corehttp.UnauthorizedError{})
+		r.cannotStart(ctx, fasthttp.StatusUnauthorized, corehttp.UnauthorizedError{}, "")
 
 		return
 	}
@@ -181,7 +300,13 @@ func (r *router) callback(ctx *azugo.Context) {
 	flow, err := r.Session().ConsumeFlow(ctx, state)
 	if err != nil {
 		// Unknown/expired state — fail closed.
-		ctx.Error(corehttp.UnauthorizedError{})
+		r.cannotStart(ctx, fasthttp.StatusUnauthorized, corehttp.UnauthorizedError{}, "")
+
+		return
+	}
+	// Checked before the provider's code is exchanged: a return that reached
+	// another browser sends nothing to the provider.
+	if !r.returnedHere(ctx, flow) {
 
 		return
 	}
@@ -233,13 +358,29 @@ func (r *router) callback(ctx *azugo.Context) {
 		return
 	}
 
+	// When the person authenticated, held against the client's max_age before
+	// anything is written: a provider answering from a session older than the
+	// client allows refuses the sign-in at the client's address.
+	authTime, err := signInMoment(info, flow, time.Now())
+	if err != nil {
+		r.Audit().LoginFailure(ctx, "authentication older than the client allows")
+		ctx.RedirectUnsafe(appendErrorState(flow.AppRedirectURI, r.issuerID(), "unmet_authentication_requirements", "the sign-in is older than the request allows", flow.SPAState))
+
+		return
+	}
+
 	sess, sid, err := r.establishSession(ctx, flow, id)
 	if err != nil {
 		if flow.StepUp {
-			// err is errStepUpSessionGone or errStepUpMethodMismatch — its message
+			// err is errStepUpSessionGone, errStepUpPersonMismatch or errStepUpMethodMismatch — its message
 			// is the true cause; either way the step-up is unauthorized.
 			r.Audit().StepUpFailure(ctx, id.LoginMethod, err.Error())
 			ctx.Error(corehttp.UnauthorizedError{})
+		} else if errors.Is(err, errMethodNotRequested) {
+			// The provider answered with a method the client did not ask for: no
+			// session, and the client hears it at its own address.
+			r.Audit().LoginFailure(ctx, "login method not requested: "+id.LoginMethod)
+			ctx.RedirectUnsafe(appendErrorState(flow.AppRedirectURI, r.issuerID(), "unmet_authentication_requirements", "the sign-in used a login method the request did not ask for", flow.SPAState))
 		} else {
 			r.Audit().LoginFailure(ctx, "session establishment failed")
 			ctx.Error(err)
@@ -253,11 +394,13 @@ func (r *router) callback(ctx *azugo.Context) {
 	// capabilities from it while the upstream token is still at hand. Assigned
 	// unconditionally: capabilities describe the CURRENT login method, so a
 	// step-up replaces (or clears) whatever the previous login captured.
-	sess.Capabilities = r.captureCapabilities(ctx, tokens.AccessToken, info, id.LoginMethod)
+	client, _ := r.Registry().SignInClient(flow.ClientID)
+	sess.Capabilities = r.captureCapabilities(ctx, client, tokens.AccessToken, info, id.LoginMethod)
+	// What the sign-in's ID tokens will state: the moment, and the means the
+	// provider named that are registered ones; nothing authbyte did not see.
+	stampSignIn(flow, sess, authTime, registeredAMR(info.AMR))
 
-	if err := r.Session().SaveSession(ctx, sid, sess, sessionTTL); err != nil {
-		ctx.Error(err)
-
+	if !r.saveEstablishedSession(ctx, flow, sid, sess) {
 		return
 	}
 
@@ -271,6 +414,8 @@ func (r *router) callback(ctx *azugo.Context) {
 		ClientID:            flow.ClientID,
 		RedirectURI:         flow.AppRedirectURI,
 		Tenant:              flow.Tenant,
+		OpenID:              flow.OpenID,
+		Nonce:               flow.ClientNonce,
 	}, appCodeTTL); err != nil {
 		ctx.Error(err)
 
@@ -284,37 +429,25 @@ func (r *router) callback(ctx *azugo.Context) {
 	}
 
 	// Client app redirect URI (cross-origin) — bypass same-origin sanitizing.
-	ctx.RedirectUnsafe(appendCodeState(flow.AppRedirectURI, appCode, flow.SPAState))
+	ctx.RedirectUnsafe(appendCodeState(flow.AppRedirectURI, r.issuerID(), appCode, flow.SPAState))
 }
 
 // establishSession either creates a new session (normal login) or updates the
 // existing one with elevated assurance / a new login method (step-up).
 func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id identity.Identity) (*session.Session, string, error) {
 	if flow.StepUp {
-		sess, err := r.Session().LoadSession(ctx, flow.SessionID)
+		sess, err := stepUpSession(ctx, r.Session(), flow, id)
 		if err != nil {
-			return nil, "", errStepUpSessionGone
-		}
-
-		// Enforce that the achieved method matches the one requested at step-up.
-		// Without this, an eID-logged-in user could "step up" to eParaksts Mobile
-		// yet authenticate with eID again and the binding would not actually
-		// change.
-		if !stepUpMethodMatches(flow.RequestedLogin, id.LoginMethod) {
-			return nil, "", errStepUpMethodMismatch
-		}
-
-		// Reflect the new assurance/method; identity and scopes are unchanged.
-		sess.LoA = id.LoA
-		sess.LoginMethod = id.LoginMethod
-		// A step-up through an upstream provider is a login through that
-		// provider's directory too; a card step-up says nothing about one.
-		if id.Issuer != "" {
-			sess.DirectoryIssuer = id.Issuer
-			sess.DirectoryGuest = id.DirectoryGuest
+			return nil, "", err
 		}
 
 		return sess, flow.SessionID, nil
+	}
+
+	// A sign-in completes only with a method the request asked for. Checked before
+	// the identity store is touched, so a refused sign-in writes nothing.
+	if !methodRequested(flow.RequestedMethods, id.LoginMethod) {
+		return nil, "", errMethodNotRequested
 	}
 
 	// Normal login: resolve the stable internal subject (the PERSON, keyed on the
@@ -325,6 +458,7 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 		FamilyName:   id.FamilyName,
 		SerialNumber: id.SerialNumber,
 		LoginMethod:  id.LoginMethod,
+		Email:        id.Email,
 	})
 	if err != nil {
 		return nil, "", err
@@ -343,12 +477,94 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 		SerialNumber: id.SerialNumber,
 		LoA:          id.LoA,
 		LoginMethod:  id.LoginMethod,
-		Scopes:       defaultUserScopes,
 		// The directory the login came through, for the register's admission
 		// door at token issue ("" for a card login).
 		DirectoryIssuer: id.Issuer,
 		DirectoryGuest:  id.DirectoryGuest,
+		ProviderSubject: id.IdPSubject,
+		ProviderIssuer:  id.Issuer,
 	}, randomToken(24), nil
+}
+
+// saveEstablishedSession stores what establishSession produced: a sign-in's new
+// session, given its whole lifetime from now, or a step-up's raised session,
+// written only over the session it raises and keeping its end. A session ended
+// while the step-up was under way stays ended. ok is false when the answer is
+// already written.
+func (r *router) saveEstablishedSession(ctx *azugo.Context, flow *session.Flow, sid string, sess *session.Session) bool {
+	if !flow.StepUp {
+		if err := r.Session().CreateSession(ctx, sid, sess, r.Config().SessionTTL); err != nil {
+			ctx.Error(err)
+
+			return false
+		}
+
+		return true
+	}
+
+	err := r.Session().ReplaceSession(ctx, sid, sess)
+	if errors.Is(err, session.ErrNotFound) {
+		r.Audit().StepUpFailure(ctx, sess.LoginMethod, errStepUpSessionGone.Error())
+		ctx.Error(corehttp.UnauthorizedError{})
+
+		return false
+	}
+	if err != nil {
+		ctx.Error(err)
+
+		return false
+	}
+
+	return true
+}
+
+// stepUpSession loads the session a step-up raises and checks the login that
+// completed it, then reflects the new assurance and method on it. Nothing is
+// changed on a refusal.
+func stepUpSession(ctx context.Context, store sessionLoader, flow *session.Flow, id identity.Identity) (*session.Session, error) {
+	sess, err := store.LoadSession(ctx, flow.SessionID)
+	if err != nil {
+		return nil, errStepUpSessionGone
+	}
+
+	// The login must be the session's person, or one person's proof would raise
+	// another person's session.
+	if !samePerson(sess, id) {
+		return nil, errStepUpPersonMismatch
+	}
+
+	// Enforce that the achieved method matches the one requested at step-up.
+	// Without this, an eID-logged-in user could "step up" to eParaksts Mobile
+	// yet authenticate with eID again and the binding would not actually
+	// change.
+	if !stepUpMethodMatches(flow.RequestedLogin, id.LoginMethod) {
+		return nil, errStepUpMethodMismatch
+	}
+
+	// Reflect the new assurance/method; identity and scopes are unchanged.
+	sess.LoA = id.LoA
+	sess.LoginMethod = id.LoginMethod
+	// A step-up through an upstream provider is a login through that
+	// provider's directory too; a card step-up says nothing about one.
+	if id.Issuer != "" {
+		sess.DirectoryIssuer = id.Issuer
+		sess.DirectoryGuest = id.DirectoryGuest
+	}
+
+	return sess, nil
+}
+
+// samePerson reports whether a step-up's login is the person the session
+// belongs to. A session with an identity code needs the same code (both login
+// paths canonicalise it). A session without one needs the same credential at the
+// same provider, since nothing else names the person. A login with a code never
+// steps up a session without one, nor the other way round: nothing links the two.
+func samePerson(sess *session.Session, id identity.Identity) bool {
+	if sess.SerialNumber != "" || id.SerialNumber != "" {
+		return sess.SerialNumber == id.SerialNumber
+	}
+
+	return sess.ProviderSubject != "" && sess.ProviderSubject == id.IdPSubject && sess.ProviderIssuer == id.Issuer
 }
 
 // stepUpMethodMatches reports whether the login method actually achieved during
@@ -360,10 +576,19 @@ func stepUpMethodMatches(requested, achieved string) bool {
 	return requested == "" || achieved == requested
 }
 
-// defaultUserScopes is the baseline scope set granted to an authenticated user.
-// A richer authorization policy would derive these per-user.
-var defaultUserScopes = []string{"envelopes:read", "envelopes:write", "documents:read"}
-
 func (r *router) entrustRedirectURI() string {
 	return r.Config().RedirectURI()
+}
+
+// returnedHere reports whether the provider's answer reached the browser that
+// started the sign-in, and answers the refusal when it did not. A flow a
+// client's server started (a step-up) carries no binding and is not checked.
+func (r *router) returnedHere(ctx *azugo.Context, flow *session.Flow) bool {
+	if flow.Binding == "" || boundHere(ctx, flow.Binding) {
+		return true
+	}
+	r.Audit().LoginFailure(ctx, "the provider's answer reached a browser that did not start the sign-in")
+	r.cannotStart(ctx, fasthttp.StatusUnauthorized, corehttp.UnauthorizedError{}, "")
+
+	return false
 }

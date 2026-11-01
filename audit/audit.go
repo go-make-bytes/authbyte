@@ -21,6 +21,7 @@ import (
 	"azugo.io/azugo"
 	"go.uber.org/zap"
 
+	"github.com/gmb-lib/go-authbyte/claims"
 	"github.com/gmb-lib/go-gdpr-audit/gdpr"
 	"github.com/gmb-lib/go-platform-kit/broker"
 	"github.com/gmb-lib/go-sec-events/secevents"
@@ -84,9 +85,22 @@ func (r *Recorder) StepUpFailure(ctx *azugo.Context, method, reason string) {
 	r.auth(ctx, "", "", method, true, broker.OutcomeFailure, reason)
 }
 
-// Logout records an interactive logout (session termination). actorID/method may
-// be empty when the caller could not resolve the session. Federated indicates the
-// browser was sent on to the eParaksts IdP logout to clear its SSO cookie.
+// SessionEnded records a session ended at its client's request, server to server:
+// its refresh token renews nothing from now on.
+func (r *Recorder) SessionEnded(ctx *azugo.Context, actorID, method string) {
+	attrs := map[string]any{secevents.AttrKind: "session_ended"}
+	if method != "" {
+		attrs[secevents.AttrMethod] = method
+	}
+
+	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeSuccess,
+		actorRef(actorID, "user", ""), attrs)
+}
+
+// Logout records the browser's leg of a sign-out. It names no person: the
+// session is ended server to server (SessionEnded), and the browser's address
+// carries no value that names it. Federated indicates the browser was sent on to
+// the provider's logout to clear its SSO cookie.
 func (r *Recorder) Logout(ctx *azugo.Context, actorID, method string, federated bool) {
 	attrs := map[string]any{secevents.AttrKind: "logout", "federated": federated}
 	if method != "" {
@@ -155,6 +169,23 @@ func (r *Recorder) DelegationRefused(ctx *azugo.Context, clientID, subject, reas
 			secevents.AttrKind:   "delegation",
 			secevents.AttrReason: reason,
 			"on_behalf_of":       subject,
+		})
+}
+
+// SignInAnsweredForAnother records that the membership register, asked about
+// the subject being signed in, answered about someone else. Nothing was minted;
+// the issue failed closed. A healthy deployment never produces it, so it is an
+// authorization denial at warning severity, the event an alert watches for.
+func (r *Recorder) SignInAnsweredForAnother(ctx *azugo.Context, asked string) {
+	kind := "user"
+	if strings.HasPrefix(asked, "svc:") {
+		kind = "service"
+	}
+	r.emit(ctx, secevents.EventAuthZDenied, secevents.SeverityWarning, broker.OutcomeFailure,
+		actorRef(asked, kind, ""),
+		map[string]any{
+			secevents.AttrKind:   "sign-in",
+			secevents.AttrReason: "the register answered for another subject",
 		})
 }
 
@@ -244,11 +275,18 @@ func (r *Recorder) IdentityRegistered(ctx *azugo.Context, actorID, actorLoA, per
 		return
 	}
 
+	// A service registering a person (a register adding its workers) acts system
+	// to system; an administrator acts interactively.
+	actor, channel := broker.Actor{ID: actorID, Type: "user", Assurance: actorLoA}, gdpr.ChannelInteractive
+	if strings.HasPrefix(actorID, claims.ServiceSubjectPrefix) {
+		actor, channel = broker.Actor{ID: actorID, Type: "service"}, gdpr.ChannelBackground
+	}
+
 	id := gdpr.Identity{
-		Actor:     broker.Actor{ID: actorID, Type: "user", Assurance: actorLoA},
+		Actor:     actor,
 		SubjectID: personSub,
 		Purpose:   gdpr.PurposeAccountManagement,
-		Channel:   gdpr.ChannelInteractive,
+		Channel:   channel,
 	}
 
 	var err error
@@ -261,6 +299,32 @@ func (r *Recorder) IdentityRegistered(ctx *azugo.Context, actorID, actorLoA, per
 	if err != nil {
 		r.logger(ctx).Warn("gdpr access record not persisted (non-fatal)",
 			zap.Bool("created", created), zap.Error(err))
+	}
+}
+
+// IdentityCodeRead records that a service read a person's identity code: the
+// service as the actor, the person as the subject, and never the code. Routine
+// (fail-open): the service that asked records the disclosure it makes onward,
+// and that record is the one that gates. No-op when the GDPR client is not
+// configured.
+func (r *Recorder) IdentityCodeRead(ctx *azugo.Context, callerID, personSub string) {
+	if r == nil || r.gdpr == nil {
+		return
+	}
+
+	err := r.gdpr.Record(ctx, gdpr.EventIdentityRead, gdpr.Access{
+		Actor:        broker.Actor{ID: callerID, Type: "service"},
+		DataSubjects: []string{personSub},
+		Resource:     broker.Resource{Type: gdpr.ResourceIdentity, ID: personSub},
+		Operation:    broker.OpRead,
+		LawfulBasis:  gdpr.BasisLegitimateInterest,
+		Purpose:      gdpr.PurposeAccountManagement,
+		Channel:      gdpr.ChannelBackground,
+		Attributes:   map[string]any{"what": "identityCode"},
+	})
+	if err != nil {
+		r.logger(ctx).Warn("gdpr access record not persisted (non-fatal)",
+			zap.String("event_type", gdpr.EventIdentityRead), zap.Error(err))
 	}
 }
 

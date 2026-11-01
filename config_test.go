@@ -129,3 +129,27 @@ func TestUpstreamConfigKeysBindToEnvironment(t *testing.T) {
 		})
 	}
 }
+
+// The email claim name reaches the connector under either profile, and an unset
+// name is left for the connector's own default.
+func TestUpstreamConfigCarriesTheEmailClaim(t *testing.T) {
+	named := &Configuration{OIDCUpstreamClaimEmail: "mail"}
+	qt.Check(t, qt.Equals(named.UpstreamConfig().ClaimEmail, "mail"))
+
+	generic := &Configuration{
+		OIDCUpstreamAuthorityURL: "https://idp.example",
+		OIDCUpstreamClaimEmail:   "mail",
+	}
+	qt.Check(t, qt.Equals(generic.UpstreamConfig().ClaimEmail, "mail"))
+
+	qt.Check(t, qt.Equals((&Configuration{}).UpstreamConfig().ClaimEmail, ""))
+}
+
+// Discovery, the browser's return and every token name one issuer: a trailing
+// slash in the configuration is not part of it.
+func TestTheIssuerIsOneValue(t *testing.T) {
+	t.Setenv("AUTH_ISSUER_URL", "http://localhost:8080/")
+	app := TestApp(t)
+
+	qt.Check(t, qt.Equals(app.Config().IssuerURL, "http://localhost:8080"))
+}

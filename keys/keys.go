@@ -79,12 +79,22 @@ func (m *Manager) Alg() string {
 
 // Sign signs the claims with the active key, stamping its kid into the header.
 func (m *Manager) Sign(claims jwt.Claims) (string, error) {
+	return m.SignTyped(claims, "")
+}
+
+// SignTyped signs as Sign does and sets the header's typ, when given, so a reader
+// can tell one kind of token from another signed with the same key (an access
+// token from an ID token, [RFC 9068 §2.1]).
+func (m *Manager) SignTyped(claims jwt.Claims, typ string) (string, error) {
 	m.mu.RLock()
 	active := m.active
 	m.mu.RUnlock()
 
 	tok := jwt.NewWithClaims(m.method, claims)
 	tok.Header["kid"] = active.kid
+	if typ != "" {
+		tok.Header["typ"] = typ
+	}
 
 	return tok.SignedString(active.key)
 }

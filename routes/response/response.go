@@ -5,10 +5,13 @@ package response
 // token_type is "DPoP". IssuedTokenType is set on a token-exchange response
 // (RFC 8693) to name the type of the returned token.
 type Token struct {
-	AccessToken     string `json:"access_token"`
-	TokenType       string `json:"token_type"`
-	ExpiresIn       int64  `json:"expires_in"`
-	RefreshToken    string `json:"refresh_token,omitempty"`
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int64  `json:"expires_in"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	// IDToken is a sign-in's ID token, answered only to a sign-in that asked
+	// for one (openid), at its code exchange.
+	IDToken         string `json:"id_token,omitempty"`
 	IssuedTokenType string `json:"issued_token_type,omitempty"`
 	// Capabilities is the session's signing-capability set captured at login.
 	// Present only on the authorization-code grant, and only when the login

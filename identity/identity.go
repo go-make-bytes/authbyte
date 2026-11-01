@@ -68,7 +68,10 @@ type UserInfo struct {
 	FamilyName   string   `json:"family_name"`
 	Name         string   `json:"name"`
 	SerialNumber string   `json:"serial_number"`
-	EIPS         string   `json:"eips"`
+	// Email is the address the provider sent for the person (the configured
+	// claim), trimmed; "" when it sent none.
+	Email string `json:"-"`
+	EIPS  string `json:"eips"`
 	// SignIdentities is the person's sign-identity catalog, present when the
 	// login requested the sign-identity profile scope. nil = the response
 	// carried no catalog (scope not granted / not requested); empty non-nil =
@@ -84,6 +87,9 @@ type UserInfo struct {
 	// DirectoryGuest is true when the provider says the person is a guest in
 	// its directory rather than a member of it.
 	DirectoryGuest bool `json:"-"`
+	// AuthTime is when the provider says the person authenticated (Unix
+	// seconds), read from its verified id_token only; 0 when it said nothing.
+	AuthTime int64 `json:"-"`
 }
 
 // Identity is the platform's normalized identity. Subject is the internal,
@@ -95,8 +101,11 @@ type Identity struct {
 	GivenName    string
 	FamilyName   string
 	SerialNumber string
-	LoA          string
-	LoginMethod  string
+	// Email is the address a directory sign-in sent ("" for a card login or when
+	// none was sent); the identity store decides whether to keep it.
+	Email       string
+	LoA         string
+	LoginMethod string
 	// Issuer is the identity provider the login came through ("" for a login
 	// that did not come through an upstream provider); DirectoryGuest says the
 	// provider called the person a guest in its directory.
@@ -235,6 +244,7 @@ func (r *Resolver) Resolve(u UserInfo) Identity {
 		GivenName:      u.GivenName,
 		FamilyName:     u.FamilyName,
 		SerialNumber:   u.SerialNumber,
+		Email:          u.Email,
 		LoA:            loa,
 		LoginMethod:    method,
 		Issuer:         u.Issuer,
@@ -266,6 +276,25 @@ func (r *Resolver) Interpret(acr string, amr []string) (method, loa string) {
 	loa = matchPolicy(r.loaKeys, r.loaPolicy, r.loaDefault, acr, amr)
 
 	return method, loa
+}
+
+// MethodFor names the login method a requested acr value asks for, by the same
+// vocabulary Interpret reads a provider's answer with. Unlike Interpret it has no
+// default: a value the vocabulary does not know names no method, so a request
+// for a method nobody offers is refused instead of becoming the default one.
+func (r *Resolver) MethodFor(acr string) (string, bool) {
+	hay := strings.ToLower(acr)
+	if hay == "" {
+		return "", false
+	}
+
+	for _, k := range r.methodKeys {
+		if strings.Contains(hay, k) {
+			return r.methodPolicy[k], true
+		}
+	}
+
+	return "", false
 }
 
 // ResolveLoA derives the assurance level from the acr + amr claims (a thin wrapper

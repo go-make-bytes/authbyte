@@ -1,0 +1,130 @@
+/*
+  The sign-in page. Colours are uibyte v0.18.0's tokens, whose text pairs are
+  measured at 4.5:1 or more; the typeface is the one uibyte ships, served from
+  this host under its licence (HankenGrotesk-OFL.txt).
+*/
+
+@font-face {
+  font-family: "Hanken Grotesk";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/signin/HankenGrotesk-Variable.woff2") format("woff2");
+}
+
+:root {
+  --ink: #16181b;
+  --paper: #f4f3ef;
+  --surface: #ffffff;
+  --line: #e6e3dc;
+  --muted-strong: #5a5f66;
+  --focus: #0e9e6b;
+  --late: #cb4c48;
+  --late-bg: #f3e0db;
+  --late-fg: #b73937;
+  --blocked: #9f6d00;
+  --blocked-bg: #f1e9da;
+  --blocked-fg: #8e6100;
+  --ontrack: #00875a;
+  --ontrack-bg: #dee9de;
+  --ontrack-fg: #00764f;
+  --sans: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14.5px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  container-type: inline-size;
+  container-name: page;
+}
+
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.topbar { display: flex; justify-content: flex-end; padding: 14px 18px; }
+
+.langsel { position: relative; }
+.langsel > summary {
+  list-style: none;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+}
+.langsel > summary::-webkit-details-marker { display: none; }
+.langsel .car { color: var(--muted-strong); }
+.langsel ul {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 170px;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 14px 38px rgba(22, 24, 27, 0.13);
+  z-index: 2;
+}
+.langsel a { display: block; padding: 7px 10px; border-radius: 8px; color: var(--ink); text-decoration: none; font-size: 13px; }
+.langsel a[aria-current] { font-weight: 600; background: var(--paper); }
+
+.col { max-width: 460px; margin: 60px auto 40px; padding: 0 20px; }
+
+.lock { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+.lock b { font-size: 17px; }
+.mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: var(--ontrack-fg);
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+h1 { font-size: 25px; margin: 0; letter-spacing: -0.015em; overflow-wrap: anywhere; }
+.ld { color: var(--muted-strong); font-size: 14px; margin: 8px 0 0; }
+
+.alert { margin: 18px 0 0; border-left: 3px solid var(--late); background: var(--late-bg); border-radius: 8px; padding: 10px 12px; font-size: 13.5px; color: var(--late-fg); }
+.alert.amber { border-left-color: var(--blocked); background: var(--blocked-bg); color: var(--blocked-fg); }
+
+.waylist { display: flex; flex-direction: column; gap: 10px; margin: 22px 0 0; }
+.btn {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 9px;
+  padding: 11px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: center;
+}
+.btn.pri { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+
+.hint { font-size: 12.5px; color: var(--muted-strong); margin: 14px 0 0; }
+
+.op { display: flex; align-items: center; gap: 8px; margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted-strong); }
+.op img { width: 20px; height: 20px; flex: none; }
+
+@container page (max-width: 500px) {
+  .col { margin: 24px auto 30px; }
+  h1 { font-size: 22px; }
+}

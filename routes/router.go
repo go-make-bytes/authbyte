@@ -4,16 +4,31 @@ package routes
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
+	"os"
 	"strings"
 
 	authbytecore "github.com/go-make-bytes/authbyte"
 
 	"azugo.io/azugo"
+	azugoconfig "azugo.io/azugo/config"
 	"azugo.io/azugo/healthz"
+	"azugo.io/azugo/middleware"
 )
 
 type router struct {
 	*authbytecore.App
+
+	// operatorMark is the operator's mark the sign-in page shows at its foot,
+	// read once at start; nil when the deployment names none.
+	operatorMark []byte
+
+	// reader answers the service-only person reads; nil means the identity store
+	// itself (set only by tests).
+	reader personReader
+	// codeReads records each identity code read; nil means the service's own
+	// audit recorder (set only by tests).
+	codeReads codeReadRecorder
 }
 
 // Init registers all routes on the application.
@@ -27,8 +42,23 @@ func Init(a *authbytecore.App) error {
 	a.Get("/.well-known/jwks.json", r.jwks)
 	a.Get("/.well-known/openid-configuration", r.discovery)
 
-	// User login (Authorization Code + PKCE + DPoP).
-	a.Get("/authorize", r.authorize)
+	// User login (Authorization Code + PKCE + DPoP). A request that names no way
+	// is shown this service's sign-in page, whose choice comes back to
+	// /authorize/choice; both are limited per client address. The authorization
+	// endpoint takes a GET and a form POST alike [OIDC Core §3.1.2.1].
+	if file := a.Config().SignInOperatorMarkFile; file != "" {
+		mark, err := os.ReadFile(file)
+		if err != nil {
+			return fmt.Errorf("sign-in operator mark: %w", err)
+		}
+		r.operatorMark = mark
+	}
+	limited := signInLimit(a.Config().SignInRate())
+	a.Get("/authorize", limited(r.authorize))
+	a.Post("/authorize", limited(r.authorize))
+	a.Post("/authorize/choice", limited(r.choose))
+	a.Get("/signin/language", r.chooseLanguage)
+	a.Get("/signin/{name}", r.signinAsset)
 	a.Get(a.Config().CallbackPath(), r.callback)
 
 	// Logout (front-channel): clears the server session and, for eParaksts-
@@ -47,6 +77,10 @@ func Init(a *authbytecore.App) error {
 	// Token endpoint (authorization_code | client_credentials | refresh_token).
 	a.Post("/token", r.token)
 
+	// Revocation (server to server): a client ends its session at the authority
+	// before it sends the browser through /logout.
+	a.Post("/revoke", r.revoke)
+
 	// Step-up / re-auth (existing session).
 	a.Post("/step-up", r.stepUp)
 
@@ -55,6 +89,8 @@ func Init(a *authbytecore.App) error {
 	identityGroup.Use(a.AuthClient().Authenticate())
 	identityGroup.Get("", r.identity)
 	identityGroup.Post("/persons", r.registerPerson)
+	identityGroup.Post("/persons/lines", r.personLines)
+	identityGroup.Get("/persons/{personSub}/code", r.personCode)
 
 	// Development conveniences (guarded by configuration; never on in prod).
 	if dir := a.Config().DemoDir; dir != "" {
@@ -62,6 +98,22 @@ func Init(a *authbytecore.App) error {
 	}
 
 	return nil
+}
+
+// signInLimit limits a sign-in route per client address, under its own name so
+// its counts are its own. A refusal answers 429 with Retry-After [RFC 6585 §4];
+// the routes' own answers, which carry a flow's state, are kept by no cache.
+func signInLimit(rate *azugoconfig.RateLimit) func(azugo.RequestHandler) azugo.RequestHandler {
+	limit := middleware.RateLimit(rate, middleware.RateLimitName("sign-in"))
+
+	return func(next azugo.RequestHandler) azugo.RequestHandler {
+		limited := limit(next)
+
+		return func(ctx *azugo.Context) {
+			ctx.Header.Set("Cache-Control", "no-store")
+			limited(ctx)
+		}
+	}
 }
 
 // randomToken returns a URL-safe random identifier of n bytes of entropy.

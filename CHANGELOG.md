@@ -3,6 +3,371 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.3.0
+
+### Added — this service's own sign-in page, for a request that names no way in
+
+- **A request to `/authorize` without `acr_values` is shown this service's sign-in page** instead of being sent
+  straight to the provider: *Sign in to {client}*, one button per method the client's registration lists that the
+  provider can start, in English or Latvian, under this service's name. The person's pick is sent to the provider with
+  that method's own code. A request that names a way, or `prompt=none`, never sees it. A client allowed no such method
+  is told on the page, where it used to get `unmet_authentication_requirements` at its address.
+- **Every sign-in is tied to the browser that started it** by an http-only cookie (`__Host-authbyte_signin` over TLS
+  and outside development): the provider's answer, code or error, is refused in any other browser before its code is
+  exchanged, and the page's choice needs the cookie, a token derived from it and this service's own `Origin`.
+- **A cancel or a provider failure** of a sign-in begun on the page brings the person back to the page, saying what
+  happened; one whose client named the way is answered at the client as before.
+- **A request this service cannot place** (an unknown client, an unregistered `redirect_uri`, a provider return it
+  does not know) gets a page saying so when it asks for HTML; other callers get the same error answers as before.
+- **`POST /authorize`** takes the request as a form, as OpenID Connect requires of an authorization endpoint. A post
+  that arrives without the browser's binding cookie (any post from another site, which the cookie's `SameSite=Lax`
+  keeps it from) sets none: it is answered `303` to the same request as a `GET`, so a browser keeps the binding it
+  holds and its sign-ins under way in other tabs still finish.
+- **Rate limit** on `/authorize` and the page's choice: `SIGN_IN_RATE_LIMIT` (60) per client address per
+  `SIGN_IN_RATE_WINDOW` (one minute), `429` with `Retry-After` past it; `0` turns it off.
+- **New settings:** `OIDC_UPSTREAM_DISPLAY_NAME` (the generic provider's button), `SIGN_IN_OPERATOR_NAME` and
+  `SIGN_IN_OPERATOR_MARK_FILE` (the page's foot line), and the two above. Discovery lists `ui_locales_supported`.
+- **Callers to move:** an application whose sign-in names no way now shows the page in between; one that should go
+  straight to its provider sends its way in `acr_values`.
+
+### Added — OpenID Connect sign-ins: an ID token, the client's nonce, `prompt`, `max_age`, and the issuer on every return
+
+- **An ID token for a sign-in that asks `scope=openid`**, answered at its code exchange (by redirect or by card): `iss`,
+  `sub`, `aud` (the client alone), `iat`, `exp`, the client's `nonce`, `auth_time` when it is known, `acr` (the sign-in
+  method met), `amr` (registered means only: a card's are `hwk`, `mfa`, `pin`, `sc`) and `sid`, a public session name
+  of its own. Nothing personal beyond the subject; no `azp`. Signed with the deployment's key, ES256 only (the standard
+  asks RS256 be supported too; every client this release serves checks ES256). A refresh, a step-up's exchange, client
+  credentials and token exchange answer none.
+- **`prompt`:** `none` is answered `login_required` (this server holds no browser session yet); `none` beside another
+  value `invalid_request`; `consent` `consent_required` (no consent page); `login` and `select_account` are passed to the
+  provider; other values are ignored. **`max_age`** asks the provider to sign the person in again, is passed on, and a
+  sign-in older than it is refused with `unmet_authentication_requirements`; a malformed one is `invalid_request`.
+  A sign-in the provider was made to repeat (`prompt=login` or any `max_age`) whose own time is from before the
+  request is refused the same way: the provider answered from its own session.
+- **Refused rather than ignored:** `request` (`request_not_supported`), `request_uri` (`request_uri_not_supported`),
+  `id_token_hint` and a nonce over 512 characters (`invalid_request`). `display` and `ui_locales` cause no error, and
+  `ui_locales` is passed to the provider.
+- **Every return to the client through the browser names this issuer** (`iss`), code and error alike. The card
+  door's code answer is `Cache-Control: no-store`.
+- **One issuer value:** a trailing slash on `AUTH_ISSUER_URL` is dropped when the configuration loads, so discovery,
+  the browser's `iss` and every token name the same string.
+- **Discovery** lists the ID token's settings, the method names `acr_values` takes, the claims, and
+  `authorization_response_iss_parameter_supported: true`; it says `request_uri_parameter_supported: false`.
+
+### Changed — `acr_values` speaks this server's method names
+
+**Breaking for every client that names a method:** `acr_values` takes this server's own method names
+(`eparakstsMobile`, `eidScan`, `upstream`, as a client's registry row lists them), exactly as written. A provider's own
+code, such as an eParaksts flow URN, is now refused with `unmet_authentication_requirements`; the server sends the
+provider its own code for each method named.
+
+### Fixed
+
+- **`/token` and `/identity` answers carry `Cache-Control: no-store` and `Pragma: no-cache`.** They carried no cache
+  header.
+- **Access tokens are typed `at+jwt`**, so a reader can tell them from ID tokens signed with the same key; a token
+  exchange refuses a subject token of any other type. **A registry row whose `client_id` is also an audience** is
+  refused at the start, since its ID tokens would be accepted there.
+
+### Changed — each sign-in client is a registry row of its own, so one deployment serves several products
+
+**Breaking for every deployment: the client registry takes a new shape, and the start refuses the old one by name.**
+What was one setting for the whole deployment, or written in the code, is now each sign-in client's own. Move a
+registry like this:
+- `public_clients` becomes **`sign_in_clients`**, and `allowed_redirect_uris` becomes **`redirect_uris`**.
+- Every row gains **`type`**: `public` (no secret, PKCE alone) or `confidential` with a **`secret_ref`** resolved like
+  a service client's.
+- Every row gains **`audience`**, the `aud` of its user tokens. **`AUTH_USER_AUDIENCE` is no longer read**: put its
+  value on each row that used it.
+- Sign-out landings move from `redirect_uris` to **`post_logout_redirect_uris`**. `/logout` accepts only those: a
+  sign-in return is no longer a sign-out landing.
+- A row lists what its people get, and gets nothing it does not list:
+  - **`baseline_scopes`**: the scopes minted where no membership is asked. The signing scopes are no longer written
+    in the service. A row whose people need a membership, explicitly or because a register is wired and it leaves
+    `membership_required` unset, may not list any: the start is refused.
+  - **`claims`**: which of `name`, `given_name`, `family_name` and `serial_number` its tokens carry. The national
+    identity code goes only where it is listed. The session still keeps it, so a step-up still compares the person.
+  - **`methods`**: the sign-in methods it allows. **`step_up_methods`**: those it may step up to, a subset; none
+    means no step-up.
+  - **`signing`**: whether `/identity` tells its tokens the signing flows, and whether its sign-ins capture the
+    person's signing identities and certificates.
+- **`client_name`**, **`logo_uri`** and **`backchannel_logout_uri`** are kept for later use; nothing shows or calls
+  them yet.
+
+The start is also refused for a confidential row without a secret, a public row with one, a step-up method outside
+the row's methods, an unknown claim, one id under both sections, a `logo_uri` that is not `https`, and an address
+that is not absolute or carries a fragment. A sign-out or back-channel address may use `http` only for a
+confidential client. A row none of whose methods the deployment offers starts with a warning.
+
+### Changed — a token carries its client's audience, scopes and personal claims
+
+- A user token's `aud` is its client's `audience`, at the code exchange and at refresh, and the audit's token-issued
+  record names it. A user token now carries **`client_id`**, the client it was issued to ([RFC 9068 §2.2]).
+- A refresh after the client was disabled or removed is refused `401`.
+- `/identity` accepts a token for any enabled sign-in client's audience, and no other. It answers `permitted_flows`
+  only to a token of a client whose row says `signing: true`.
+
+### Changed — the sign-in methods are the client's
+
+- `/authorize`: `acr_values` naming a method the client is not allowed is answered at the client's address with
+  `error=unmet_authentication_requirements`, as a method nobody offers was. A request naming none may complete only
+  with a method the client allows that the provider offers, and a client allowed none of those gets the same answer.
+- `GET /webeid/challenge` answers `403` to a client not allowed `webEid`, before any flow is stored.
+- `POST /step-up` accepts a `method` only from the client's `step_up_methods`. Another answers `422`, as a method
+  outside the fixed list did.
+
+### Added — a confidential client proves itself at the token endpoint
+
+- At every grant a confidential client sends its secret by HTTP Basic (`client_secret_basic`, the id and secret each
+  form-encoded first, [RFC 6749 §2.3.1]) or in the form (`client_secret_post`). Both in one request is refused
+  ([RFC 6749 §2.3]). A public client that sends a secret is refused.
+- The code exchange checks the client before the code is spent, so a stolen code is useless without the secret.
+- `/revoke` needs the secret too ([RFC 7009 §2.1]), and `POST /step-up` takes it as `client_secret` in its body,
+  since its `Authorization` header carries the person's token.
+- A missing secret at `client_credentials` or token exchange now answers `401` where it answered `400`.
+- Discovery lists `client_secret_basic`, `client_secret_post` and `none` for the token and revocation endpoints.
+
+### Fixed — a service that registers a person is recorded as a service
+
+The access audit's record of `POST /identity/persons` names a caller whose id begins `svc:` as a service, on the
+`background` channel. It recorded every caller as a person, on the `interactive` channel.
+
+### Changed — dependencies, again
+
+go-authbyte v0.35.0 (from v0.32.0: the audience list the identity door's check needs) and pgx v5.12.0.
+
+### Changed — the refresh token is a value of its own, bound to its client
+
+**Breaking for every client.** The `refresh_token` a code exchange answers used to be the session's internal id,
+and the sign-out address carried it in the browser. Now:
+- **The first code exchange of a session answers a new random refresh token.** The session's internal id never leaves
+  the service, and the store keeps the token only as a hash. A step-up's code exchange answers no `refresh_token`:
+  keep the one you hold.
+- **A refresh names its client.** `grant_type=refresh_token` requires `client_id`, and only the client the token was
+  issued to may use it, with the same DPoP key as before. Another client's use is refused `401`, like a token that is
+  gone, and the session goes on for its own client.
+- **`POST /step-up` names the session by `refresh_token`** (it was `session_id`) together with the `client_id` the token
+  was issued to:
+
+  ```json
+  {"refresh_token": "…", "client_id": "portal-spa", "method": "webEid", "code_challenge": "…", "redirect_uri": "…"}
+  ```
+
+### Changed — sign-out ends the session server to server; the browser's address names no session
+
+**Breaking for every client that signs out.** `GET /logout` no longer reads `sid` and ends no session: a refresh
+token in a browser address is kept in history and logs. Sign out in two legs:
+1. **`POST /revoke`** ([RFC 7009]), server to server, with a DPoP proof of the session's key:
+
+   ```
+   token=<the refresh token>&token_type_hint=refresh_token&client_id=portal-spa
+   ```
+
+   `200` when the session is ended, and also when the token is unknown; `401` for another client's token or a proof of
+   another key (the session goes on); `503` when the store cannot be read. The ending is recorded as a security event
+   (`session_ended`) naming the person and the login method.
+2. **`GET /logout?client_id=…&redirect_uri=…&login_method=…`** as before, for the browser: it passes through the
+   identity provider's logout for a federated method.
+
+A client that still sends only the browser leg leaves the session alive until its lifetime ends. The discovery
+document names the endpoint: `revocation_endpoint` and `revocation_endpoint_auth_methods_supported: ["none"]`.
+
+### Fixed — a session's lifetime is counted from its sign-in
+
+Every save of a session used to restart its twelve hours, so a step-up or a code exchange extended it. A session now
+ends `SESSION_TTL` (new setting, default `12h`) after its sign-in, whatever is saved on it later, and a save that
+lands after the session has ended does not bring it back.
+
+### Changed — sessions live in the application's cache (`CACHE_*`)
+
+**Breaking for every deployment.** `REDIS_URL` and `REDIS_URL_FILE` are gone. Login flows, application codes,
+sessions, refresh grants and the DPoP replay guard live in the shared cache, configured by azugo's settings:
+
+```
+CACHE_TYPE=redis
+CACHE_CONNECTION=rediss://valkey.example:6380/0
+CACHE_PASSWORD_FILE=/run/secrets/cache-password
+```
+
+- **The service refuses to start on `CACHE_TYPE=memory`, or with `CACHE_TYPE` unset, in every environment.** With two
+  instances a login begun on one would be unknown to the other, and each would accept a replayed DPoP proof once.
+- A `CACHE_PASSWORD_FILE` that is missing or empty stops the start, instead of connecting without the password.
+- Client-side caching is off by default (`CACHE_CLIENT_CACHE=false`).
+- A cache span in a trace is named by its operation and instance (`GET sessions`), never by its key.
+- **Taking this version signs everyone out once:** sessions and logins in progress are kept under a new key layout,
+  and the old one is not read.
+
+### Changed — dependencies
+
+go-gdpr-audit v1.1.8 (a queued access record keeps the resource of its own request) and go-platform-kit v1.11.6 (the
+correlation id is copied before it outlives its request).
+
+### Fixed — a sign-in completes only with a method the request asked for
+
+A request's `acr_values` used to be passed to the provider and then forgotten, so a provider that answered with
+another method (its own session still live for it, say) produced a session the client never asked for.
+- **At `/authorize`**, each value in `acr_values` must name a method the provider offers, read with the provider's own
+  vocabulary. A request naming any other value is answered at the client's registered address with
+  `error=unmet_authentication_requirements` and the client's `state`, before a flow is stored or the browser is sent
+  on.
+- **At completion**, at the provider callback and at the card door alike, the method achieved must be one of those
+  asked for. Otherwise no code is issued, nothing is written to the identity store, the failure is recorded with the
+  method achieved, and the provider callback sends the browser to the client with
+  `error=unmet_authentication_requirements` and its `state` (the card door answers `401`).
+- A request that names no method accepts any method the provider allows, as before.
+
+### Fixed — a step-up must be completed by the person the session belongs to
+
+A step-up used to check only the login method, so another person's card, or another person's sign-in at the
+provider, could raise a session's assurance level. Now the step-up is refused, at the provider callback and at the
+card door alike, unless:
+- for a session whose login carried an identity code, the step-up's login carries the same code;
+- for a session without one (a directory sign-in), the step-up's login is the same credential at the same provider.
+
+A login with a code never raises a session without one, or the other way round, because nothing links the two yet.
+The refusal answers `401` like the other step-up refusals and is recorded as a step-up failure with its own reason.
+The session is left as it was. Sessions now keep the login's provider handle and provider, so a directory session
+signed in before this version cannot be stepped up; signing in again fixes it.
+
+### Changed — a token exchange checks where the subject token came from
+
+**Breaking for every deployment whose edges exchange a person's token.** Add `act_from` to each such client in the
+client registry before taking this version, or its exchanges are refused.
+- **A client exchanges only a subject token issued for itself or for an audience it lists under `act_from`.** A
+  product's edge lists the product's user audience (`AUTH_USER_AUDIENCE`), for example `act_from: [portal-api]`. A
+  token addressed to the client itself needs no entry, so a service passing on what was delegated to it keeps working
+  unchanged. A subject token with no audience is refused.
+- **The refusal** answers `403`, as a refused delegation already does, and is recorded as a delegation refusal with
+  its own reason.
+- **The registry refuses unknown keys.** A misspelled key used to load as if it were absent; now the service refuses
+  to start and names the line. Check a registry before deploying: one that carried keys this service never read will
+  stop the start.
+
+### Changed — PKCE is S256 only, and discovery advertises no ID token
+
+**Breaking for a client that sends `code_challenge_method=plain` or no method at all.** Such a client gets a refusal
+where it used to be let through with the weaker form.
+- **`/authorize`** takes PKCE only with `code_challenge_method=S256`. An absent method means `plain` (RFC 7636 §4.3),
+  so it is refused too, as is a missing `code_challenge`. The refusal is an authorization error response: the browser
+  goes back to the client's registered `redirect_uri` with `error=invalid_request` and the client's `state`, before
+  any login flow is stored. The `redirect_uri` is checked first, so the refusal never goes anywhere else. A missing
+  `code_challenge` used to be answered with a `400` page.
+- **`/webeid/challenge`** refuses the same requests with a `422`.
+- **The token endpoint** verifies a code only against an S256 challenge.
+- **The discovery document** no longer lists `id_token_signing_alg_values_supported`, because no ID token is issued.
+  It now lists `none` beside `client_secret_post` in `token_endpoint_auth_methods_supported`, because a browser
+  client proves PKCE at `/token` instead of presenting a secret.
+
+### Added — the store's address can come from a file
+
+`REDIS_URL_FILE`: the address of the store that holds flows, sessions and replay guards carries the store's password,
+so it can now be read from a file (for example one a secrets agent writes). `REDIS_URL`, when set, still wins, so an
+existing deployment changes nothing. A missing or empty file leaves the address unset, and the service refuses to
+start because the address is required.
+
+### Changed — the register is asked only about the person being signed in
+
+**Breaking, together with the register.** Release it with the register version that serves the sign-in doors, and in
+the same deployment change: point `ROLEBYTE_URL` at the register's sign-in listener (`http://rolebyte:8081` in the
+stacks), set the register's `SIGN_IN_CLIENT` to this service's `AUDIT_CLIENT_ID`, and remove every registry grant of
+`membership:claim` or `membership:resolve`.
+
+- **Each call to the register carries a token minted for it, naming the person.** At token issue this service mints, in
+  its own process, a short-lived token for each sign-in door call: the person (or service account) being signed in as
+  `sub`, this service as the acting client (`act`), the door's one scope, bound to the outbound client's DPoP key. It
+  sends it to the register's sign-in listener: `POST /api/v1/sign-in/claims`, then `POST /api/v1/sign-in/memberships`,
+  and `POST /api/v1/sign-in/directory-admissions` for a directory login. The requests name nobody; the register answers
+  for the token's subject alone. No token endpoint and no registry grant are involved any more.
+  The token lives one minute and is always bound to the outbound key: a mint without a key thumbprint is refused.
+- **An answer about another person is a security event.** It already minted nothing and failed the issue closed
+  (`502`); it now also emits `authz.denied` with `kind: sign-in`, which a healthy deployment never produces.
+- **Built on go-authbyte's `Client.DoWithToken` and `Client.Thumbprint`** (the release after v0.31.2).
+
+### Changed — built with Go 1.27.3
+
+The service is built with Go 1.27.3 (`go.mod` and the image). Go 1.27.2's `crypto/x509` still trusts
+certificates issued by intermediates since found compromised, and the vulnerability checker reports it as
+reachable from any call over TLS; under 1.27.3 it reports none. Nothing about the configuration changes.
+
+### Added — a directory sign-in keeps the person's email address
+
+A person who signs in through an organisation's own directory now has the email address the
+directory sends kept with their record. The address is read from the verified id_token where it
+carries one, otherwise from userinfo, and trimmed. The identity store keeps it only when it is
+address-shaped, and keeps none for a person who holds a national identity code. A login is never
+refused over it, and a card login sends none. An address carrying a control character, a line or
+paragraph separator, or an invisible formatting character (a direction override, a zero-width
+character) is dropped and the sign-in goes on. `OIDC_UPSTREAM_CLAIM_EMAIL` names the claim
+(default `email`); set it where a provider uses another name.
+
+### Added — two service-only reads of how a person signs in
+
+Both sit beside `POST /identity/persons`, answer `Cache-Control: no-store`, and are for a **service
+acting as itself** only: a person's token is refused even when it carries the scope, and so are a
+token another service obtained by exchange to act for someone and a service account's token for an
+organisation. The two scope levels are
+separate, so a grant to read the lines never reaches a code. Neither echoes a value it was sent in
+a refusal.
+
+`POST /identity/persons/lines` needs `identity:lines`. It answers, for up to 500 people, whether
+each can sign in, the email kept for them (only when there is one) and, for a person holding a
+national identity code, its country and the length of the code as a person is shown it. The code
+itself is never in the answer. A person the platform does not know is left out.
+
+```
+POST /identity/persons/lines      Authorization: DPoP <service token carrying identity:lines>
+{"subjects": ["sub:01J8X2K4M9N7P3Q5R6S8T0V1W2", "sub:01J8X2K4M9N7P3Q5R6S8T0V1W3"]}
+
+200 {"lines": [
+      {"subject": "sub:01J8X2K4M9N7P3Q5R6S8T0V1W2", "signsIn": true, "country": "LV", "length": 12},
+      {"subject": "sub:01J8X2K4M9N7P3Q5R6S8T0V1W3", "signsIn": false, "email": "person@example.org"}]}
+422 err:identity:invalid    more than 500, an empty or non-list body, or a subject that is not "sub:" and a 26-character id
+403 err:identity:forbidden  not a service acting as itself, or the identity:lines scope is missing
+```
+
+`GET /identity/persons/{personSub}/code` needs `identity:code`, takes the bare 26-character person
+id and answers the person's national identity code the way a person is shown it, with its country.
+Each code answered is recorded with the access audit as a read of that person's identity record by
+the calling service (`identity.read`, marked `identityCode`; the code is never in the record). The
+record is a routine one: an access audit that is down does not stop the answer, and the caller
+records the disclosure it makes onward, which is the record that gates it.
+
+```
+GET /identity/persons/01J8X2K4M9N7P3Q5R6S8T0V1W2/code   Authorization: DPoP <service token carrying identity:code>
+
+200 {"code": "XXXXXX-XXXXX", "country": "LV"}
+404 err:identity:not_found  the person is not known, or holds no identity code
+422 err:identity:invalid    the id is not a 26-character person id
+403 err:identity:forbidden  not a service acting as itself, or the identity:code scope is missing
+```
+
+## v0.2.2
+
+A security release.
+
+### Fixed — a token refresh no longer admits anyone through a directory
+
+A person who signs in through an organisation's own directory and holds no membership is offered
+to the register's admission door, which makes them a member of the organisation that attached that
+directory. Until now a token refresh made the same offer. So a session whose person the register no
+longer held, after the register was restored or rebuilt, made that person a member again without
+anyone signing in. Admission now happens only at a sign-in. A refresh that resolves to no membership
+is refused with `403` `err:membership:notMember`, the same as for anyone else without a membership,
+and the person is admitted at their next sign-in. A person removed from an organisation was already
+refused at the door, and still is. Nothing about the configuration changes.
+
+### Fixed — a refresh while the session store cannot be read is no longer a refusal
+
+A refresh that could not read the session store was answered `401`, the same as a refresh token
+whose session is gone. A caller that ends its own session on that answer ended it for a brief store
+outage. Such a refresh now answers `503` `err:upstream:unavailable`, and `401` again means the
+session is no longer held.
+
+```http
+POST /token   grant_type=refresh_token   (the session store unreachable)
+503 {"code": "err:upstream:unavailable", …}
+```
+
 ## v0.2.1
 
 A security release. **The service now builds with Go 1.27.2**, and its libraries move to their Go

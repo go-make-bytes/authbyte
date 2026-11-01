@@ -7,13 +7,16 @@ package authbytecore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/gmb-lib/go-authbyte/authclient"
+	"github.com/gmb-lib/go-authbyte/claims"
 	"github.com/gmb-lib/go-authbyte/nonce"
 	"github.com/gmb-lib/go-authbyte/replay"
 	"github.com/gmb-lib/go-gdpr-audit/gdpr"
@@ -32,8 +35,8 @@ import (
 
 	"azugo.io/azugo"
 	"azugo.io/azugo/server"
+	"azugo.io/core/cache"
 	corecfg "azugo.io/core/config"
-	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -51,11 +54,10 @@ type App struct {
 	resolver   *identity.Resolver
 	binding    identity.BindingResolver
 	nonce      *nonce.Issuer
-	session    *session.Store
+	session    SessionStore
 	store      *store.Store
 	authClient *authclient.Client
 	replay     replay.Store
-	redis      redis.UniversalClient
 
 	// Audit emitters: NIS2-audit security telemetry (always) and the optional
 	// GDPR-audit GDPR access client + its outbound auth-client (set only when
@@ -102,6 +104,35 @@ type ScopeResolver interface {
 	Admit(ctx *azugo.Context, subjectKey string, login rolebyte.DirectoryLogin) (bool, error)
 }
 
+// SessionStore keeps what a sign-in carries between requests: the login flows in
+// progress, the application codes waiting for their exchange, the people's
+// sessions and the refresh grants that name them. A missing or expired entry is
+// session.ErrNotFound; any other error says the store could not answer.
+//
+// A session lives until its ExpiresAt, set once when it is created; replacing it
+// keeps that end and writes only over a session that still exists, so an ended
+// session is never brought back by a save that was already under way. A refresh
+// grant is kept under a key the caller derives from the token, never the token.
+type SessionStore interface {
+	SaveFlow(ctx context.Context, state string, f *session.Flow, ttl time.Duration) error
+	ConsumeFlow(ctx context.Context, state string) (*session.Flow, error)
+	SaveAppCode(ctx context.Context, code string, c *session.AppCode, ttl time.Duration) error
+	ConsumeAppCode(ctx context.Context, code string) (*session.AppCode, error)
+	// CreateSession stores a new session that lives for lifetime from now, and
+	// records that end on sess.
+	CreateSession(ctx context.Context, sid string, sess *session.Session, lifetime time.Duration) error
+	// ReplaceSession writes sess over the live session sid until its ExpiresAt;
+	// session.ErrNotFound when that session has ended.
+	ReplaceSession(ctx context.Context, sid string, sess *session.Session) error
+	LoadSession(ctx context.Context, sid string) (*session.Session, error)
+	DeleteSession(ctx context.Context, sid string) error
+	// SaveRefresh keeps a refresh grant under key until expiresAt.
+	SaveRefresh(ctx context.Context, key string, g *session.RefreshGrant, expiresAt time.Time) error
+	LoadRefresh(ctx context.Context, key string) (*session.RefreshGrant, error)
+	DeleteRefresh(ctx context.Context, key string) error
+	Ping(ctx context.Context) error
+}
+
 // New constructs the Identity/Auth application.
 func New(cmd *cobra.Command, version string) (*App, error) {
 	config := NewConfiguration()
@@ -132,6 +163,10 @@ func (a *App) init() error {
 	// wired identically across the fleet via go-platform-kit.
 	if err := platform.Setup(a.App, platform.Options{
 		Config: cfg.BaseConfiguration,
+		// The session store's keys are session ids, refresh-token hashes, codes,
+		// login states and proof ids, so a cache span is named by its instance and
+		// never by its key.
+		TracingOptions: cacheTracingOptions(),
 	}); err != nil {
 		return err
 	}
@@ -164,6 +199,11 @@ func (a *App) init() error {
 	if reg.RequiresMembershipSomewhere() && !cfg.RolebyteEnabled() {
 		return fmt.Errorf("registry: a public client requires a membership but no membership register is configured (ROLEBYTE_URL)")
 	}
+	// With a register wired, a client that leaves its membership need unset asks
+	// the register too, so a baseline written on it would never be minted.
+	if ids := reg.BaselinesNeverMinted(cfg.RolebyteEnabled()); len(ids) > 0 {
+		return fmt.Errorf("registry: sign-in clients %s list baseline_scopes, but their people need a membership, so the register's scopes are minted instead; set membership_required: false or remove the baseline", strings.Join(ids, ", "))
+	}
 	a.registry = reg
 
 	// Upstream OIDC provider + identity resolution. The provider is built from
@@ -188,15 +228,23 @@ func (a *App) init() error {
 		a.nonce = ni
 	}
 
-	// Redis (sessions, flow state) and PostgreSQL (identity mapping).
-	opts, err := redis.ParseURL(cfg.RedisURL)
-	if err != nil {
-		return fmt.Errorf("invalid REDIS_URL: %w", err)
+	// Sessions, login state and the DPoP replay guard live in the application's
+	// shared cache (Valkey or Redis), never in memory, in any environment: with
+	// two instances a login begun on one would be unknown to the other, and each
+	// would accept a replayed proof once. PostgreSQL holds the identity mapping.
+	if a.Cache().ConfiguredType() == cache.MemoryCache {
+		return errors.New("the session store is in memory; set CACHE_TYPE=redis and CACHE_CONNECTION")
 	}
-	a.redis = redis.NewClient(opts)
-	a.session = session.New(a.redis)
-	// The authority enforces jti replay on its own endpoints via Redis.
-	a.replay = replay.NewRedis(a.redis)
+	sessions, err := session.New(a.Cache())
+	if err != nil {
+		return err
+	}
+	a.session = sessions
+	proofs, err := session.NewProofReplay(a.Cache())
+	if err != nil {
+		return err
+	}
+	a.replay = proofs
 
 	st, err := store.New(a.BackgroundContext(), cfg.PostgresDSN)
 	if err != nil {
@@ -206,7 +254,7 @@ func (a *App) init() error {
 
 	// Auth-client to protect this service's own endpoints (validates user
 	// tokens). It never calls out, so it carries no client id/secret.
-	ac, err := authclient.New(cfg.AuthClientConfig())
+	ac, err := authclient.New(inboundAuthConfig(cfg, reg))
 	if err != nil {
 		return err
 	}
@@ -267,11 +315,20 @@ func (a *App) init() error {
 		a.Log().Warn("WEBEID_ENGINE_URL not set — Web eID card-login routes (/webeid/*) are disabled")
 	}
 
-	// Membership-driven scopes (register-backed mode): an outbound
-	// service-client (the same client the audit poster uses, reused when
-	// present) asks the membership register for the person's scopes at every
-	// user-token issue. Off unless ROLEBYTE_URL is set — the service then
-	// runs standalone and mints the static baseline set.
+	// A sign-in client allowed none of the methods this deployment offers can sign
+	// nobody in here.
+	for _, id := range clientsOfferedNothing(reg, a.offersMethod) {
+		a.Log().Warn("sign-in client "+id+" is allowed no sign-in method this deployment offers; its sign-ins are refused",
+			zap.String("client_id", id))
+	}
+
+	// Membership-driven scopes (register-backed mode): at every user-token
+	// issue the register's sign-in doors are asked about the person, each call
+	// with a token this service mints in its own process naming that person,
+	// itself acting (AuditClientID), proven with the outbound client's DPoP key
+	// (the same client the audit poster uses, reused when present). No token
+	// endpoint and no registry grant are involved. Off unless ROLEBYTE_URL is
+	// set — the service then runs standalone and mints the static baseline set.
 	if cfg.RolebyteEnabled() {
 		rc := a.auditClient
 		if rc == nil {
@@ -281,7 +338,7 @@ func (a *App) init() error {
 			}
 			rc = oc
 		}
-		a.scopeResolver = rolebyte.New(rc, cfg.RolebyteURL, cfg.RolebyteAudience)
+		a.scopeResolver = rolebyte.New(rc, a.mintSignInToken, cfg.RolebyteURL, cfg.RolebyteAudience, cfg.AuditClientID)
 	}
 
 	return nil
@@ -294,7 +351,7 @@ func (a *App) Start() error {
 	defer cancel()
 
 	if err := a.session.Ping(ctx); err != nil {
-		a.Log().Warn("redis not reachable at startup — sessions/login degraded", zap.Error(err))
+		a.Log().Warn("session cache not reachable at startup — sessions/login degraded", zap.Error(err))
 	}
 	if err := a.store.Ping(ctx); err != nil {
 		a.Log().Warn("postgres not reachable at startup — new-user mapping degraded", zap.Error(err))
@@ -365,10 +422,8 @@ func (a *App) Stop() {
 	if a.store != nil {
 		a.store.Close()
 	}
-	if a.redis != nil {
-		_ = a.redis.Close()
-	}
 
+	// The application closes its cache when it stops.
 	a.App.Stop()
 }
 
@@ -389,7 +444,7 @@ func (a *App) Upstream() *upstream.Provider      { return a.upstream }
 func (a *App) Resolver() *identity.Resolver      { return a.resolver }
 func (a *App) Binding() identity.BindingResolver { return a.binding }
 func (a *App) Nonce() *nonce.Issuer              { return a.nonce }
-func (a *App) Session() *session.Store           { return a.session }
+func (a *App) Session() SessionStore             { return a.session }
 func (a *App) Store() *store.Store               { return a.store }
 func (a *App) AuthClient() *authclient.Client    { return a.authClient }
 func (a *App) Replay() replay.Store              { return a.replay }
@@ -402,6 +457,38 @@ func (a *App) ScopeResolver() ScopeResolver { return a.scopeResolver }
 
 // SetScopeResolver overrides the membership scope resolver (test use only).
 func (a *App) SetScopeResolver(r ScopeResolver) { a.scopeResolver = r }
+
+// SetAudit overrides the audit recorder (test use only).
+func (a *App) SetAudit(r *audit.Recorder) { a.audit = r }
+
+// SetSessionStore overrides the session store (test use only).
+func (a *App) SetSessionStore(s SessionStore) { a.session = s }
+
+// SetReplay overrides the DPoP proof replay store (test use only).
+func (a *App) SetReplay(s replay.Store) { a.replay = s }
+
+// signInTokenTTL is how long a sign-in door token lives: one call, retries included.
+const signInTokenTTL = time.Minute
+
+// mintSignInToken mints the token for one call at the register's sign-in doors:
+// the subject being signed in, the register's audience, the door's one scope,
+// this service as the acting client, bound to the key the call is proven with.
+// It lives a minute, is bound to that key, and nothing but the register accepts it.
+func (a *App) mintSignInToken(subject, audience, scope, actor, thumbprint string) (string, error) {
+	if strings.TrimSpace(thumbprint) == "" {
+		return "", errors.New("sign-in door token: no key thumbprint to bind it to")
+	}
+	tok, _, err := a.issuer.IssueDelegated(issuer.DelegatedTokenInput{
+		Subject:    subject,
+		Audience:   audience,
+		Scopes:     []string{scope},
+		Actor:      &claims.Actor{Subject: actor},
+		Thumbprint: thumbprint,
+		TTL:        signInTokenTTL,
+	})
+
+	return tok, err
+}
 
 var nonAlphaNum = regexp.MustCompile(`[^A-Za-z0-9]+`)
 
@@ -445,4 +532,40 @@ func clientSecretResolver(clientID, secretRef string) (string, error) {
 		safeRef = "literal:<redacted>"
 	}
 	return "", fmt.Errorf("no secret resolved for client %q (ref %q)", clientID, safeRef)
+}
+
+// inboundAuthConfig is the check on tokens this service's own endpoints take. The
+// identity door answers for the people of every sign-in client, so a token for any
+// enabled client's audience is accepted there, and no other. With no sign-in
+// client the audience stays empty and accepts nothing: every token this service
+// mints names exactly one audience, and the registry refuses an empty one.
+func inboundAuthConfig(cfg *Configuration, reg *registry.Registry) *authclient.Configuration {
+	c := cfg.AuthClientConfig()
+	if audiences := reg.Audiences(); len(audiences) > 0 {
+		c.ServiceAudience = audiences[0]
+		c.AlsoAcceptedAudiences = audiences[1:]
+	}
+
+	return c
+}
+
+// offersMethod reports whether this deployment offers a sign-in method: one its
+// provider allows, or the card where the card engine is named.
+func (a *App) offersMethod(method string) bool {
+	return a.upstream.MethodAllowed(method) || (method == identity.LoginWebEID && a.webeid != nil)
+}
+
+// clientsOfferedNothing names the enabled sign-in clients none of whose methods
+// offered accepts. They are named for a warning, not refused: one registry file
+// serves every mode of a stack, and a row right in one mode can be empty in
+// another. Such a row's sign-in is refused where it is asked for.
+func clientsOfferedNothing(reg *registry.Registry, offered func(string) bool) []string {
+	var out []string
+	for _, c := range reg.SignInClients() {
+		if !slices.ContainsFunc(c.Methods, offered) {
+			out = append(out, c.ClientID)
+		}
+	}
+
+	return out
 }

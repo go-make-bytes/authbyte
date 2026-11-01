@@ -159,10 +159,12 @@ func TestClaimsVerifiesTheIDTokenAndMergesItFirst(t *testing.T) {
 	c := s.claims("n-1")
 	c["amr"] = []string{"pwd", "mfa"}
 	c["acrs"] = []string{"c1"}
+	c["auth_time"] = 1_800_000_000
 	s.idToken = s.sign(c)
 
 	info, err := p.Claims(context.Background(), Tokens{AccessToken: "tok", IDToken: s.idToken}, "n-1")
 	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.Equals(info.AuthTime, int64(1_800_000_000)), qt.Commentf("the provider's own authentication time"))
 	qt.Assert(t, qt.Equals(info.Name, "Anna Example"), qt.Commentf("the id_token's name wins over userinfo's"))
 	qt.Assert(t, qt.Equals(info.Subject, "pairwise-sub-1"))
 	qt.Assert(t, qt.Equals(info.DirectoryID, "9f3c2a10-0000-4000-8000-000000000001"))
@@ -277,6 +279,7 @@ func TestClaimsWithoutAKeySetIsUserinfoOnly(t *testing.T) {
 	info, err := p.Claims(context.Background(), Tokens{AccessToken: "tok", IDToken: "garbage.that.is.never.read"}, "n-4")
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.Equals(info.Name, "Anna Example (userinfo)"))
+	qt.Assert(t, qt.Equals(info.AuthTime, int64(0)), qt.Commentf("no verified token, so no authentication time"))
 	qt.Assert(t, qt.Equals(info.DirectoryID, "pairwise-sub-1"))
 	qt.Assert(t, qt.IsFalse(info.DirectoryGuest))
 	qt.Assert(t, qt.Equals(info.Issuer, s.url))

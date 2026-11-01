@@ -169,3 +169,12 @@ func TestResolveLoA(t *testing.T) {
 		})
 	}
 }
+
+// The address a directory sent travels from the claims into the identity the
+// login is stored under; a login that sent none carries none.
+func TestResolveCarriesTheEmail(t *testing.T) {
+	r := NewResolver(nil)
+
+	qt.Check(t, qt.Equals(r.Resolve(UserInfo{Subject: "s", Email: "a@example.test"}).Email, "a@example.test"))
+	qt.Check(t, qt.Equals(r.Resolve(UserInfo{Subject: "s"}).Email, ""))
+}

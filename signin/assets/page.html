@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="{{.Lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<link rel="stylesheet" href="/signin/style.css">
+</head>
+<body>
+{{- if .Languages}}
+<header class="topbar">
+<details class="langsel">
+<summary aria-label="{{.Words.Language}}: {{.Words.Self}}"><svg class="globe" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg>{{.Words.Self}}<svg class="car" width="8" height="8" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 3h8L5 8z" fill="currentColor"/></svg></summary>
+<ul>
+{{- range .Languages}}
+<li><a href="{{.Href}}" lang="{{.Code}}" hreflang="{{.Code}}"{{if .Current}} aria-current="true"{{end}}>{{.Name}}</a></li>
+{{- end}}
+</ul>
+</details>
+</header>
+{{- end}}
+<main class="col">
+<div class="lock"><span class="mark" aria-hidden="true">a</span><b>authbyte</b></div>
+<h1>{{.Title}}</h1>
+{{- if .Lead}}
+<p class="ld">{{.Lead}}</p>
+{{- end}}
+{{- with .Notice}}
+<div class="alert{{if .Amber}} amber{{end}}" role="alert">{{.Text}}</div>
+{{- end}}
+{{- if .Ways}}
+<form class="waylist" method="post" action="{{.Action}}">
+<input type="hidden" name="csrf" value="{{.Token}}">
+{{- range $i, $w := .Ways}}
+<button class="btn{{if eq $i 0}} pri{{end}}" type="submit" name="way" value="{{$w.Code}}">{{$w.Name}}</button>
+{{- end}}
+</form>
+<p class="hint">{{range $i, $w := .Ways}}{{if $i}} {{end}}{{$w.Hint}}{{end}}</p>
+{{- end}}
+{{- if .Operator}}
+<footer class="op">{{if .OperatorMark}}<img src="/signin/operator.svg" alt="">{{end}}<span>{{.Operator}}</span></footer>
+{{- end}}
+</main>
+</body>
+</html>

@@ -12,17 +12,21 @@
 // carries nothing about the person: the national identity code stays in the
 // identity store and appears in no register.
 //
-// The adapter attaches the subject to any still-pending invitations first
-// (the claim call): an invited subject's first token issue is exactly the
-// moment its membership row activates. Both calls ride a DPoP-bound service
-// token minted with this service's own identity — resolving a membership is
-// the identity provider's question, never the subject's.
+// The register's sign-in doors answer only for the person being signed in. For
+// each call this service mints a token in its own process naming that subject,
+// with itself as the acting client and the door's one scope, bound to the
+// outbound client's DPoP key, and sends it to the register's sign-in listener.
+// The request names nobody: the register reads the subject from the token, so
+// no call can ask about anyone else. The adapter attaches the subject to any
+// still-pending invitations first (the claim door): an invited subject's first
+// token issue is exactly the moment its membership row activates.
 package rolebyte
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
+	"net/http"
 	"strings"
 
 	"azugo.io/azugo"
@@ -31,11 +35,17 @@ import (
 	"github.com/gmb-lib/go-authbyte/authclient"
 )
 
-// Scopes the membership service's API demands per call — its contract, not
-// configuration.
+// Scopes the register's sign-in doors demand — its contract, not configuration.
 const (
 	scopeClaim   = "membership:claim"
 	scopeResolve = "membership:resolve"
+)
+
+// The register's sign-in doors, on its sign-in listener.
+const (
+	doorClaims      = "/api/v1/sign-in/claims"
+	doorMemberships = "/api/v1/sign-in/memberships"
+	doorAdmissions  = "/api/v1/sign-in/directory-admissions"
 )
 
 // personKeyPrefix types the register's person key. The prefix is lower-case and
@@ -52,6 +62,19 @@ func PersonKey(personSub string) string {
 	return personKeyPrefix + personSub
 }
 
+// tokenSubject is the `sub` of the token the register reads a key from: a
+// person's platform subject without its type, a service account's client id as
+// it stands.
+func tokenSubject(subjectKey string) string {
+	return strings.TrimPrefix(subjectKey, personKeyPrefix)
+}
+
+// Minter mints, in this service's own process, the token for one sign-in door
+// call: the subject being signed in, the register's audience, the door's one
+// scope, the acting client and the thumbprint of the key the call is proven
+// with.
+type Minter func(subject, audience, scope, actor, thumbprint string) (string, error)
+
 // Membership is one organisation a subject may act under, with the
 // group:level scopes its roles grant there.
 type Membership struct {
@@ -61,25 +84,57 @@ type Membership struct {
 
 // Resolver answers membership questions from the register.
 type Resolver struct {
-	auth       *authclient.Client
-	claimsURL  string
-	resolveURL string
-	admitURL   string
-	audience   string
+	auth     *authclient.Client
+	mint     Minter
+	base     string
+	audience string
+	actor    string
 }
 
-// New builds a Resolver against the membership service's base URL,
-// authenticating with service tokens for audience minted via ac.
-func New(ac *authclient.Client, baseURL, audience string) *Resolver {
-	base := strings.TrimSuffix(baseURL, "/")
-
+// New builds a Resolver against the register's sign-in listener (signInURL),
+// proving each call with ac's DPoP key and a token mint makes for it, with
+// actor — this service's own client id — as the acting client.
+func New(ac *authclient.Client, mint Minter, signInURL, audience, actor string) *Resolver {
 	return &Resolver{
-		auth:       ac,
-		claimsURL:  base + "/api/v1/claims",
-		resolveURL: base + "/api/v1/resolve",
-		admitURL:   base + "/api/v1/directory-admissions",
-		audience:   audience,
+		auth:     ac,
+		mint:     mint,
+		base:     strings.TrimSuffix(signInURL, "/"),
+		audience: audience,
+		actor:    actor,
 	}
+}
+
+// call sends one sign-in door call for the subject: a token minted for it at the
+// door's scope, the body if any, and the answer decoded into out. Anything but a
+// 200 is an error; the caller fails the token issue closed.
+func (r *Resolver) call(ctx *azugo.Context, subjectKey, scope, door string, in, out any) error {
+	token, err := r.mint(tokenSubject(subjectKey), r.audience, scope, r.actor, r.auth.Thumbprint())
+	if err != nil {
+		return fmt.Errorf("rolebyte: %s: mint: %w", door, err)
+	}
+
+	var body []byte
+	if in != nil {
+		if body, err = json.Marshal(in); err != nil {
+			return fmt.Errorf("rolebyte: %s: %w", door, err)
+		}
+	}
+
+	res, err := r.auth.DoWithToken(ctx, r.audience, token, http.MethodPost, r.base+door,
+		http.Header{"Accept": {"application/json"}}, body)
+	if err != nil {
+		return fmt.Errorf("rolebyte: %s: %w", door, err)
+	}
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("rolebyte: %s answered %d", door, res.StatusCode)
+	}
+	if out != nil {
+		if err := json.Unmarshal(res.Body, out); err != nil {
+			return fmt.Errorf("rolebyte: %s: unreadable answer: %w", door, err)
+		}
+	}
+
+	return nil
 }
 
 // DirectoryLogin is what a login through an organisation's own directory brings
@@ -91,7 +146,6 @@ type DirectoryLogin struct {
 }
 
 type admitRequest struct {
-	SubjectKey  string `json:"subjectKey"`
 	Issuer      string `json:"issuer"`
 	DisplayName string `json:"displayName"`
 }
@@ -115,13 +169,12 @@ const admissionAdmitted = "admitted"
 // claim, the identity provider saying who has just authenticated.
 func (r *Resolver) Admit(ctx *azugo.Context, subjectKey string, login DirectoryLogin) (bool, error) {
 	if subjectKey == "" || login.Issuer == "" {
-		return false, fmt.Errorf("rolebyte: an admission needs the subject key and the issuer")
+		return false, errors.New("rolebyte: an admission needs the subject key and the issuer")
 	}
 
 	var res admitResponse
-	if err := r.auth.PostJSON(ctx, r.audience, scopeClaim, r.admitURL,
-		admitRequest{SubjectKey: subjectKey, Issuer: login.Issuer, DisplayName: login.DisplayName}, &res); err != nil {
-		return false, fmt.Errorf("rolebyte: admit: %w", err)
+	if err := r.call(ctx, subjectKey, scopeClaim, doorAdmissions, admitRequest(login), &res); err != nil {
+		return false, err
 	}
 
 	return res.Outcome == admissionAdmitted, nil
@@ -138,20 +191,19 @@ type resolveResponse struct {
 	Memberships []membership `json:"memberships"`
 }
 
-// errAnswerForAnotherSubject is a resolve answer that is not about the subject
+// ErrAnswerForAnotherSubject is a register answer that is not about the subject
 // asked about. Minting from it would hand one person another's access, so the
-// token issue fails closed instead.
-var errAnswerForAnotherSubject = errors.New("rolebyte: resolve answered for another subject")
+// token issue fails closed instead, and the caller raises a security event: a
+// healthy deployment never produces one.
+var ErrAnswerForAnotherSubject = errors.New("rolebyte: resolve answered for another subject")
 
 // answeredFor accepts the register's answer only when it names the subject that
 // was asked about. An answer that names nobody is refused the same way: a register
 // that does not say whom it answered for cannot be told apart from one that
 // answered for somebody else.
 func answeredFor(asked string, res resolveResponse) ([]Membership, error) {
-	// The register matches a key with surrounding whitespace trimmed, and names
-	// the key it matched.
-	if res.SubjectKey != strings.TrimSpace(asked) {
-		return nil, fmt.Errorf("%w: asked %q, answered %q", errAnswerForAnotherSubject, asked, res.SubjectKey)
+	if res.SubjectKey != asked {
+		return nil, fmt.Errorf("%w: asked %q, answered %q", ErrAnswerForAnotherSubject, asked, res.SubjectKey)
 	}
 
 	out := make([]Membership, 0, len(res.Memberships))
@@ -162,17 +214,6 @@ func answeredFor(asked string, res resolveResponse) ([]Membership, error) {
 	return out, nil
 }
 
-type claimRequest struct {
-	SubjectKey string `json:"subjectKey"`
-}
-
-type claimResponse struct {
-	Claimed []struct {
-		UserID   string `json:"userId"`
-		TenantID string `json:"tenantId"`
-	} `json:"claimed"`
-}
-
 // Memberships attaches any pending invitations for the subject, then answers
 // its active memberships — the organisations it may act under, each with the
 // scopes its roles grant there. An empty answer means the subject holds no
@@ -180,29 +221,26 @@ type claimResponse struct {
 // question. Any transport or service failure surfaces as an error — the caller
 // fails the token issue closed.
 func (r *Resolver) Memberships(ctx *azugo.Context, subjectKey string) ([]Membership, error) {
-	if subjectKey == "" {
+	if strings.TrimSpace(subjectKey) == "" {
 		// Without a key there is nothing to look up — and every caller has one
-		// (an identity code or a client id), so this is a wiring fault, not a
+		// (a platform subject or a client id), so this is a wiring fault, not a
 		// subject condition.
-		return nil, fmt.Errorf("rolebyte: subject key is empty")
+		return nil, errors.New("rolebyte: subject key is empty")
 	}
 
 	// First presentation claims pending invitations; on every later call this
-	// is an idempotent no-op. It must precede resolve so the very first token
+	// is an idempotent no-op. It must precede the lookup so the very first token
 	// already carries the invited roles.
-	var claimed claimResponse
-	if err := r.auth.PostJSON(ctx, r.audience, scopeClaim, r.claimsURL,
-		claimRequest{SubjectKey: subjectKey}, &claimed); err != nil {
-		return nil, fmt.Errorf("rolebyte: claim: %w", err)
+	if err := r.call(ctx, subjectKey, scopeClaim, doorClaims, nil, nil); err != nil {
+		return nil, err
 	}
 
 	var res resolveResponse
-	if err := r.auth.GetJSON(ctx, r.audience, scopeResolve,
-		r.resolveURL+"?subject="+url.QueryEscape(subjectKey), &res); err != nil {
-		return nil, fmt.Errorf("rolebyte: resolve: %w", err)
+	if err := r.call(ctx, subjectKey, scopeResolve, doorMemberships, nil, &res); err != nil {
+		return nil, err
 	}
 
-	// Who was asked about and what came back, on every resolve: if one person's
+	// Who was asked about and what came back, on every lookup: if one person's
 	// login ever carries another's access, this line says whether the register
 	// answered for the wrong person or the answer was right and the fault lies
 	// after it.

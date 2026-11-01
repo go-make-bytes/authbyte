@@ -4,8 +4,8 @@ import (
 	"azugo.io/azugo"
 )
 
-// logout terminates the user session and, for eParaksts-federated logins, sends
-// the browser on to the eParaksts IdP logout endpoint so its SSO cookie is
+// logout is the browser's leg of a sign-out: for eParaksts-federated logins it
+// sends the browser on to the eParaksts IdP logout endpoint so its SSO cookie is
 // cleared. Without this, the next user on a shared device is silently logged in
 // as the previous one — the eParaksts IdP keeps a ~10-minute SSO session, so a
 // fresh /authorize is answered from that session instead of prompting for a new
@@ -13,16 +13,18 @@ import (
 //
 // It is a FRONT-CHANNEL endpoint: the browser MUST navigate here (a top-level
 // redirect). A server-to-server call cannot clear a cookie that lives in the
-// user's browser on the eParaksts domain.
+// user's browser on the eParaksts domain. It ends no session and takes no value
+// that names one, because a browser address is kept in history and logs: the
+// client ends the authority's session server to server first (/revoke).
 //
 // Query:
 //
 //	client_id (required) — the client, used to scope the redirect_uri allowlist.
 //	redirect_uri (required) — where to land after logout; validated against the
-//	 client's registered redirect allowlist (open-redirect guard).
-//	sid (optional) — the server session id (the SPA's refresh_token). When
-//	 present the session is deleted and the login method is read from it.
-//	login_method (optional) — federation hint used when sid is absent/expired.
+//	 client's registered sign-out landings, a list apart from its sign-in
+//	 returns (open-redirect guard).
+//	login_method (optional) — the method the session was signed in with; it
+//	 decides whether the provider's logout is visited.
 //
 // @route /logout [get].
 func (r *router) logout(ctx *azugo.Context) {
@@ -40,35 +42,24 @@ func (r *router) logout(ctx *azugo.Context) {
 		return
 	}
 
-	// Validate the post-logout redirect_uri against the registered allowlist
-	// BEFORE redirecting — it is reflected in both our 302 and the IdP's
+	// Validate the post-logout redirect_uri against the client's sign-out
+	// landings BEFORE redirecting — it is reflected in both our 302 and the IdP's
 	// redirect_uri bounce, so an unvalidated value is an open redirect
-	// ([RFC 6749 §10.6]).
-	if err := r.Registry().ValidateRedirectURI(clientID, redirectURI); err != nil {
+	// ([RFC 6749 §10.6]); a sign-in return is not a landing
+	// ([OIDC RP-Initiated Logout §3.1]).
+	if err := r.Registry().ValidatePostLogoutURI(clientID, redirectURI); err != nil {
 		ctx.Error(azugo.ParamInvalidError{Name: "redirect_uri", Tag: "registered"})
 
 		return
 	}
 
-	// Resolve the login method + actor from the session (best-effort) and delete
-	// the session so the refresh handle is dead immediately. The session id is
-	// the value the SPA received as `refresh_token` at /token.
 	method := ""
-	actor := ""
-	if sid := ctx.Query.StringOptional("sid"); sid != nil && *sid != "" {
-		if sess, e := r.Session().LoadSession(ctx, *sid); e == nil {
-			method = sess.LoginMethod
-			actor = sess.Subject
-		}
-		_ = r.Session().DeleteSession(ctx, *sid)
-	}
-	// An explicit hint lets the SPA drive federation when it did not keep the sid.
-	if m := ctx.Query.StringOptional("login_method"); m != nil && *m != "" {
+	if m := ctx.Query.StringOptional("login_method"); m != nil {
 		method = *m
 	}
 
 	federated := r.Upstream().FederatedMethod(method)
-	r.Audit().Logout(ctx, actor, method, federated)
+	r.Audit().Logout(ctx, "", method, federated)
 
 	if idpLogout := r.Upstream().LogoutURL(redirectURI); federated && idpLogout != "" {
 		// Front-channel: navigate to the upstream IdP's logout, which clears its

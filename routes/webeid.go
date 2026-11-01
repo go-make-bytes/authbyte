@@ -4,10 +4,15 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gmb-lib/go-authbyte/identitycode"
 	"github.com/go-make-bytes/authbyte/identity"
+	"github.com/go-make-bytes/authbyte/registry"
 	"github.com/go-make-bytes/authbyte/session"
 	"github.com/go-make-bytes/authbyte/webeid"
 
@@ -43,18 +48,6 @@ type webeidLoginResponse struct {
 //
 // @route /webeid/challenge [get].
 func (r *router) webeidChallenge(ctx *azugo.Context) {
-	challenge, err := ctx.Query.String("code_challenge")
-	if err != nil {
-		ctx.Error(err)
-
-		return
-	}
-
-	method := "S256"
-	if m := ctx.Query.StringOptional("code_challenge_method"); m != nil {
-		method = *m
-	}
-
 	redirectURI, err := ctx.Query.String("redirect_uri")
 	if err != nil {
 		ctx.Error(err)
@@ -76,9 +69,35 @@ func (r *router) webeidChallenge(ctx *azugo.Context) {
 		return
 	}
 
+	// The door opens only for a client allowed the card. It is called by the
+	// client's server, so the refusal is an error answer, not a redirect.
+	if client, _ := r.Registry().SignInClient(clientID); !slices.Contains(client.Methods, identity.LoginWebEID) {
+		ctx.Error(corehttp.ForbiddenError{})
+
+		return
+	}
+
+	// PKCE is S256 only, as at /authorize; this door is called by the client's
+	// server, so the refusal is an error answer, not a redirect.
+	challenge, method, ok := s256Challenge(queryParams(ctx))
+	if !ok {
+		ctx.Error(azugo.ParamInvalidError{Name: "code_challenge_method", Tag: "eq=" + pkceS256})
+
+		return
+	}
+
 	spaState := ""
 	if s := ctx.Query.StringOptional("state"); s != nil {
 		spaState = *s
+	}
+
+	// A card sign-in may ask for an ID token as a redirect does: openid in its
+	// scope, with the nonce the token must carry.
+	idAsk, aerr := readIDTokenAsk(queryParams(ctx))
+	if aerr != nil {
+		ctx.Error(azugo.ParamInvalidError{Name: "nonce", Tag: "max=" + strconv.Itoa(maxNonceLen)})
+
+		return
 	}
 
 	nonce, err := webeidNonce()
@@ -96,6 +115,8 @@ func (r *router) webeidChallenge(ctx *azugo.Context) {
 		SPAState:            spaState,
 		ClientID:            clientID,
 		WebEIDNonce:         nonce,
+		OpenID:              idAsk.openID,
+		ClientNonce:         idAsk.nonce,
 	}
 	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
 		ctx.Error(err)
@@ -165,9 +186,12 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 	sess, sid, err := r.establishSession(ctx, flow, id)
 	if err != nil {
 		if flow.StepUp {
-			// err is errStepUpSessionGone or errStepUpMethodMismatch — its message
+			// err is errStepUpSessionGone, errStepUpPersonMismatch or errStepUpMethodMismatch — its message
 			// is the true cause; either way the step-up is unauthorized.
 			r.Audit().StepUpFailure(ctx, id.LoginMethod, err.Error())
+			ctx.Error(corehttp.UnauthorizedError{})
+		} else if errors.Is(err, errMethodNotRequested) {
+			r.Audit().LoginFailure(ctx, "login method not requested: "+id.LoginMethod)
 			ctx.Error(corehttp.UnauthorizedError{})
 		} else {
 			r.Audit().LoginFailure(ctx, "session establishment failed")
@@ -177,23 +201,15 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		return
 	}
 
-	// A card login's capabilities are the card's own authentication
-	// certificate — lifted from the token whose possession the engine just
-	// validated. Seal availability stays unknown (no SealsKnown): this path
-	// never sees the provider's sign-identity profile. Assigned
-	// unconditionally — capabilities describe the CURRENT login method, so a
-	// step-up replaces what the previous login captured.
-	sess.Capabilities = nil
-	var tok struct {
-		UnverifiedCertificate string `json:"unverifiedCertificate"`
-	}
-	if jerr := json.Unmarshal(req.AuthToken, &tok); jerr == nil && tok.UnverifiedCertificate != "" {
-		sess.Capabilities = &session.Capabilities{AuthCertificate: tok.UnverifiedCertificate}
-	}
+	// Assigned unconditionally — capabilities describe the CURRENT login
+	// method, so a step-up replaces what the previous login captured.
+	client, _ := r.Registry().SignInClient(flow.ClientID)
+	sess.Capabilities = cardCapabilities(client, req.AuthToken)
+	// The card signed this sign-in's own challenge just now: the person
+	// authenticated at this moment, by the card's key and its PIN.
+	stampSignIn(flow, sess, time.Now().Unix(), cardAMR)
 
-	if err := r.Session().SaveSession(ctx, sid, sess, sessionTTL); err != nil {
-		ctx.Error(err)
-
+	if !r.saveEstablishedSession(ctx, flow, sid, sess) {
 		return
 	}
 
@@ -205,6 +221,8 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		ClientID:            flow.ClientID,
 		RedirectURI:         flow.AppRedirectURI,
 		Tenant:              flow.Tenant,
+		OpenID:              flow.OpenID,
+		Nonce:               flow.ClientNonce,
 	}, appCodeTTL); err != nil {
 		ctx.Error(err)
 
@@ -217,7 +235,29 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		r.Audit().LoginSuccess(ctx, sess.Subject, sess.LoA, sess.LoginMethod)
 	}
 
+	// The answer carries an authorization code: never kept by a cache.
+	noStore(ctx)
 	ctx.JSON(webeidLoginResponse{Code: appCode, State: flow.SPAState})
+}
+
+// cardCapabilities are a card login's signing capabilities: the card's own
+// authentication certificate, lifted from the token whose possession the engine
+// just validated. Seal availability stays unknown (no SealsKnown): this path
+// never sees the provider's sign-identity profile. Only a signing client's login
+// keeps the certificate; another product's sign-in has no use for it.
+func cardCapabilities(client registry.SignInClient, authToken json.RawMessage) *session.Capabilities {
+	if !client.Signing {
+		return nil
+	}
+
+	var tok struct {
+		UnverifiedCertificate string `json:"unverifiedCertificate"`
+	}
+	if err := json.Unmarshal(authToken, &tok); err != nil || tok.UnverifiedCertificate == "" {
+		return nil
+	}
+
+	return &session.Capabilities{AuthCertificate: tok.UnverifiedCertificate}
 }
 
 // webeidIdentity maps a validated Web eID subject to the platform identity. The

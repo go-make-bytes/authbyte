@@ -7,10 +7,22 @@ import (
 	"github.com/go-quicktest/qt"
 )
 
-// TestApp constructs an App wired for tests. Backing-store clients are created
-// lazily (no dial), so this works without live Redis/PostgreSQL; tests that
-// exercise login/sessions require those services.
+// TestApp constructs an App wired for tests. Backing stores are reached lazily,
+// so this works without a live Valkey or PostgreSQL; a test that exercises
+// login or sessions sets an in-memory session store (SetSessionStore) or names a
+// live Valkey.
 func TestApp(tb testing.TB) *App {
+	tb.Helper()
+
+	app, err := startTestApp(tb)
+	qt.Assert(tb, qt.IsNil(err))
+
+	return app
+}
+
+// startTestApp is TestApp answering what New refuses, for a test of the start's
+// own checks.
+func startTestApp(tb testing.TB) (*App, error) {
 	tb.Helper()
 
 	tb.Setenv("METRICS_ENABLED", "false")
@@ -20,8 +32,9 @@ func TestApp(tb testing.TB) *App {
 	// sibling service.environment and the OTel deployment.environment.
 	tb.Setenv("SERVICE_NAME", "authbyte")
 	tb.Setenv("ENVIRONMENT", "development")
-	tb.Setenv("AUTH_ISSUER_URL", "http://localhost:8080")
-	tb.Setenv("AUTH_USER_AUDIENCE", "portal-api")
+	if os.Getenv("AUTH_ISSUER_URL") == "" {
+		tb.Setenv("AUTH_ISSUER_URL", "http://localhost:8080")
+	}
 	// The eParaksts profile is the default upstream for tests. A test that puts the
 	// generic connector in the environment first (OIDC_UPSTREAM_AUTHORITY_URL, or
 	// the three explicit endpoints) gets that one instead — the service refuses to
@@ -31,11 +44,18 @@ func TestApp(tb testing.TB) *App {
 		tb.Setenv("EPARAKSTS_CLIENT_ID", "test-client")
 	}
 	tb.Setenv("BASE_URL", "http://localhost:8080")
+	// The sign-in limit counts in the application's cache, which tests reach
+	// lazily or not at all; a test of the limit itself names a live Valkey.
+	if os.Getenv("SIGN_IN_RATE_LIMIT") == "" {
+		tb.Setenv("SIGN_IN_RATE_LIMIT", "0")
+	}
 	tb.Setenv("POSTGRES_DSN", "postgres://localhost:5432/authbyte_test?sslmode=disable")
-	tb.Setenv("REDIS_URL", "redis://localhost:6379/0")
+	// The service refuses an in-memory session store, so tests name a Valkey; it
+	// is dialled lazily, and tests that need the store set their own.
+	tb.Setenv("CACHE_TYPE", "redis")
+	if os.Getenv("CACHE_CONNECTION") == "" {
+		tb.Setenv("CACHE_CONNECTION", "redis://localhost:6379/0")
+	}
 
-	app, err := New(nil, "0.0.0-test")
-	qt.Assert(tb, qt.IsNil(err))
-
-	return app
+	return New(nil, "0.0.0-test")
 }

@@ -59,6 +59,10 @@ type Profile struct {
 	FamilyName   string
 	SerialNumber string
 	LoginMethod  string
+	// Email is the address a directory sign-in sent ("" when none). The store
+	// keeps only an address-shaped value, and none at all for a person who holds
+	// a national identity code; it never refuses a login over it.
+	Email string
 }
 
 // Mapping is an identity row as returned by identity.get.
@@ -147,14 +151,7 @@ func (s *Store) call(ctx context.Context, proc string, in any) (json.RawMessage,
 // event (identity created vs updated); adding a new method to a known person is an
 // update. Implemented via the identity.upsert procedure (no direct table access).
 func (s *Store) EnsureMapping(ctx context.Context, idpSubject string, p Profile) (string, bool, error) {
-	data, err := s.call(ctx, "identity.upsert", map[string]any{
-		"idp_sub":       idpSubject,
-		"name":          p.Name,
-		"given_name":    p.GivenName,
-		"family_name":   p.FamilyName,
-		"serial_number": p.SerialNumber, // the national id — the person key
-		"login_method":  p.LoginMethod,
-	})
+	data, err := s.call(ctx, "identity.upsert", upsertInput(idpSubject, p))
 	if err != nil {
 		return "", false, err
 	}
@@ -168,6 +165,19 @@ func (s *Store) EnsureMapping(ctx context.Context, idpSubject string, p Profile)
 	}
 
 	return res.InternalSub, res.Created, nil
+}
+
+// upsertInput is the identity.upsert request for one login.
+func upsertInput(idpSubject string, p Profile) map[string]any {
+	return map[string]any{
+		"idp_sub":       idpSubject,
+		"name":          p.Name,
+		"given_name":    p.GivenName,
+		"family_name":   p.FamilyName,
+		"serial_number": p.SerialNumber, // the national id — the person key
+		"login_method":  p.LoginMethod,
+		"email":         p.Email,
+	}
 }
 
 // Registration is a person an administrator registers before their first login:
@@ -222,4 +232,36 @@ func (s *Store) Get(ctx context.Context, internalSubject string) (Mapping, error
 	}
 
 	return m, nil
+}
+
+// SignInLine is what the identity store knows about how one person can sign in:
+// whether they hold a credential, the email a directory sign-in left (only when
+// kept) and, for a person who holds a national identity code, the country and
+// the length of the code as it is displayed. It never carries the code itself.
+type SignInLine struct {
+	Sub     string `json:"sub"`
+	SignsIn bool   `json:"signsIn"`
+	Email   string `json:"email,omitempty"`
+	Country string `json:"country,omitempty"`
+	Length  int    `json:"length,omitempty"`
+}
+
+// SignInLines reads the sign-in lines of the given persons (bare person ids,
+// at most 500) via the identity.sign_in_lines procedure. A person the store does
+// not know is left out of the answer. The procedure refuses a malformed id with
+// a ProcedureError whose Code is "identity:invalid".
+func (s *Store) SignInLines(ctx context.Context, subs []string) ([]SignInLine, error) {
+	data, err := s.call(ctx, "identity.sign_in_lines", map[string]any{"subs": subs})
+	if err != nil {
+		return nil, err
+	}
+
+	var res struct {
+		Lines []SignInLine `json:"lines"`
+	}
+	if err := json.Unmarshal(data, &res); err != nil {
+		return nil, fmt.Errorf("store: sign-in lines: decode: %w", err)
+	}
+
+	return res.Lines, nil
 }
