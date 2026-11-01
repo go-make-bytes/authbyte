@@ -3,6 +3,28 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.4.0
+
+### Changed — the ID card is read on this service's own sign-in page
+
+- **The card is a way on the sign-in page**, as **eID**, where the deployment reads cards (`WEBEID_ENGINE_URL`) and
+  the client's registration lists `webEid`, in the registration's order. A request naming `webEid` in `acr_values`
+  is shown the page with the ways it names; the card is read when the person presses its button.
+- **The page reads the card itself:** it is shown with a challenge tied to the browser; its own script
+  (`/signin/card.js`) has the Web eID library (`/signin/web-eid.js`, 2.1.0, MIT, its licence in its header) ask the
+  card to sign it, and posts the answer to the new `POST /authorize/card`, which needs the browser's binding cookie,
+  the page's token and this service's `Origin`, has the engine check the token, and sends the browser back to the
+  client with a code. Missing card software, a card that does not complete, and a browser running no script each get
+  their message on the page.
+- **The policy allows script from this service's own files:** `script-src 'self'`; nothing inline.
+  On a page that carries the card, `form-action` also names the origin of the client's `redirect_uri`: the card's
+  answer returns there with a redirect, which Chromium and WebKit refuse to follow from a form whose policy does not
+  name it.
+- **Removed: `GET /webeid/challenge`**, the server-to-server start of a card sign-in. **`POST /webeid/login`** now
+  completes a card step-up only; a sign-in flow is refused there.
+- **Callers to move:** an application that read the card on its own page starts a redirect sign-in naming `webEid`
+  instead. The web-eid engine's `WEBEID_ORIGIN` names this service's own public origin.
+
 ## v0.3.0
 
 ### Added — this service's own sign-in page, for a request that names no way in

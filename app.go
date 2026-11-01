@@ -7,6 +7,7 @@ package authbytecore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -69,7 +70,10 @@ type App struct {
 
 	// Web eID card-login adapter (calls the engine's stateless validate). Set
 	// only when WEBEID_ENGINE_URL is configured.
-	webeid *webeid.Adapter
+	webeid CardValidator
+
+	// identities replaces the store's person mapping in tests; nil in service.
+	identities IdentityMapper
 
 	// Membership scope resolver: when set (ROLEBYTE_URL configured), user
 	// tokens carry the register-resolved scopes instead of the static
@@ -102,6 +106,19 @@ type ScopeResolver interface {
 	// directory to the register's admission door; true when a membership was
 	// created or activated by the call.
 	Admit(ctx *azugo.Context, subjectKey string, login rolebyte.DirectoryLogin) (bool, error)
+}
+
+// IdentityMapper keeps the one internal subject each person has, keyed by the
+// subject their sign-in proved. Implemented by the identity store.
+type IdentityMapper interface {
+	EnsureMapping(ctx context.Context, idpSubject string, p store.Profile) (string, bool, error)
+}
+
+// CardValidator checks a Web eID authentication token against the challenge it
+// answers and names the card's holder. Implemented by webeid.Adapter, which asks
+// the web-eid engine.
+type CardValidator interface {
+	Validate(ctx *azugo.Context, authToken json.RawMessage, nonce string) (*webeid.Subject, error)
 }
 
 // SessionStore keeps what a sign-in carries between requests: the login flows in
@@ -449,7 +466,7 @@ func (a *App) Store() *store.Store               { return a.store }
 func (a *App) AuthClient() *authclient.Client    { return a.authClient }
 func (a *App) Replay() replay.Store              { return a.replay }
 func (a *App) Audit() *audit.Recorder            { return a.audit }
-func (a *App) WebEID() *webeid.Adapter           { return a.webeid }
+func (a *App) WebEID() CardValidator             { return a.webeid }
 
 // ScopeResolver returns the membership scope resolver, or nil when user
 // tokens carry the static baseline scopes.
@@ -466,6 +483,22 @@ func (a *App) SetSessionStore(s SessionStore) { a.session = s }
 
 // SetReplay overrides the DPoP proof replay store (test use only).
 func (a *App) SetReplay(s replay.Store) { a.replay = s }
+
+// SetWebEID overrides the card validator (test use only).
+func (a *App) SetWebEID(v CardValidator) { a.webeid = v }
+
+// Identities is where a sign-in finds the person's internal subject: the
+// identity store, unless a test set its own.
+func (a *App) Identities() IdentityMapper {
+	if a.identities != nil {
+		return a.identities
+	}
+
+	return a.store
+}
+
+// SetIdentities overrides where a sign-in finds the person (test use only).
+func (a *App) SetIdentities(m IdentityMapper) { a.identities = m }
 
 // signInTokenTTL is how long a sign-in door token lives: one call, retries included.
 const signInTokenTTL = time.Minute

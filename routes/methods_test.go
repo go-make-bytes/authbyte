@@ -130,15 +130,23 @@ func cardChallenge(t *testing.T, app *azugo.TestApp, clientID, redirectURI strin
 	return resp.StatusCode()
 }
 
-// Case 35: the card door opens only for a client allowed the card; for another
-// it is refused before a flow is stored.
-func TestTheCardDoorOpensOnlyForAClientAllowedTheCard(t *testing.T) {
+// Case 35: the card is read on this service's own page now, offered only to a
+// client allowed the card; the server-to-server door that began a card sign-in
+// is gone, for every client.
+func TestTheCardIsOfferedOnlyToAClientAllowedIt(t *testing.T) {
 	app, mem := methodsApp(t)
 
-	qt.Check(t, qt.Equals(cardChallenge(t, app, "mobile-only", mobileReturn), fasthttp.StatusForbidden))
+	for _, c := range []struct{ client, ret string }{{"mobile-only", mobileReturn}, {"card-only", cardReturn}} {
+		qt.Check(t, qt.Equals(cardChallenge(t, app, c.client, c.ret), fasthttp.StatusNotFound), qt.Commentf("%s", c.client))
+	}
 	qt.Check(t, qt.Equals(flowCount(mem), 0))
 
-	qt.Check(t, qt.Equals(cardChallenge(t, app, "card-only", cardReturn), fasthttp.StatusOK))
+	mobile := showPage(t, app.TestClient(), pageQuery("mobile-only", mobileReturn))
+	qt.Check(t, qt.Not(qt.StringContains(mobile.body, `id="card"`)))
+	qt.Check(t, qt.Equals(flowCount(mem), 0))
+
+	card := showPage(t, app.TestClient(), pageQuery("card-only", cardReturn))
+	qt.Check(t, qt.DeepEquals(ways(card.body), []string{identity.LoginWebEID}))
 	qt.Check(t, qt.Equals(flowCount(mem), 1))
 }
 

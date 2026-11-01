@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
 <link rel="stylesheet" href="/signin/style.css">
+{{- if .Card}}
+<script type="module" src="/signin/card.js"></script>
+{{- end}}
 </head>
 <body>
 {{- if .Languages}}
@@ -32,9 +35,16 @@
 <form class="waylist" method="post" action="{{.Action}}">
 <input type="hidden" name="csrf" value="{{.Token}}">
 {{- range $i, $w := .Ways}}
-<button class="btn{{if eq $i 0}} pri{{end}}" type="submit" name="way" value="{{$w.Code}}">{{$w.Name}}</button>
+<button class="btn{{if eq $i 0}} pri{{end}}" type="submit" name="way" value="{{$w.Code}}"{{if eq $w.Code "webEid"}} data-card{{end}}>{{$w.Name}}</button>
 {{- end}}
 </form>
+{{- with .Card}}
+<form id="card" method="post" action="{{.Action}}" data-nonce="{{.Nonce}}" data-waiting="{{$.Words.Waiting}}" data-failed="{{$.Words.CardFailed}}" data-missing-title="{{$.Words.MissingTitle}}" data-missing-lead="{{$.Words.MissingLead}}" data-missing-action="{{$.Words.MissingAction}}" data-missing-href="{{$.SoftwareURL}}">
+<input type="hidden" name="csrf" value="{{$.Token}}">
+<input type="hidden" name="state" value="{{.State}}">
+<input type="hidden" name="token" value="">
+</form>
+{{- end}}
 <p class="hint">{{range $i, $w := .Ways}}{{if $i}} {{end}}{{$w.Hint}}{{end}}</p>
 {{- end}}
 {{- if .Operator}}
