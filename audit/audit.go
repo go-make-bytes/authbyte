@@ -101,6 +101,39 @@ func (r *Recorder) Logout(ctx *azugo.Context, actorID, method string, federated 
 		actorRef(actorID, "user", ""), attrs)
 }
 
+// SharedSessionCreated records a sign-in that made, or renewed, the browser's
+// shared session for the person.
+func (r *Recorder) SharedSessionCreated(ctx *azugo.Context, actorID, method string) {
+	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeSuccess,
+		actorRef(actorID, "user", ""), map[string]any{secevents.AttrKind: "shared_session_created", secevents.AttrMethod: method})
+}
+
+// SharedSessionReused records an app signed in from the browser's shared
+// session, with no page shown.
+func (r *Recorder) SharedSessionReused(ctx *azugo.Context, actorID, clientID, method string) {
+	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeSuccess,
+		actorRef(actorID, "user", ""), map[string]any{
+			secevents.AttrKind: "shared_session_reused", secevents.AttrMethod: method, "client": clientID,
+		})
+}
+
+// SharedSessionRefused records an app the browser's live shared session could
+// not answer, and why (way, age, identity, membership, register); the person is
+// asked to sign in instead. It names no person.
+func (r *Recorder) SharedSessionRefused(ctx *azugo.Context, clientID, reason string) {
+	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeFailure,
+		actorRef("", "user", ""), map[string]any{
+			secevents.AttrKind: "shared_session_refused", secevents.AttrReason: reason, "client": clientID,
+		})
+}
+
+// SharedSessionEnded records the browser's shared session ended, and why
+// (another person signed in, or a sign-out).
+func (r *Recorder) SharedSessionEnded(ctx *azugo.Context, actorID, reason string) {
+	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeSuccess,
+		actorRef(actorID, "user", ""), map[string]any{secevents.AttrKind: "shared_session_ended", secevents.AttrReason: reason})
+}
+
 func (r *Recorder) auth(ctx *azugo.Context, actorID, loa, method string, outcome broker.Outcome, reason string) {
 	sev := secevents.SeverityInfo
 	if outcome != broker.OutcomeSuccess {

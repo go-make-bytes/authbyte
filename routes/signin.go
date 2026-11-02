@@ -292,6 +292,12 @@ func (r *router) choose(ctx *azugo.Context) {
 	if !ok {
 		return
 	}
+	// A request that may show no page was never shown one.
+	if req.signAsk.none {
+		r.refuseAtClient(ctx, req, "login_required", "the person must sign in")
+
+		return
+	}
 	// The page is shown only for a request that names no way, or names the card.
 	ways, page := pageWays(req, r.offered(req.client))
 	if !page {
@@ -363,6 +369,11 @@ func (r *router) cardAnswer(ctx *azugo.Context) {
 
 	req, ok := r.readAuthorize(ctx, queryParams(ctx))
 	if !ok {
+		return
+	}
+	if req.signAsk.none {
+		r.refuseAtClient(ctx, req, "login_required", "the person must sign in")
+
 		return
 	}
 	if ways, page := pageWays(req, r.offered(req.client)); !page || !slices.Contains(ways, identity.LoginWebEID) {

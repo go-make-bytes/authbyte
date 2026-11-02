@@ -133,6 +133,9 @@ type Session struct {
 	// SID is the session's public name in ID tokens: a value of its own, never
 	// the session's key or its refresh token.
 	SID string `json:"sid,omitempty"`
+	// Shared is the id of the browser's shared session this session was signed
+	// in under, so that ending this one ends that too.
+	Shared string `json:"shared,omitempty"`
 }
 
 // Expired reports whether the session's lifetime has run out at now. A session

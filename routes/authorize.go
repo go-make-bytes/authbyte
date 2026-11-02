@@ -64,6 +64,17 @@ func (r *router) authorize(ctx *azugo.Context) {
 		return
 	}
 
+	// A person already signed in in this browser, whom the request fits, is
+	// answered with no page [OIDC Core §3.1.2.3].
+	if r.answerFromShared(ctx, req) {
+		return
+	}
+	if req.signAsk.none {
+		r.refuseAtClient(ctx, req, "login_required", "the person must sign in")
+
+		return
+	}
+
 	binding := bindBrowser(ctx)
 	if _, page := pageWays(req, r.offered(req.client)); page {
 		r.showPage(ctx, req, binding, takeNotice(ctx))
@@ -71,6 +82,12 @@ func (r *router) authorize(ctx *azugo.Context) {
 		return
 	}
 	r.startProvider(ctx, req, req.named, binding, req.signAsk.uiLocales, false)
+}
+
+// refuseAtClient answers req at the client's own, validated address with code,
+// as [OIDC Core §3.1.2.6] codes are answered.
+func (r *router) refuseAtClient(ctx *azugo.Context, req *authorizeRequest, code, description string) {
+	ctx.RedirectUnsafe(appendErrorState(req.redirectURI, r.issuerID(), code, description, req.spaState))
 }
 
 // readAuthorize checks an authorization request. What names no client or
@@ -386,7 +403,7 @@ func (r *router) callback(ctx *azugo.Context) {
 	// provider named that are registered ones; nothing authbyte did not see.
 	stampSignIn(sess, authTime, registeredAMR(info.AMR))
 
-	if !r.saveEstablishedSession(ctx, sid, sess) {
+	if !r.saveSignedIn(ctx, flow.ClientID, sid, sess) {
 		return
 	}
 
@@ -457,14 +474,24 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 	}, randomToken(24), nil
 }
 
-// saveEstablishedSession stores a sign-in's new session, given its whole
-// lifetime from now. ok is false when the answer is already written.
-func (r *router) saveEstablishedSession(ctx *azugo.Context, sid string, sess *session.Session) bool {
+// saveSignedIn makes a completed sign-in the browser's shared session and stores
+// its new app session for client, given its whole lifetime from now. ok is false
+// when the answer is already written.
+func (r *router) saveSignedIn(ctx *azugo.Context, client, sid string, sess *session.Session) bool {
+	shared, until, err := r.joinShared(ctx, sess)
+	if err != nil {
+		ctx.Error(err)
+
+		return false
+	}
+	sess.Shared = shared
+
 	if err := r.Session().CreateSession(ctx, sid, sess, r.Config().SessionTTL); err != nil {
 		ctx.Error(err)
 
 		return false
 	}
+	r.addSharedApp(ctx, shared, until, client, sid)
 
 	return true
 }

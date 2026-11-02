@@ -193,6 +193,39 @@ A request to `/authorize` that names no way in (`acr_values` absent) is shown th
 | `SIGN_IN_RATE_LIMIT` | `60` | Sign-in requests one client address may make per window; `0` turns the limit off |
 | `SIGN_IN_RATE_WINDOW` | `1m` | The window |
 
+## Single sign-on
+
+Every completed sign-in, by the card on the page or through the provider, makes the browser's **shared session**: an
+http-only cookie `__Host-authbyte_sso` (the plain name only in development over HTTP), Secure, `SameSite=Lax`, for the
+session's whole life, naming a record of the person and each way they signed in with. The cache keeps only the hash of
+the cookie's secret, and the secret is replaced at every sign-in.
+
+A client whose registration says `single_sign_on: true` is answered from it with no page: `/authorize` sends the
+browser straight back with a code when the shared session fits the request, and otherwise goes on as without one.
+
+| The request is answered from the shared session when | Source |
+|---|---|
+| it has no `prompt=login` or `prompt=select_account`, and no `max_age=0`; a `max_age` covers the way's `auth_time` | OIDC Core §3.1.2.1, §3.1.2.3 |
+| a way the person signed in with is one the client allows, and one `acr_values` names when it names any (the most recent such way) | this service's method names |
+| the client's tokens carry no identity code, or the person has one | the client's `claims` |
+| the client requires no membership, or the register already holds one for the person (read only; no admission) | the client's `membership_required` |
+
+The answer is a new session: its own refresh token and `sid`; its ID token states the way it rests on (`acr`, `amr`)
+and that sign-in's `auth_time`; it ends when that way ends, never later. No tenant is kept on the shared session: an
+organisation is chosen per session, at its token issue. `prompt=none` is answered the same way, or `login_required` at
+the client.
+
+- **One person per browser.** Another person signing in in the same browser ends the earlier shared session and every
+  session signed in under it; their refresh tokens are refused from then on. The same client signing in again in a
+  browser ends its own earlier session there.
+- **Signing out.** `POST /revoke` of a session ends the shared session it was signed in under, and `GET /logout` ends
+  the one its cookie names and clears the cookie, so no app is answered from it again. Sessions of other clients signed
+  in under it are not ended by this.
+- **A signing client cannot be single sign-on** (the registry refuses both on one row): a signing session's identities
+  are read from the provider at a sign-in.
+- **Security events:** kind `shared_session_created`, `shared_session_reused` (with the client),
+  `shared_session_refused` (with the client and why) and `shared_session_ended` (with why).
+
 ## Architecture
 
 One application object (`App` in [`app.go`](app.go)) wires every dependency once at startup and **fails closed** on misconfiguration — a missing token-signing key without the explicit development opt-in stops the process from starting, as does an unparseable client registry (an unknown key included, so a misspelling cannot load as an absent setting) or an invalid audit configuration. Cross-cutting concerns (structured logging + redaction, tracing, correlation) are installed exactly once by the platform library before any route is registered; nothing re-registers them.
@@ -329,7 +362,7 @@ All tokens are ES256 JWTs (RFC 7519) minted in `issuer/`. Access tokens are type
 
 **ID tokens (OpenID Connect Core 1.0).** A sign-in whose `/authorize` asked `scope=openid` gets an ID token at its code exchange, typed `JWT` and unbound: `iss`, `sub`, `aud` (the client alone, as a string), `iat`, `exp`, the client's `nonce` when it sent one, `auth_time` when it is known (a card sign-in, a provider that states it, or a sign-in the provider was made to repeat by `prompt=login` or `max_age`), `acr` (the method met, in this server's method names), `amr` (registered RFC 8176 means only; a card's are `hwk`, `mfa`, `pin`, `sc`) and `sid`, a public session name that is neither the refresh token nor the session's key. Nothing personal beyond the subject, and no `azp`. Refresh, client credentials and token exchange answer none. **ES256 only:** the standard asks an OpenID provider to support RS256 too; this server holds one EC key, and every client it serves checks ES256. A sign-in client's `client_id` may not also be an audience a door accepts, or its ID tokens would be accepted there.
 
-**What `/authorize` reads beyond OAuth.** `acr_values` names methods in this server's own names (a provider's code is refused) and the provider is sent its own code for each. `prompt=none` answers `login_required` (no browser session is held); `consent` answers `consent_required`; `login` and `select_account` reach the provider. `max_age` makes the provider sign the person in again and refuses a sign-in older than it; a provider time from before the request refuses a sign-in it was made to repeat. `request`, `request_uri` and `id_token_hint` are refused. Every return to the client through the browser, code or error, carries `iss` (RFC 9207); the issuer is `AUTH_ISSUER_URL` without a trailing slash, the same string everywhere. Token, identity and card-login answers carry `Cache-Control: no-store`.
+**What `/authorize` reads beyond OAuth.** `acr_values` names methods in this server's own names (a provider's code is refused) and the provider is sent its own code for each. `prompt=none` is answered from the browser's shared session when it fits (see Single sign-on), else `login_required`; `consent` answers `consent_required`; `login` and `select_account` are never answered from the shared session and reach the provider. A `max_age` the shared session cannot meet makes the provider sign the person in again and refuses a sign-in older than it; a provider time from before the request refuses a sign-in it was made to repeat. `request`, `request_uri` and `id_token_hint` are refused. Every return to the client through the browser, code or error, carries `iss` (RFC 9207); the issuer is `AUTH_ISSUER_URL` without a trailing slash, the same string everywhere. Token, identity and card-login answers carry `Cache-Control: no-store`.
 
 | Token | Grant | Subject | Carries |
 |---|---|---|---|
@@ -360,6 +393,8 @@ The shared cache (Valkey or Redis, `CACHE_*`) holds only short-lived auth-flow a
 | `sessions:{sid}` | user session (subject, loa, method, scopes, DPoP thumbprint, the end of its lifetime, signing capabilities) | `SESSION_TTL` from the sign-in | created with `SET … NX`; every later save is `SET … XX` for what is left of its lifetime, so a session ended meanwhile stays ended and nothing extends it. `sid` never leaves the service. Capabilities hold identity certificates (personal data) — session-bound by design, never logged |
 | `refresh:{hash}` | the session id and the client a refresh token was issued to | the session's remaining lifetime | keyed by the SHA-256 of the token; the token itself is never stored. Deleted at `/revoke` |
 | `dpop-proofs:{jti}` | seen DPoP proof ids | proof max-age + leeway | `SET … NX`: one-time-use across every instance |
+| `shared:{id}` | a browser's shared session: the person (subject, names, identity code, directory), each way they signed in with (method, level, `auth_time`, `amr`, its end), the hash of the cookie's secret | until its last way ends (`SESSION_TTL` after that way's sign-in) | created with `SET … NX`; a sign-in by the same person rewrites it with `SET … XX`; no tenant is kept on it |
+| `shared-apps:{id}` | the sessions signed in under a shared session, by client | the shared session's end | written by one script that answers the client's earlier session, which is then ended; deleted with the shared session |
 
 A cache span in a trace is named by its operation and instance (`GET sessions`) and never by its key, because every key here is a session id, a token hash, a code, a login state or a proof id. Sessions and flows held under the earlier key layout (`flow:`, `code:`, `sess:`) are not read: taking this version signs everyone out once.
 
@@ -532,6 +567,7 @@ sign_in_clients:
     claims: [name, given_name, family_name, serial_number]   # the personal claims its tokens carry
     methods: [eparakstsMobile, eidScan, webEid]               # the sign-in methods it allows
     signing: true                 # told the signing flows; its sign-ins capture signing identities
+    single_sign_on: false         # true: answered from the browser's shared session (never with signing: true)
     client_name: Example Portal   # kept for a hosted sign-in page; nothing shows it yet
     logo_uri: https://portal.example/logo.svg
     redirect_uris: [https://portal.example/callback]

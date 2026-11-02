@@ -3,6 +3,41 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.6.0
+
+### Added — single sign-on: a browser that has signed in signs the next app in without a page
+
+- **Every completed sign-in makes the browser's shared session:** a cookie `__Host-authbyte_sso` (the plain name only
+  in development over HTTP), http-only, Secure, `SameSite=Lax`, for the session's whole life. It holds the shared
+  session's id and a secret; the cache keeps only the secret's hash, and the secret is replaced at every sign-in, so a
+  value the browser held before a sign-in names nothing after it.
+- **A client opts in with `single_sign_on: true`** in its registration (off unless set). Such a client's
+  `/authorize` is answered straight back to it with a code, and no page, when the browser's shared session fits the
+  request: no `prompt=login` or `prompt=select_account`, no `max_age=0` (a `max_age` must cover the way's
+  `auth_time`); a way the person signed in with that the client allows, and that `acr_values` names when it names
+  any; the identity code where the client's tokens carry it; and, for a client that requires a membership, a
+  membership the register already holds for the person (read only; nobody is admitted this way). Anything else goes
+  on as before. The answer is a new session of its own: its own refresh token and `sid`, the ID token's `auth_time`
+  that of the sign-in it rests on, and an end no later than that sign-in's.
+- **`prompt=none`** is answered from the shared session when it fits, and `login_required` at the client otherwise.
+- **A client that signs cannot be single sign-on:** the registry refuses `signing: true` with
+  `single_sign_on: true` on one row, because a signing session's identities are read from the provider at a sign-in.
+- **One person per browser:** another person's sign-in in the same browser ends the earlier shared session and every
+  session signed in under it, whose refresh tokens are refused from then on. The same client signing in again in a
+  browser ends its own earlier session there.
+- **Signing out ends the shared session:** `POST /revoke` of a session ends the shared session it was signed in
+  under, and the browser's `GET /logout` ends the one its cookie names and clears the cookie, so the next app shows
+  the page again. The other sessions signed in under it are not ended by this release.
+- **Security events:** authentication events of kind `shared_session_created`, `shared_session_reused` (naming the
+  client), `shared_session_refused` (naming the client and why: way, age, identity, membership, register) and
+  `shared_session_ended` (why: another person, sign-out). None names the identity code or a name.
+- **New cache keys:** `shared:{id}` and `shared-apps:{id}` (see the state table in the README).
+
+### Fixed
+
+- **`secret_ref: file:/path` reads the secret from the file at that path**, as the settings table says. It used to
+  read a variable named after the text, found nothing, and fell through to the derived name.
+
 ## v0.5.0
 
 ### Removed — the step-up (breaking change)

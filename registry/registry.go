@@ -98,6 +98,11 @@ type SignInClient struct {
 	// a login method permits, and a sign-in through it captures the person's
 	// signing identities.
 	Signing bool `yaml:"signing"`
+	// SingleSignOn lets the client be answered from the browser's shared session,
+	// with no page, when that session fits its request. Off unless set. Every
+	// sign-in joins the shared session whatever this says; it decides only the
+	// answering.
+	SingleSignOn bool `yaml:"single_sign_on"`
 	// ClientName and LogoURI name the client to the person on the sign-in page.
 	ClientName string `yaml:"client_name"`
 	LogoURI    string `yaml:"logo_uri"`
@@ -265,6 +270,11 @@ func validateSignInClient(c SignInClient) error {
 	// The baseline is minted only to people no membership is asked about.
 	if len(c.BaselineScopes) > 0 && c.MembershipRequired != nil && *c.MembershipRequired {
 		return bad("requires a membership, so its baseline_scopes could never apply")
+	}
+	// A signing session's identities are read from the provider at a sign-in; an
+	// answer from the shared session has no provider to read them from.
+	if c.Signing && c.SingleSignOn {
+		return bad("signs, so it cannot be single_sign_on: its signing identities are read at a sign-in")
 	}
 	for _, claim := range c.Claims {
 		if !slices.Contains(knownClaims, claim) {

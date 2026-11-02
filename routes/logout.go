@@ -53,6 +53,12 @@ func (r *router) logout(ctx *azugo.Context) {
 		return
 	}
 
+	// The browser's shared session ends with its sign-out, and its cookie goes.
+	if id, sh := r.browserShared(ctx); sh != nil {
+		r.signOutShared(ctx, id)
+		clearCookie(ctx, sharedCookie)
+	}
+
 	method := ""
 	if m := ctx.Query.StringOptional("login_method"); m != nil {
 		method = *m

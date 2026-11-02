@@ -185,6 +185,9 @@ func (r *router) revoke(ctx *azugo.Context) {
 
 		return
 	}
+	// Nothing more is answered from the browser's shared session it came from:
+	// signing out here never signs straight back in elsewhere.
+	r.signOutShared(ctx, sess.Shared)
 
 	r.Audit().SessionEnded(ctx, sess.Subject, sess.LoginMethod)
 	ctx.StatusCode(fasthttp.StatusOK)

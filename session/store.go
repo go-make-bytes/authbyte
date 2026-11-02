@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"azugo.io/core/cache"
@@ -18,7 +19,20 @@ const (
 	codeInstance    = "codes"
 	sessionInstance = "sessions"
 	refreshInstance = "refresh"
+	// sharedInstance keeps the browsers' shared sessions, and sharedAppsInstance
+	// the app sessions signed in under each: a hash of client id to session id.
+	sharedInstance     = "shared"
+	sharedAppsInstance = "shared-apps"
 )
+
+// putSharedApp records an app session under a shared session in one step,
+// answering the session the same client had there before ("" when none), so two
+// sign-ins at once neither lose a client nor leave an earlier session unnamed.
+const putSharedApp = `local o = redis.call('HGET', KEYS[1], ARGV[1])
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+if o then return o end
+return ''`
 
 // Store keeps flows, application codes, sessions and refresh grants in the
 // application's shared cache, so they survive a restart and are shared by every
@@ -30,6 +44,7 @@ type Store struct {
 	codes    cache.Instance[*AppCode]
 	sessions cache.Instance[*Session]
 	refresh  cache.Instance[*RefreshGrant]
+	shared   cache.Instance[*Shared]
 	now      func() time.Time
 }
 
@@ -60,12 +75,18 @@ func New(c *cache.Cache) (*Store, error) {
 		return nil, err
 	}
 
+	shared, err := cache.Create[*Shared](c, sharedInstance)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Store{
 		cache:    c,
 		flows:    flows,
 		codes:    codes,
 		sessions: sessions,
 		refresh:  refresh,
+		shared:   shared,
 		now:      time.Now,
 	}, nil
 }
@@ -215,6 +236,113 @@ func (s *Store) LoadRefresh(ctx context.Context, key string) (*RefreshGrant, err
 // DeleteRefresh removes the refresh grant kept under key.
 func (s *Store) DeleteRefresh(ctx context.Context, key string) error {
 	return s.refresh.Delete(ctx, key)
+}
+
+// CreateShared stores a new shared session until its ExpiresAt. It never writes
+// over one that exists.
+func (s *Store) CreateShared(ctx context.Context, id string, sh *Shared) error {
+	left := sh.ExpiresAt.Sub(s.now())
+	if left <= 0 {
+		return ErrNotFound
+	}
+
+	added, err := s.shared.Add(ctx, id, sh, cache.TTL[*Shared](left))
+	if err != nil {
+		return err
+	}
+	if !added {
+		return errors.New("session: a shared session with this id exists")
+	}
+
+	return nil
+}
+
+// ReplaceShared writes sh over the live shared session id until sh's ExpiresAt.
+// It writes only over one that still exists (SET … XX, one step), so a shared
+// session ended while a sign-in was saving it stays ended.
+func (s *Store) ReplaceShared(ctx context.Context, id string, sh *Shared) error {
+	left := sh.ExpiresAt.Sub(s.now())
+	if left <= 0 {
+		return ErrNotFound
+	}
+
+	con := s.cache.Connection()
+	if con == nil {
+		return cache.ErrCacheUnavailable
+	}
+
+	b, err := json.Marshal(sh)
+	if err != nil {
+		return err
+	}
+
+	cmd := con.B().Set().Key(s.key(sharedInstance, id)).Value(string(b)).Xx().Px(left).Build()
+
+	err = con.Do(ctx, cmd).Error()
+	if valkey.IsValkeyNil(err) {
+		return ErrNotFound
+	}
+
+	return err
+}
+
+// LoadShared loads a live shared session.
+func (s *Store) LoadShared(ctx context.Context, id string) (*Shared, error) {
+	sh, err := s.shared.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if sh == nil || sh.Expired(s.now()) {
+		return nil, ErrNotFound
+	}
+
+	return sh, nil
+}
+
+// PutSharedApp records sid as client's app session under the shared session id
+// until until, and answers the session that client had there before ("" when
+// none).
+func (s *Store) PutSharedApp(ctx context.Context, id, client, sid string, until time.Time) (string, error) {
+	left := until.Sub(s.now())
+	if left <= 0 {
+		return "", ErrNotFound
+	}
+
+	con := s.cache.Connection()
+	if con == nil {
+		return "", cache.ErrCacheUnavailable
+	}
+
+	cmd := con.B().Eval().Script(putSharedApp).Numkeys(1).Key(s.key(sharedAppsInstance, id)).
+		Arg(client, sid, strconv.FormatInt(left.Milliseconds(), 10)).Build()
+
+	return con.Do(ctx, cmd).ToString()
+}
+
+// SharedApps answers the app sessions signed in under the shared session id, by
+// client.
+func (s *Store) SharedApps(ctx context.Context, id string) (map[string]string, error) {
+	con := s.cache.Connection()
+	if con == nil {
+		return nil, cache.ErrCacheUnavailable
+	}
+
+	return con.Do(ctx, con.B().Hgetall().Key(s.key(sharedAppsInstance, id)).Build()).AsStrMap()
+}
+
+// EndShared removes the shared session id and its list of app sessions. The app
+// sessions themselves are the caller's to end.
+func (s *Store) EndShared(ctx context.Context, id string) error {
+	if err := s.shared.Delete(ctx, id); err != nil {
+		return err
+	}
+
+	con := s.cache.Connection()
+	if con == nil {
+		return cache.ErrCacheUnavailable
+	}
+
+	return con.Do(ctx, con.B().Del().Key(s.key(sharedAppsInstance, id)).Build()).Error()
 }
 
 // Ping verifies the cache can be reached.

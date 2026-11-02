@@ -66,7 +66,7 @@ func (r *router) completeCard(ctx *azugo.Context, flow *session.Flow, authToken 
 	// authenticated at this moment, by the card's key and its PIN.
 	stampSignIn(sess, time.Now().Unix(), cardAMR)
 
-	if !r.saveEstablishedSession(ctx, sid, sess) {
+	if !r.saveSignedIn(ctx, flow.ClientID, sid, sess) {
 		return "", errCardAnswered
 	}
 

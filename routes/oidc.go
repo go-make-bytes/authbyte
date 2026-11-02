@@ -69,9 +69,14 @@ func readIDTokenAsk(p authParams) (idTokenAsk, *authError) {
 // signInAsk is what an authorization request asks of the sign-in itself.
 type signInAsk struct {
 	// forcedLogin asks the provider to sign the person in again: prompt=login,
-	// or any max_age, since authbyte holds no session of its own to measure an
-	// age against and cannot read how old the provider's is.
+	// or any max_age. A request that reaches the provider was not answered from
+	// the browser's shared session, and authbyte cannot read how old the
+	// provider's own session is.
 	forcedLogin bool
+	// login is prompt=login: the person signs in again whatever the browser's
+	// shared session holds. none is prompt=none: no page may be shown, so the
+	// request is answered from the shared session or refused.
+	login, none bool
 	// selectAccount passes prompt=select_account on: the accounts are the
 	// provider's.
 	selectAccount bool
@@ -116,15 +121,16 @@ func readSignInAsk(p authParams) (signInAsk, *authError) {
 			if len(values) > 1 {
 				return ask, &authError{"invalid_request", "prompt none cannot be combined with another value"}
 			}
-			// authbyte holds no browser session, so no sign-in can be
-			// answered without showing the person a page.
-			return ask, &authError{"login_required", "the person must sign in"}
+			// Answered from the browser's shared session, or refused where it
+			// cannot be: never a page.
+			ask.none = true
 		}
 		if slices.Contains(values, "consent") {
 			return ask, &authError{"consent_required", "this server shows no consent page"}
 		}
 		if slices.Contains(values, "login") {
 			ask.forcedLogin = true
+			ask.login = true
 		}
 		ask.selectAccount = slices.Contains(values, "select_account")
 		// A value outside the set is ignored [OIDC Core §3.1.2.1].
