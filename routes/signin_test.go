@@ -186,6 +186,8 @@ func TestThePageListsTheWaysTheClientMayUse(t *testing.T) {
 		}
 		qt.Check(t, qt.StringContains(csp, "script-src 'self';"))
 		qt.Check(t, qt.Equals(a.header["X-Frame-Options"], "DENY"))
+		// A window that opened the page cannot post into it (measured 2026-11-02).
+		qt.Check(t, qt.Equals(a.header["Cross-Origin-Opener-Policy"], "same-origin"))
 		qt.Check(t, qt.Equals(a.header["Cache-Control"], "no-store"))
 		// Not no-referrer: under it browsers send Origin: null on the page's own
 		// form post, and the choice is refused (measured in Chrome and Firefox).

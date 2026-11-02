@@ -61,6 +61,7 @@ func TestHeaders(t *testing.T) {
 	qt.Check(t, qt.Not(qt.StringContains(csp, "unsafe")))
 	qt.Check(t, qt.Not(qt.StringContains(csp, "connect-src")))
 	qt.Check(t, qt.Equals(h["X-Frame-Options"], "DENY"))
+	qt.Check(t, qt.Equals(h["Cross-Origin-Opener-Policy"], "same-origin"))
 	qt.Check(t, qt.StringContains(Headers("")["Content-Security-Policy"], "form-action 'self';"))
 }
 

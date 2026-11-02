@@ -270,7 +270,10 @@ func Render(w io.Writer, p Page) error {
 // client's own address, where the card's answer returns, since Chromium and WebKit
 // refuse a post's redirect to an origin form-action does not name (measured
 // 2026-11-01); frame-ancestors, form-action and base-uri are named because none
-// falls back to default-src [CSP3 §6.4.2] [CSP3 §6.1.3].
+// falls back to default-src [CSP3 §6.4.2] [CSP3 §6.1.3]. A window that opened the
+// page loses its hold on it [HTML §7.1.3.1]: the card's library takes its answer
+// from any message the page receives, and the opener could otherwise post a
+// forged one (measured in Chrome, Firefox and WebKit, 2026-11-02).
 func Headers(formTargets ...string) map[string]string {
 	formAction := "'self'"
 	for _, o := range formTargets {
@@ -282,10 +285,11 @@ func Headers(formTargets ...string) map[string]string {
 	return map[string]string{
 		"Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; form-action " +
 			formAction + "; frame-ancestors 'none'; base-uri 'none'",
-		"X-Frame-Options":        "DENY",
-		"Cache-Control":          "no-store",
-		"Pragma":                 "no-cache",
-		"Referrer-Policy":        "same-origin",
-		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":            "DENY",
+		"Cross-Origin-Opener-Policy": "same-origin",
+		"Cache-Control":              "no-store",
+		"Pragma":                     "no-cache",
+		"Referrer-Policy":            "same-origin",
+		"X-Content-Type-Options":     "nosniff",
 	}
 }

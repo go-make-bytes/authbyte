@@ -16,6 +16,9 @@ runs the service or integrates against it.
   the page's token and this service's `Origin`, has the engine check the token, and sends the browser back to the
   client with a code. Missing card software, a card that does not complete, and a browser running no script each get
   their message on the page.
+- **A window that opened the page cannot reach it:** the page is answered with `Cross-Origin-Opener-Policy:
+  same-origin`. The card's library takes its answer from any message the page receives, so a site that opened the
+  page could otherwise post a forged one into it.
 - **The policy allows script from this service's own files:** `script-src 'self'`; nothing inline.
   On a page that carries the card, `form-action` also names the origin of the client's `redirect_uri`: the card's
   answer returns there with a redirect, which Chromium and WebKit refuse to follow from a form whose policy does not
