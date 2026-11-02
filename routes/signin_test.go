@@ -153,7 +153,7 @@ func isCannotStart(a answer) bool {
 // the provider can start, in the row's order; the card waits for its own phase;
 // nothing is stored and nothing sent on; every answer carries the page's headers.
 func TestThePageListsTheWaysTheClientMayUse(t *testing.T) {
-	app, mem := methodsApp(t)
+	app, mem := pageApp(t)
 
 	every := showPage(t, app.TestClient(), pageQuery("every-way", everyReturn))
 	qt.Assert(t, qt.Equals(every.status, fasthttp.StatusOK), qt.Commentf("%s", every.body))
@@ -184,8 +184,10 @@ func TestThePageListsTheWaysTheClientMayUse(t *testing.T) {
 		for _, want := range []string{"default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self' http://localhost:9999"} {
 			qt.Check(t, qt.StringContains(csp, want))
 		}
-		qt.Check(t, qt.Not(qt.StringContains(csp, "script-src")))
+		qt.Check(t, qt.StringContains(csp, "script-src 'self';"))
 		qt.Check(t, qt.Equals(a.header["X-Frame-Options"], "DENY"))
+		// A window that opened the page cannot post into it (measured 2026-11-02).
+		qt.Check(t, qt.Equals(a.header["Cross-Origin-Opener-Policy"], "same-origin"))
 		qt.Check(t, qt.Equals(a.header["Cache-Control"], "no-store"))
 		// Not no-referrer: under it browsers send Origin: null on the page's own
 		// form post, and the choice is refused (measured in Chrome and Firefox).
@@ -227,7 +229,7 @@ sign_in_clients:
 
 // Cases 5, 8: a request naming its way skips the page; prompt=none never shows one.
 func TestThePageIsShownOnlyForARequestThatNamesNoWay(t *testing.T) {
-	app, _ := methodsApp(t)
+	app, _ := pageApp(t)
 
 	q := pageQuery("every-way", everyReturn)
 	q.Set("acr_values", identity.LoginEIDScan)
@@ -257,7 +259,7 @@ func formOf(q url.Values) map[string]any {
 // Case 11: the same request as a form POST to /authorize is answered alike, from
 // a browser that sends its binding with it.
 func TestAuthorizeTakesAFormPost(t *testing.T) {
-	app, _ := methodsApp(t)
+	app, _ := pageApp(t)
 
 	form := formOf(pageQuery("every-way", everyReturn))
 	tc := app.TestClient()
@@ -278,7 +280,7 @@ func TestAuthorizeTakesAFormPost(t *testing.T) {
 // post sets none; it sends the browser to the same request as a GET, which
 // carries the binding, and that keeps it.
 func TestAPostWithoutTheBindingSetsNone(t *testing.T) {
-	app, mem := methodsApp(t)
+	app, mem := pageApp(t)
 	tc := app.TestClient()
 
 	q := pageQuery("every-way", everyReturn)
@@ -335,7 +337,7 @@ func TestTheOwnOriginLeavesTheDefaultPortOut(t *testing.T) {
 // Case 47: the language link's next is rebuilt from its parsed query, so the
 // answer's Location carries no byte of the request as it came.
 func TestTheLanguageLinkRebuildsItsAddress(t *testing.T) {
-	app, _ := methodsApp(t)
+	app, _ := pageApp(t)
 	tc := app.TestClient()
 
 	sent := "/authorize?client_id=a\tb&x=<y>&z=%41&a=1\r\nSet-Cookie:%20planted=1"
@@ -356,7 +358,7 @@ func TestTheLanguageLinkRebuildsItsAddress(t *testing.T) {
 // way's own code; the flow keeps the browser's binding and the client's request,
 // and everything a direct request carries.
 func TestTheChoiceStartsThatWayAtTheProvider(t *testing.T) {
-	app, mem := methodsApp(t)
+	app, mem := pageApp(t)
 	tc := app.TestClient()
 
 	q := pageQuery("every-way", everyReturn)
@@ -389,7 +391,7 @@ func TestTheChoiceStartsThatWayAtTheProvider(t *testing.T) {
 
 // Cases 13-17: a choice the page did not make is refused, and nothing is stored.
 func TestAForgedChoiceIsRefused(t *testing.T) {
-	app, mem := methodsApp(t)
+	app, mem := pageApp(t)
 	tc := app.TestClient()
 	p := showPage(t, tc, pageQuery("every-way", everyReturn))
 
@@ -431,7 +433,7 @@ func TestAForgedChoiceIsRefused(t *testing.T) {
 // Cases 18-20: a double click starts two flows and a second tab its own; one
 // browser's binding serves every sign-in it starts.
 func TestOneBrowserMayStartSeveralSignIns(t *testing.T) {
-	app, mem := methodsApp(t)
+	app, mem := pageApp(t)
 	tc := app.TestClient()
 
 	first := showPage(t, tc, pageQuery("every-way", everyReturn))
@@ -457,7 +459,7 @@ func TestOneBrowserMayStartSeveralSignIns(t *testing.T) {
 // that started it, page or direct; elsewhere it is refused before the code is
 // exchanged, and the flow is spent.
 func TestTheProvidersAnswerCountsOnlyInTheBrowserThatStartedIt(t *testing.T) {
-	app, mem := methodsApp(t)
+	app, mem := pageApp(t)
 	person := app.TestClient()
 	p := showPage(t, person, pageQuery("every-way", everyReturn))
 
@@ -506,7 +508,7 @@ func TestTheProvidersAnswerCountsOnlyInTheBrowserThatStartedIt(t *testing.T) {
 // Cases 25-27, 30: a cancel or a provider failure brings a page-started sign-in
 // back to the page with what happened, once; a direct one is told to its client.
 func TestACancelComesBackToThePage(t *testing.T) {
-	app, _ := methodsApp(t)
+	app, _ := pageApp(t)
 	tc := app.TestClient()
 	p := showPage(t, tc, pageQuery("every-way", everyReturn))
 
@@ -542,7 +544,7 @@ func TestACancelComesBackToThePage(t *testing.T) {
 // Cases 29, 31-33: what this service cannot place gets the cannot-start page in a
 // browser and the problem answer elsewhere, never a redirect.
 func TestARequestThisServiceCannotPlace(t *testing.T) {
-	app, _ := methodsApp(t)
+	app, _ := pageApp(t)
 	tc := app.TestClient()
 
 	unknown := pageQuery("an-unknown-app", everyReturn)
@@ -570,7 +572,7 @@ func TestARequestThisServiceCannotPlace(t *testing.T) {
 // Cases 35, 37, 38: on a development server over plain HTTP the binding has its
 // plain name, is read by that name only, and keeps its value while it lives.
 func TestTheBrowsersBindingCookie(t *testing.T) {
-	app, _ := methodsApp(t)
+	app, _ := pageApp(t)
 	tc := app.TestClient()
 
 	p := showPage(t, tc, pageQuery("every-way", everyReturn))
@@ -597,7 +599,7 @@ func TestTheBrowsersBindingCookie(t *testing.T) {
 // Cases 43-47 in the routes: the page speaks the browser's language, the
 // client's word before it, the person's own choice before both; diacritics stay.
 func TestThePageSpeaksThePersonsLanguage(t *testing.T) {
-	app, _ := methodsApp(t)
+	app, _ := pageApp(t)
 
 	tc := app.TestClient()
 	lv := showPage(t, tc, pageQuery("every-way", everyReturn), tc.WithHeader("Accept-Language", "lv-LV,lv;q=0.9,en;q=0.5"))
@@ -671,7 +673,7 @@ func TestAMissingOperatorMarkStopsTheStart(t *testing.T) {
 
 // Case 52: discovery names the page's languages.
 func TestDiscoveryNamesThePagesLanguages(t *testing.T) {
-	app, _ := methodsApp(t)
+	app, _ := pageApp(t)
 
 	a := got(t)(app.TestClient().Get("/.well-known/openid-configuration"))
 	qt.Check(t, qt.StringContains(a.body, `"ui_locales_supported":["en","lv"]`))
@@ -681,7 +683,7 @@ func TestDiscoveryNamesThePagesLanguages(t *testing.T) {
 // Secure, and read by that name only.
 func TestTheBindingIsHostPrefixedOverTLS(t *testing.T) {
 	t.Setenv("REVERSE_PROXY_TRUSTED_IPS", "*")
-	app, _ := methodsApp(t)
+	app, _ := pageApp(t)
 	tc := app.TestClient()
 	tls := tc.WithHeader("X-Forwarded-Proto", "https")
 
@@ -716,7 +718,7 @@ func TestSignInIsLimitedPerAddress(t *testing.T) {
 	t.Setenv("CACHE_KEY_PREFIX", "authbyte-limit-test-"+randomToken(6))
 	t.Setenv("SIGN_IN_RATE_LIMIT", "3")
 	t.Setenv("REVERSE_PROXY_TRUSTED_IPS", "*")
-	app, mem := methodsApp(t)
+	app, mem := pageApp(t)
 	tc := app.TestClient()
 	from := func(ip string) azugo.TestClientOption { return tc.WithHeader("X-Forwarded-For", ip) }
 	page := "/authorize?" + pageQuery("every-way", everyReturn).Encode()
@@ -736,4 +738,12 @@ func TestSignInIsLimitedPerAddress(t *testing.T) {
 	ret := got(t)(tc.Get("/callback?code=x&state=unknown", asBrowser(tc), from("203.0.113.1")))
 	qt.Check(t, qt.Equals(ret.status, fasthttp.StatusUnauthorized))
 	qt.Check(t, qt.Equals(flowCount(mem), 0))
+}
+
+// pageApp is the methods deployment reading no card: the page's provider ways
+// alone. The card on the page is card_test.go's.
+func pageApp(t *testing.T) (*azugo.TestApp, *sessiontest.Memory) {
+	t.Helper()
+
+	return registryApp(t, methodsRegistry)
 }

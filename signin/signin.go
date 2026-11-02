@@ -25,6 +25,10 @@ func Asset(name string) ([]byte, string, bool) {
 		"style.css":                    "text/css; charset=utf-8",
 		"HankenGrotesk-Variable.woff2": "font/woff2",
 		"HankenGrotesk-OFL.txt":        "text/plain; charset=utf-8",
+		// The card's script, and the Web eID library it loads to reach the card
+		// (2.1.0, its licence in its own header).
+		"card.js":    "text/javascript; charset=utf-8",
+		"web-eid.js": "text/javascript; charset=utf-8",
 	}
 	ct, ok := types[name]
 	if !ok {
@@ -49,7 +53,17 @@ type Words struct {
 	BadTitle, BadLead                  string
 	Organisation                       string
 	HintRedirect, HintMobile, HintScan string
+	// The card read on the page: its hint, the wait, the failure, the missing
+	// software (a title, a lead and the link's words), and the line for a
+	// browser that runs no script.
+	HintCard, Waiting, CardFailed            string
+	MissingTitle, MissingLead, MissingAction string
+	NoScript                                 string
 }
+
+// CardSoftwareURL is where a person gets the card software and its browser
+// extension.
+const CardSoftwareURL = "https://www.id.ee/en/article/install-id-software/"
 
 // Languages are the page's languages, in the order its menu lists them.
 var Languages = []string{"en", "lv"}
@@ -71,6 +85,13 @@ var words = map[string]Words{
 		HintRedirect:  "{name} opens your company’s own sign-in page.",
 		HintMobile:    "{name} asks you to approve in its app on your phone.",
 		HintScan:      "{name} has you scan your ID card with your phone.",
+		HintCard:      "{name} is your ID card, read by the card software on this computer; it asks for your PIN.",
+		Waiting:       "Waiting for the card…",
+		CardFailed:    "That did not complete. Check the card is in the reader and try again.",
+		MissingTitle:  "The card software is not running",
+		MissingLead:   "Signing in with a card needs the ID-software and its browser extension on this computer. Install it, then try again — nothing here has to be redone.",
+		MissingAction: "Get the ID software",
+		NoScript:      "Signing in with a card needs JavaScript turned on in this browser.",
 	},
 	"lv": {
 		Self:          "Latviešu",
@@ -88,6 +109,13 @@ var words = map[string]Words{
 		HintRedirect:  "{name} atver jūsu uzņēmuma pieslēgšanās lapu.",
 		HintMobile:    "{name} lūgs apstiprināt pieslēgšanos lietotnē jūsu tālrunī.",
 		HintScan:      "Ar {name} jūs noskenējat savu ID karti ar tālruni.",
+		HintCard:      "{name} ir jūsu ID karte, ko nolasa šī datora ID programmatūra; tā prasīs PIN.",
+		Waiting:       "Gaida karti…",
+		CardFailed:    "Neizdevās pabeigt. Pārbaudiet, vai karte ir lasītājā, un mēģiniet vēlreiz.",
+		MissingTitle:  "ID programmatūra nedarbojas",
+		MissingLead:   "Pieslēgšanai ar karti nepieciešama ID programmatūra un tās pārlūka paplašinājums šajā datorā. Uzinstalējiet to un mēģiniet vēlreiz — neko no jauna sākt nevajag.",
+		MissingAction: "Iegūt ID programmatūru",
+		NoScript:      "Pieslēgšanai ar karti šajā pārlūkā jābūt ieslēgtam JavaScript.",
 	},
 }
 
@@ -198,6 +226,12 @@ type Notice struct {
 	Amber bool
 }
 
+// Card is the card read on this showing of the page: where its answer is posted,
+// the challenge the card signs, and the state that names it.
+type Card struct {
+	Action, Nonce, State string
+}
+
 // Page is everything one showing of the page says.
 type Page struct {
 	Lang         string
@@ -207,6 +241,8 @@ type Page struct {
 	Ways         []Way
 	Action       string
 	Token        string
+	Card         *Card
+	SoftwareURL  string
 	Operator     string
 	OperatorMark bool
 	Languages    []Language
@@ -224,26 +260,36 @@ func Render(w io.Writer, p Page) error {
 }
 
 // Headers are what every showing of the page is answered with: no framing, no
-// script, no stored copy [RFC 9700 §4.16], and the page's address, which carries
+// script but this host's own files, nothing inline [CSP3 §6.1.10], no stored
+// copy [RFC 9700 §4.16], and the page's address, which carries
 // the client's request, sent to no other host. Not no-referrer: under it a
 // browser sends Origin: null on the page's own form post, which the choice must
 // refuse (measured in Chrome and Firefox, 2026-11-01). A form may be sent to this
-// host and on to the provider's authorization endpoint, since the choice is
-// answered with a redirect there; frame-ancestors, form-action and base-uri are
-// named because none falls back to default-src [CSP3 §6.4.2] [CSP3 §6.1.3].
-func Headers(providerOrigin string) map[string]string {
+// host and on to each of formTargets, the origins a form's answer redirects to:
+// the provider's authorization endpoint, where the choice is sent on, and the
+// client's own address, where the card's answer returns, since Chromium and WebKit
+// refuse a post's redirect to an origin form-action does not name (measured
+// 2026-11-01); frame-ancestors, form-action and base-uri are named because none
+// falls back to default-src [CSP3 §6.4.2] [CSP3 §6.1.3]. A window that opened the
+// page loses its hold on it [HTML §7.1.3.1]: the card's library takes its answer
+// from any message the page receives, and the opener could otherwise post a
+// forged one (measured in Chrome, Firefox and WebKit, 2026-11-02).
+func Headers(formTargets ...string) map[string]string {
 	formAction := "'self'"
-	if providerOrigin != "" {
-		formAction += " " + providerOrigin
+	for _, o := range formTargets {
+		if o != "" {
+			formAction += " " + o
+		}
 	}
 
 	return map[string]string{
-		"Content-Security-Policy": "default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; form-action " +
+		"Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; form-action " +
 			formAction + "; frame-ancestors 'none'; base-uri 'none'",
-		"X-Frame-Options":        "DENY",
-		"Cache-Control":          "no-store",
-		"Pragma":                 "no-cache",
-		"Referrer-Policy":        "same-origin",
-		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":            "DENY",
+		"Cross-Origin-Opener-Policy": "same-origin",
+		"Cache-Control":              "no-store",
+		"Pragma":                     "no-cache",
+		"Referrer-Policy":            "same-origin",
+		"X-Content-Type-Options":     "nosniff",
 	}
 }

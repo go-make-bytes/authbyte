@@ -3,6 +3,7 @@ package routes
 import (
 	"bytes"
 	"crypto/subtle"
+	"errors"
 	"net/url"
 	"slices"
 	"strings"
@@ -16,22 +17,48 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// noticeExpired is the page's message when the browser's binding ran out before
-// the person chose; it is decided on the request itself, never carried over.
-const noticeExpired = "expired"
+// The page's messages decided on the request itself, never carried over: the
+// browser's binding ran out before the person chose; the card's button posted
+// the page's choice because this browser runs no script; the card's answer
+// signed no one in.
+const (
+	noticeExpired    = "expired"
+	noticeNoScript   = "noscript"
+	noticeCardFailed = "cardfailed"
+)
 
-// pickable are the methods the page may offer a client: those its registration
-// lists, in that order, that this deployment's provider can start. The card is
-// read on the client's own page until it moves onto this one.
-func (r *router) pickable(client registry.SignInClient) []string {
+// offered are the methods the page may offer a client: those its registration
+// lists, in that order, that this deployment can start.
+func (r *router) offered(client registry.SignInClient) []string {
 	var out []string
 	for _, m := range client.Methods {
-		if r.Upstream().MethodAllowed(m) && !slices.Contains(out, m) {
+		if r.canStart(m) && !slices.Contains(out, m) {
 			out = append(out, m)
 		}
 	}
 
 	return out
+}
+
+// canStart reports whether this deployment can start a sign-in with method:
+// a way its provider offers, or the card where it reads cards.
+func (r *router) canStart(method string) bool {
+	return r.Upstream().MethodAllowed(method) || (method == identity.LoginWebEID && r.WebEID() != nil)
+}
+
+// pageWays are the ways the page shows a request, and whether it is shown at
+// all: every way offered when the request names none; the ways it names when
+// the card is among them, since the card is read on this page; none, and no
+// page, when it names only the provider's ways, which go straight there.
+func pageWays(req *authorizeRequest, offered []string) ([]string, bool) {
+	switch {
+	case len(req.named) == 0:
+		return offered, true
+	case slices.Contains(req.named, identity.LoginWebEID):
+		return req.named, true
+	default:
+		return nil, false
+	}
 }
 
 // wayName is a method's exact name on the page and its one-line hint.
@@ -41,6 +68,8 @@ func (r *router) wayName(method string, w signin.Words) (name, hint string) {
 		return "eParaksts Mobile", w.HintMobile
 	case identity.LoginEIDScan:
 		return "eID Scan", w.HintScan
+	case identity.LoginWebEID:
+		return "eID", w.HintCard
 	default:
 		// The generic provider's way, named as the deployment names it.
 		if n := r.Config().OIDCUpstreamDisplayName; n != "" {
@@ -91,8 +120,14 @@ func (r *router) operatorLine(w signin.Words, app string) string {
 	return signin.Fill(w.Operator, map[string]string{"operator": op, "app": app})
 }
 
-// showPage answers a request that names no way with this service's sign-in page.
+// showPage answers a request with this service's sign-in page.
 func (r *router) showPage(ctx *azugo.Context, req *authorizeRequest, binding, notice string) {
+	r.showPageWith(ctx, fasthttp.StatusOK, req, binding, notice)
+}
+
+// showPageWith answers with the page under status: the ways pageWays gives the
+// request, and the card's challenge when the card is among them.
+func (r *router) showPageWith(ctx *azugo.Context, status int, req *authorizeRequest, binding, notice string) {
 	lang := pageLanguage(ctx, req.signAsk.uiLocales)
 	w := signin.For(lang)
 	app := appName(req.client)
@@ -106,7 +141,8 @@ func (r *router) showPage(ctx *azugo.Context, req *authorizeRequest, binding, no
 		OperatorMark: r.operatorMark != nil,
 		Languages:    languageMenu(lang, request),
 	}
-	for _, m := range r.pickable(req.client) {
+	ways, _ := pageWays(req, r.offered(req.client))
+	for _, m := range ways {
 		name, hint := r.wayName(m, w)
 		p.Ways = append(p.Ways, signin.Way{Code: m, Name: name, Hint: signin.Fill(hint, map[string]string{"name": name})})
 	}
@@ -124,10 +160,59 @@ func (r *router) showPage(ctx *azugo.Context, req *authorizeRequest, binding, no
 			p.Notice = &signin.Notice{Text: w.ProviderError}
 		case noticeExpired:
 			p.Notice = &signin.Notice{Text: w.Expired}
+		case noticeNoScript:
+			p.Notice = &signin.Notice{Text: w.NoScript}
+		case noticeCardFailed:
+			p.Notice = &signin.Notice{Text: w.CardFailed}
 		}
 	}
 
-	r.renderPage(ctx, fasthttp.StatusOK, p)
+	// The card's answer returns to the client with a redirect, which the page's
+	// form must be allowed to send the browser to.
+	var back string
+	if slices.Contains(ways, identity.LoginWebEID) {
+		card, err := r.startCard(ctx, req, binding)
+		if err != nil {
+			ctx.Error(err)
+
+			return
+		}
+		p.Card = card
+		p.SoftwareURL = signin.CardSoftwareURL
+		back = webOrigin(req.redirectURI)
+	}
+
+	r.renderPage(ctx, status, p, back)
+}
+
+// webOrigin is the origin of an http or https address, as a policy names it; ""
+// for any other address.
+func webOrigin(address string) string {
+	u, err := url.Parse(address)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return ""
+	}
+
+	return originOf(address)
+}
+
+// startCard makes the challenge the card signs on this showing of the page: a
+// flow tied to this browser that keeps the client's request, as a flow sent to
+// the provider from the page does.
+func (r *router) startCard(ctx *azugo.Context, req *authorizeRequest, binding string) (*signin.Card, error) {
+	nonce, err := webeidNonce()
+	if err != nil {
+		return nil, err
+	}
+
+	state := randomToken(24)
+	flow := newFlow(req, []string{identity.LoginWebEID}, binding, true)
+	flow.WebEIDNonce = nonce
+	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
+		return nil, err
+	}
+
+	return &signin.Card{Action: "/authorize/card?" + req.params.encode(), Nonce: nonce, State: state}, nil
 }
 
 // cannotStart answers a request this service cannot place. A browser gets the
@@ -151,15 +236,16 @@ func (r *router) cannotStart(ctx *azugo.Context, status int, err error, next str
 	r.renderPage(ctx, status, p)
 }
 
-// renderPage writes a page with the headers every showing of it carries.
-func (r *router) renderPage(ctx *azugo.Context, status int, p signin.Page) {
+// renderPage writes a page with the headers every showing of it carries; its forms
+// may also be answered with a redirect to each of formTargets.
+func (r *router) renderPage(ctx *azugo.Context, status int, p signin.Page, formTargets ...string) {
 	var buf bytes.Buffer
 	if err := signin.Render(&buf, p); err != nil {
 		ctx.Error(err)
 
 		return
 	}
-	for k, v := range signin.Headers(r.Upstream().AuthorizationOrigin()) {
+	for k, v := range signin.Headers(append([]string{r.Upstream().AuthorizationOrigin()}, formTargets...)...) {
 		ctx.Header.Set(k, v)
 	}
 	ctx.StatusCode(status)
@@ -195,7 +281,7 @@ func originOf(address string) string {
 //
 // @route /authorize/choice [post].
 func (r *router) choose(ctx *azugo.Context) {
-	if origin := ctx.Header.Get("Origin"); origin == "" || !strings.EqualFold(origin, r.selfOrigin()) {
+	if !r.fromOwnPage(ctx) {
 		r.Audit().LoginFailure(ctx, "sign-in choice sent from another origin")
 		r.cannotStart(ctx, fasthttp.StatusForbidden, corehttp.ForbiddenError{}, "")
 
@@ -206,8 +292,9 @@ func (r *router) choose(ctx *azugo.Context) {
 	if !ok {
 		return
 	}
-	// The page is shown only for a request that names no way.
-	if len(req.named) > 0 {
+	// The page is shown only for a request that names no way, or names the card.
+	ways, page := pageWays(req, r.offered(req.client))
+	if !page {
 		r.cannotStart(ctx, fasthttp.StatusBadRequest, azugo.ParamInvalidError{Name: "acr_values", Tag: "absent"}, "")
 
 		return
@@ -231,15 +318,108 @@ func (r *router) choose(ctx *azugo.Context) {
 	}
 
 	way := string(form.Peek("way"))
-	if !slices.Contains(r.pickable(req.client), way) {
+	if !slices.Contains(ways, way) {
 		r.Audit().LoginFailure(ctx, "sign-in choice names a way the page did not offer")
 		r.cannotStart(ctx, fasthttp.StatusForbidden, corehttp.ForbiddenError{}, "")
 
 		return
 	}
+	if way == identity.LoginWebEID {
+		// The card's button posted the page's choice: its script, which reads the
+		// card, did not run in this browser.
+		r.showPage(ctx, req, bindBrowser(ctx), noticeNoScript)
+
+		return
+	}
 
 	bindBrowser(ctx)
-	r.startProvider(ctx, req, []string{way}, binding, pageLanguage(ctx, req.signAsk.uiLocales))
+	r.startProvider(ctx, req, []string{way}, binding, pageLanguage(ctx, req.signAsk.uiLocales), true)
+}
+
+// fromOwnPage reports whether a post comes from this service's own page: its
+// Origin is this service's own. One without it, or "null", is refused
+// [RFC 6454 §7.3].
+func (r *router) fromOwnPage(ctx *azugo.Context) bool {
+	origin := ctx.Header.Get("Origin")
+
+	return origin != "" && strings.EqualFold(origin, r.selfOrigin())
+}
+
+// cardAnswer completes a card sign-in begun on this page: the card signed the
+// challenge the page was shown with, and the page's script posts its answer.
+// Like the choice, the post comes from this service's own page in the browser
+// the page was shown in, with the page's token; the challenge must be one that
+// browser was given for this client's request. The browser goes back to the
+// client with a code, or to the page saying why it did not.
+//
+// @route /authorize/card [post].
+func (r *router) cardAnswer(ctx *azugo.Context) {
+	if !r.fromOwnPage(ctx) {
+		r.Audit().LoginFailure(ctx, "card answer sent from another origin")
+		r.cannotStart(ctx, fasthttp.StatusForbidden, corehttp.ForbiddenError{}, "")
+
+		return
+	}
+
+	req, ok := r.readAuthorize(ctx, queryParams(ctx))
+	if !ok {
+		return
+	}
+	if ways, page := pageWays(req, r.offered(req.client)); !page || !slices.Contains(ways, identity.LoginWebEID) {
+		r.Audit().LoginFailure(ctx, "card answer for a request the card is not offered to")
+		r.cannotStart(ctx, fasthttp.StatusForbidden, corehttp.ForbiddenError{}, "")
+
+		return
+	}
+
+	binding := browserBinding(ctx)
+	if binding == "" {
+		r.showPage(ctx, req, bindBrowser(ctx), noticeExpired)
+
+		return
+	}
+
+	form := ctx.Request().PostArgs()
+	if subtle.ConstantTimeCompare(form.Peek("csrf"), []byte(choiceToken(binding))) != 1 {
+		r.Audit().LoginFailure(ctx, "card answer without the page's token")
+		r.cannotStart(ctx, fasthttp.StatusForbidden, corehttp.ForbiddenError{}, "")
+
+		return
+	}
+
+	flow, err := r.Session().ConsumeFlow(ctx, string(form.Peek("state")))
+	if err != nil || flow.WebEIDNonce == "" || flow.StepUp || flow.ClientID != req.clientID {
+		// Used, expired, or never this page's: the page again, with a fresh
+		// challenge.
+		r.showPage(ctx, req, bindBrowser(ctx), noticeExpired)
+
+		return
+	}
+	if !boundHere(ctx, flow.Binding) {
+		r.Audit().LoginFailure(ctx, "card answer in a browser the sign-in did not start in")
+		r.cannotStart(ctx, fasthttp.StatusUnauthorized, corehttp.UnauthorizedError{}, "")
+
+		return
+	}
+
+	bindBrowser(ctx)
+	appCode, err := r.completeCard(ctx, flow, append([]byte(nil), form.Peek("token")...))
+	switch {
+	case errors.Is(err, errCardAnswered):
+		return
+	case errors.Is(err, errCardRefused):
+		r.showPageWith(ctx, fasthttp.StatusUnauthorized, req, binding, noticeCardFailed)
+
+		return
+	case err != nil:
+		ctx.Error(err)
+
+		return
+	}
+
+	// The client's own redirect address, validated with its request.
+	ctx.StatusCode(fasthttp.StatusSeeOther)
+	ctx.RedirectUnsafe(appendCodeState(flow.AppRedirectURI, r.issuerID(), appCode, flow.SPAState))
 }
 
 // chooseLanguage keeps the language the person picked and shows the page again.

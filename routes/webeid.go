@@ -5,8 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,119 +18,34 @@ import (
 	corehttp "azugo.io/core/http"
 )
 
-// webeidChallengeResponse is returned by GET /webeid/challenge.
-type webeidChallengeResponse struct {
-	Nonce string `json:"nonce"`
-	State string `json:"state"`
-}
-
 // webeidLoginRequest is the body of POST /webeid/login. AuthToken is the Web eID
-// authentication token produced by web-eid.js on the SPA; it is opaque here and
-// forwarded verbatim to the engine.
+// authentication token the card produced; it is opaque here and forwarded
+// verbatim to the engine.
 type webeidLoginRequest struct {
 	State     string          `json:"state"`
 	AuthToken json.RawMessage `json:"authToken"`
 }
 
-// webeidLoginResponse returns the application authorization code; the SPA then
-// exchanges it at /token exactly like the eParaksts flow.
+// webeidLoginResponse returns the application authorization code, which the
+// client exchanges at /token.
 type webeidLoginResponse struct {
 	Code  string `json:"code"`
 	State string `json:"state"`
 }
 
-// webeidChallenge begins a Web eID card login. Like /authorize it takes the
-// SPA's PKCE challenge + redirect/client, but instead of redirecting to an IdP
-// it issues a Web eID challenge nonce (the SPA runs web-eid.js with it) and
-// persists the flow. Returns {nonce, state}.
-//
-// @route /webeid/challenge [get].
-func (r *router) webeidChallenge(ctx *azugo.Context) {
-	redirectURI, err := ctx.Query.String("redirect_uri")
-	if err != nil {
-		ctx.Error(err)
+var (
+	// errCardRefused is a card answer that signs no one in: the engine refused
+	// it, it names a person this platform cannot key, or the person or method is
+	// not the one the flow allows. Audited where it is found.
+	errCardRefused = errors.New("card answer refused")
+	// errCardAnswered is a failure whose answer is already written.
+	errCardAnswered = errors.New("card answer already written")
+)
 
-		return
-	}
-
-	clientID, err := ctx.Query.String("client_id")
-	if err != nil {
-		ctx.Error(err)
-
-		return
-	}
-
-	// Open-redirect guard, same as /authorize ([RFC 6749 §10.6]).
-	if err := r.Registry().ValidateRedirectURI(clientID, redirectURI); err != nil {
-		ctx.Error(azugo.ParamInvalidError{Name: "redirect_uri", Tag: "registered"})
-
-		return
-	}
-
-	// The door opens only for a client allowed the card. It is called by the
-	// client's server, so the refusal is an error answer, not a redirect.
-	if client, _ := r.Registry().SignInClient(clientID); !slices.Contains(client.Methods, identity.LoginWebEID) {
-		ctx.Error(corehttp.ForbiddenError{})
-
-		return
-	}
-
-	// PKCE is S256 only, as at /authorize; this door is called by the client's
-	// server, so the refusal is an error answer, not a redirect.
-	challenge, method, ok := s256Challenge(queryParams(ctx))
-	if !ok {
-		ctx.Error(azugo.ParamInvalidError{Name: "code_challenge_method", Tag: "eq=" + pkceS256})
-
-		return
-	}
-
-	spaState := ""
-	if s := ctx.Query.StringOptional("state"); s != nil {
-		spaState = *s
-	}
-
-	// A card sign-in may ask for an ID token as a redirect does: openid in its
-	// scope, with the nonce the token must carry.
-	idAsk, aerr := readIDTokenAsk(queryParams(ctx))
-	if aerr != nil {
-		ctx.Error(azugo.ParamInvalidError{Name: "nonce", Tag: "max=" + strconv.Itoa(maxNonceLen)})
-
-		return
-	}
-
-	nonce, err := webeidNonce()
-	if err != nil {
-		ctx.Error(err)
-
-		return
-	}
-
-	state := randomToken(24)
-	flow := &session.Flow{
-		CodeChallenge:       challenge,
-		CodeChallengeMethod: method,
-		AppRedirectURI:      redirectURI,
-		SPAState:            spaState,
-		ClientID:            clientID,
-		WebEIDNonce:         nonce,
-		OpenID:              idAsk.openID,
-		ClientNonce:         idAsk.nonce,
-	}
-	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
-		ctx.Error(err)
-
-		return
-	}
-
-	ctx.JSON(webeidChallengeResponse{Nonce: nonce, State: state})
-}
-
-// webeidLogin completes a Web eID card login: it validates the auth token via
-// the engine's stateless /auth/validate (against the flow's nonce), maps the
-// subject to an identity, establishes the session, and returns an application
-// authorization code. When the flow is a step-up (issued by /step-up
-// method=webEid), establishSession elevates the existing session in place
-// instead of creating a new one, and the audit events are step-up events.
+// webeidLogin completes a card step-up (a flow issued by /step-up with
+// method=webEid): it elevates the existing session in place and returns an
+// application authorization code. A card sign-in is read on this service's own
+// page and answered there (cardAnswer); a sign-in flow is refused here.
 //
 // @route /webeid/login [post].
 func (r *router) webeidLogin(ctx *azugo.Context) {
@@ -149,23 +62,50 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 	}
 
 	flow, err := r.Session().ConsumeFlow(ctx, req.State)
-	if err != nil {
-		// Unknown/expired state — fail closed.
+	if err != nil || !flow.StepUp {
+		// Unknown/expired state, or a sign-in's — fail closed.
 		ctx.Error(corehttp.UnauthorizedError{})
 
 		return
 	}
 
-	subj, err := r.WebEID().Validate(ctx, req.AuthToken, flow.WebEIDNonce)
-	if err != nil {
-		if flow.StepUp {
-			r.Audit().StepUpFailure(ctx, flow.RequestedLogin, "web eid token validation failed")
-		} else {
-			r.Audit().LoginFailure(ctx, "web eid token validation failed")
-		}
+	appCode, err := r.completeCard(ctx, flow, req.AuthToken)
+	switch {
+	case errors.Is(err, errCardAnswered):
+		return
+	case errors.Is(err, errCardRefused):
 		ctx.Error(corehttp.UnauthorizedError{})
 
 		return
+	case err != nil:
+		ctx.Error(err)
+
+		return
+	}
+
+	// The answer carries an authorization code: never kept by a cache.
+	noStore(ctx)
+	ctx.JSON(webeidLoginResponse{Code: appCode, State: flow.SPAState})
+}
+
+// completeCard has the engine check the card's answer to flow's challenge,
+// signs the person in (or steps their session up), and mints the client's
+// application code. Its refusals are audited here and returned as
+// errCardRefused.
+func (r *router) completeCard(ctx *azugo.Context, flow *session.Flow, authToken json.RawMessage) (string, error) {
+	refused := func(method, reason string) (string, error) {
+		if flow.StepUp {
+			r.Audit().StepUpFailure(ctx, method, reason)
+		} else {
+			r.Audit().LoginFailure(ctx, reason)
+		}
+
+		return "", errCardRefused
+	}
+
+	subj, err := r.WebEID().Validate(ctx, authToken, flow.WebEIDNonce)
+	if err != nil {
+		return refused(flow.RequestedLogin, "web eid token validation failed")
 	}
 
 	id, err := webeidIdentity(subj)
@@ -173,44 +113,33 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		// The card presented a code this platform cannot key. Fail closed and
 		// record why: the reason names no value, because an identity code is
 		// personal data.
-		if flow.StepUp {
-			r.Audit().StepUpFailure(ctx, flow.RequestedLogin, "web eid identity code: "+err.Error())
-		} else {
-			r.Audit().LoginFailure(ctx, "web eid identity code: "+err.Error())
-		}
-		ctx.Error(corehttp.UnauthorizedError{})
-
-		return
+		return refused(flow.RequestedLogin, "web eid identity code: "+err.Error())
 	}
 
 	sess, sid, err := r.establishSession(ctx, flow, id)
-	if err != nil {
-		if flow.StepUp {
-			// err is errStepUpSessionGone, errStepUpPersonMismatch or errStepUpMethodMismatch — its message
-			// is the true cause; either way the step-up is unauthorized.
-			r.Audit().StepUpFailure(ctx, id.LoginMethod, err.Error())
-			ctx.Error(corehttp.UnauthorizedError{})
-		} else if errors.Is(err, errMethodNotRequested) {
-			r.Audit().LoginFailure(ctx, "login method not requested: "+id.LoginMethod)
-			ctx.Error(corehttp.UnauthorizedError{})
-		} else {
-			r.Audit().LoginFailure(ctx, "session establishment failed")
-			ctx.Error(err)
-		}
+	switch {
+	case err != nil && flow.StepUp:
+		// err is errStepUpSessionGone, errStepUpPersonMismatch or errStepUpMethodMismatch — its message
+		// is the true cause; either way the step-up is unauthorized.
+		return refused(id.LoginMethod, err.Error())
+	case errors.Is(err, errMethodNotRequested):
+		return refused(id.LoginMethod, "login method not requested: "+id.LoginMethod)
+	case err != nil:
+		r.Audit().LoginFailure(ctx, "session establishment failed")
 
-		return
+		return "", err
 	}
 
 	// Assigned unconditionally — capabilities describe the CURRENT login
 	// method, so a step-up replaces what the previous login captured.
 	client, _ := r.Registry().SignInClient(flow.ClientID)
-	sess.Capabilities = cardCapabilities(client, req.AuthToken)
+	sess.Capabilities = cardCapabilities(client, authToken)
 	// The card signed this sign-in's own challenge just now: the person
 	// authenticated at this moment, by the card's key and its PIN.
 	stampSignIn(flow, sess, time.Now().Unix(), cardAMR)
 
 	if !r.saveEstablishedSession(ctx, flow, sid, sess) {
-		return
+		return "", errCardAnswered
 	}
 
 	appCode := randomToken(24)
@@ -224,9 +153,7 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		OpenID:              flow.OpenID,
 		Nonce:               flow.ClientNonce,
 	}, appCodeTTL); err != nil {
-		ctx.Error(err)
-
-		return
+		return "", err
 	}
 
 	if flow.StepUp {
@@ -235,9 +162,7 @@ func (r *router) webeidLogin(ctx *azugo.Context) {
 		r.Audit().LoginSuccess(ctx, sess.Subject, sess.LoA, sess.LoginMethod)
 	}
 
-	// The answer carries an authorization code: never kept by a cache.
-	noStore(ctx)
-	ctx.JSON(webeidLoginResponse{Code: appCode, State: flow.SPAState})
+	return appCode, nil
 }
 
 // cardCapabilities are a card login's signing capabilities: the card's own

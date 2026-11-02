@@ -49,17 +49,19 @@ func TestChoose(t *testing.T) {
 	}
 }
 
-// The policy forbids script, framing and a base address, and lets a form go to
-// this host and the provider only.
+// The policy allows script from this host's own files only, nothing inline, and
+// forbids framing and a base address; it lets a form go to this host and the
+// provider only.
 func TestHeaders(t *testing.T) {
 	h := Headers("https://idp.example")
 	csp := h["Content-Security-Policy"]
-	for _, want := range []string{"default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self' https://idp.example;"} {
+	for _, want := range []string{"default-src 'none'", "script-src 'self';", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self' https://idp.example;"} {
 		qt.Check(t, qt.StringContains(csp, want))
 	}
-	qt.Check(t, qt.Not(qt.StringContains(csp, "script-src")))
 	qt.Check(t, qt.Not(qt.StringContains(csp, "unsafe")))
+	qt.Check(t, qt.Not(qt.StringContains(csp, "connect-src")))
 	qt.Check(t, qt.Equals(h["X-Frame-Options"], "DENY"))
+	qt.Check(t, qt.Equals(h["Cross-Origin-Opener-Policy"], "same-origin"))
 	qt.Check(t, qt.StringContains(Headers("")["Content-Security-Policy"], "form-action 'self';"))
 }
 
@@ -144,5 +146,16 @@ func TestThePageLoadsOnlyFromThisHost(t *testing.T) {
 	tmpl, err := assets.ReadFile("assets/page.html")
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Not(qt.Matches(string(tmpl), `(?s).*(src|href)="https?://.*`)))
-	qt.Check(t, qt.Not(qt.StringContains(string(tmpl), "<script")))
+	// One script, this host's own file; nothing inline.
+	qt.Check(t, qt.Equals(strings.Count(string(tmpl), "<script"), 1))
+	qt.Check(t, qt.StringContains(string(tmpl), `<script type="module" src="/signin/card.js"></script>`))
+	card, _, ok := Asset("card.js")
+	qt.Check(t, qt.IsTrue(ok))
+	qt.Check(t, qt.Not(qt.Matches(string(card), `(?s).*https?://.*`)))
+	// The library names one address, an explanation it links to in an error
+	// message; it loads nothing.
+	lib, _, ok := Asset("web-eid.js")
+	qt.Check(t, qt.IsTrue(ok))
+	qt.Check(t, qt.DeepEquals(regexp.MustCompile(`https?://[^"'\s]+`).FindAllString(string(lib), -1),
+		[]string{"https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts"}))
 }

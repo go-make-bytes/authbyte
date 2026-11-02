@@ -95,27 +95,6 @@ func TestAuthorizeRefusesARequestWithNoChallenge(t *testing.T) {
 	assertPKCERefused(t, app, authorizeQuery("", ptr("S256")))
 }
 
-// The card door's challenge is a call from the client's server, so it refuses
-// with an error answer instead of a redirect, and stores no flow.
-func TestWebEIDChallengeRefusesThePlainChallengeMethod(t *testing.T) {
-	app := pkceApp(t)
-
-	for _, method := range []*string{ptr("plain"), nil, ptr("s256")} {
-		q := url.Values{}
-		q.Set("client_id", "app")
-		q.Set("redirect_uri", "https://app.example/cb")
-		q.Set("code_challenge", "the-verifier-itself")
-		if method != nil {
-			q.Set("code_challenge_method", *method)
-		}
-
-		resp, err := app.TestClient().Get("/webeid/challenge?" + q.Encode())
-		qt.Assert(t, qt.IsNil(err))
-		qt.Check(t, qt.Equals(resp.StatusCode(), fasthttp.StatusUnprocessableEntity), qt.Commentf("method %v", method))
-		fasthttp.ReleaseResponse(resp)
-	}
-}
-
 // The plain form, a verifier equal to the stored challenge, never verifies.
 func TestAVerifierEqualToTheChallengeNeverVerifies(t *testing.T) {
 	for _, method := range []string{"plain", "", "S256"} {

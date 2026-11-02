@@ -78,12 +78,12 @@ func (r *router) authorize(ctx *azugo.Context) {
 	}
 
 	binding := bindBrowser(ctx)
-	if len(req.named) == 0 {
+	if _, page := pageWays(req, r.offered(req.client)); page {
 		r.showPage(ctx, req, binding, takeNotice(ctx))
 
 		return
 	}
-	r.startProvider(ctx, req, req.named, binding, req.signAsk.uiLocales)
+	r.startProvider(ctx, req, req.named, binding, req.signAsk.uiLocales, false)
 }
 
 // readAuthorize checks an authorization request. What names no client or
@@ -162,39 +162,25 @@ func (r *router) readAuthorize(ctx *azugo.Context, p authParams) (*authorizeRequ
 	// names) must be ones this provider offers and the client is allowed. A
 	// request that can never be met is answered at the client's own address.
 	req.client, _ = r.Registry().SignInClient(clientID)
-	pickable := r.pickable(req.client)
-	if req.named, ok = requestedMethods(func(m string) bool { return slices.Contains(pickable, m) }, p.get("acr_values")); !ok {
+	offered := r.offered(req.client)
+	if req.named, ok = requestedMethods(func(m string) bool { return slices.Contains(offered, m) }, p.get("acr_values")); !ok {
 		return refuse("unmet_authentication_requirements", "acr_values names no login method this client may use here")
 	}
 
 	return req, true
 }
 
-// startProvider stores the flow, bound to this browser, and sends the browser to
-// the provider asking for methods in the provider's own words. A flow started on
-// the page keeps the client's request, so a cancel brings the person back to it.
-func (r *router) startProvider(ctx *azugo.Context, req *authorizeRequest, methods []string, binding, uiLocales string) {
-	entrustRedirect := r.entrustRedirectURI()
-	if entrustRedirect == "" {
-		ctx.Error(corehttp.NotFoundError{Resource: "eParaksts redirect uri"})
-
-		return
-	}
-
-	picker := len(req.named) == 0
-	state := randomToken(24)
-	// The nonce binds the id_token the provider issues to this flow: it travels
-	// out with the authorize request and must come back inside the token.
-	nonce := randomToken(24)
+// newFlow is a sign-in's flow for req, ending with one of methods and tied to
+// the browser holding binding. One started from the page keeps the client's
+// request, so a cancel or a refusal brings the person back to it.
+func newFlow(req *authorizeRequest, methods []string, binding string, fromPage bool) *session.Flow {
 	flow := &session.Flow{
 		CodeChallenge:       req.challenge,
 		CodeChallengeMethod: req.method,
 		AppRedirectURI:      req.redirectURI,
 		SPAState:            req.spaState,
-		EntrustRedirectURI:  entrustRedirect,
 		ClientID:            req.clientID,
 		Tenant:              req.tenant,
-		Nonce:               nonce,
 		RequestedMethods:    methods,
 		OpenID:              req.idAsk.openID,
 		ClientNonce:         req.idAsk.nonce,
@@ -202,11 +188,31 @@ func (r *router) startProvider(ctx *azugo.Context, req *authorizeRequest, method
 		MaxAge:              req.signAsk.maxAge,
 		Started:             time.Now().Unix(),
 		Binding:             bindingHash(binding),
-		Picker:              picker,
+		Picker:              fromPage,
 	}
-	if picker {
+	if fromPage {
 		flow.Request = req.params.encode()
 	}
+
+	return flow
+}
+
+// startProvider stores the flow, bound to this browser, and sends the browser to
+// the provider asking for methods in the provider's own words.
+func (r *router) startProvider(ctx *azugo.Context, req *authorizeRequest, methods []string, binding, uiLocales string, fromPage bool) {
+	entrustRedirect := r.entrustRedirectURI()
+	if entrustRedirect == "" {
+		ctx.Error(corehttp.NotFoundError{Resource: "eParaksts redirect uri"})
+
+		return
+	}
+
+	state := randomToken(24)
+	flow := newFlow(req, methods, binding, fromPage)
+	flow.EntrustRedirectURI = entrustRedirect
+	// The nonce binds the id_token the provider issues to this flow: it travels
+	// out with the authorize request and must come back inside the token.
+	flow.Nonce = randomToken(24)
 
 	if err := r.Session().SaveFlow(ctx, state, flow, flowTTL); err != nil {
 		ctx.Error(err)
@@ -220,7 +226,7 @@ func (r *router) startProvider(ctx *azugo.Context, req *authorizeRequest, method
 	params := upstream.AuthorizeParams{
 		State:       state,
 		RedirectURI: entrustRedirect,
-		Nonce:       nonce,
+		Nonce:       flow.Nonce,
 		ACRValues:   upstreamACR(r.Config().ACRForMethod, methods),
 		Prompt:      req.signAsk.upstreamPrompt(),
 		MaxAge:      req.signAsk.maxAge,
@@ -228,7 +234,7 @@ func (r *router) startProvider(ctx *azugo.Context, req *authorizeRequest, method
 	}
 
 	// The page's choice is a form post, answered by sending the browser on.
-	if picker {
+	if fromPage {
 		ctx.StatusCode(fasthttp.StatusSeeOther)
 	}
 	// External IdP authorize endpoint — use the unsanitized redirect so the
@@ -452,7 +458,7 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 
 	// Normal login: resolve the stable internal subject (the PERSON, keyed on the
 	// national id / SerialNumber) and link this method's credential.
-	internal, created, err := r.Store().EnsureMapping(ctx, id.IdPSubject, store.Profile{
+	internal, created, err := r.Identities().EnsureMapping(ctx, id.IdPSubject, store.Profile{
 		Name:         id.Name,
 		GivenName:    id.GivenName,
 		FamilyName:   id.FamilyName,

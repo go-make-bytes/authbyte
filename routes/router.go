@@ -57,6 +57,10 @@ func Init(a *authbytecore.App) error {
 	a.Get("/authorize", limited(r.authorize))
 	a.Post("/authorize", limited(r.authorize))
 	a.Post("/authorize/choice", limited(r.choose))
+	if a.Config().WebEIDEnabled() {
+		// The card read on the page: its answer, counted like the choice.
+		a.Post("/authorize/card", limited(r.cardAnswer))
+	}
 	a.Get("/signin/language", r.chooseLanguage)
 	a.Get("/signin/{name}", r.signinAsset)
 	a.Get(a.Config().CallbackPath(), r.callback)
@@ -67,10 +71,9 @@ func Init(a *authbytecore.App) error {
 	// next user in as the previous one).
 	a.Get("/logout", r.logout)
 
-	// Web eID card login (browser reads the card via web-eid.js; validated by
-	// the web-eid engine). Off unless WEBEID_ENGINE_URL is configured.
+	// The card step-up's completion (validated by the web-eid engine); a card
+	// sign-in is read on the page. Off unless WEBEID_ENGINE_URL is configured.
 	if a.Config().WebEIDEnabled() {
-		a.Get("/webeid/challenge", r.webeidChallenge)
 		a.Post("/webeid/login", r.webeidLogin)
 	}
 
