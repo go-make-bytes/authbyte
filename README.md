@@ -267,7 +267,7 @@ sequenceDiagram
     alt method not permitted via IdP (sc_plugin → eid)
         AC-->>SPA: 403 (eID card must use Web eID)
     else permitted (mobileid / mobile-eid / upstream)
-        AC->>PG: identity.upsert (person keyed on the identity code; a codeless directory login by its credential)
+        AC->>PG: identity.upsert (person keyed on the identity code <br/> a codeless directory login by its credential)
         AC-->>AC: GDPR access record (routine, fail-open)
         AC->>RD: SET sessions:{sid} NX (session, lifetime from now, SESSION_TTL)
         AC->>RD: SET codes:{appCode} (bound to session + PKCE, TTL 60s)
