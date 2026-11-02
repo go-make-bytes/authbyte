@@ -63,11 +63,3 @@ type Identity struct {
 	// (the login-method ↔ signing-flow binding).
 	PermittedFlows []string `json:"permitted_flows,omitempty"`
 }
-
-// StepUp is the response to a successful step-up: a re-issued, DPoP-bound user
-// token reflecting the elevated assurance / new login method.
-type StepUp struct {
-	Token       Token  `json:"token"`
-	LoA         string `json:"loa"`
-	LoginMethod string `json:"login_method"`
-}

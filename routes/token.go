@@ -1,7 +1,6 @@
 package routes
 
 import (
-	"context"
 	"errors"
 	"slices"
 
@@ -284,15 +283,8 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
-	// The organisation named when the login began wins over one chosen
-	// earlier in this session (a step-up re-enters the login without naming
-	// one and keeps the session's choice).
-	hint := appCode.Tenant
-	if hint == "" {
-		hint = sess.Tenant
-	}
-
-	outcome, ok := r.userScopes(ctx, sess, clientID, hint, atSignIn)
+	// The organisation named when the login began, if any.
+	outcome, ok := r.userScopes(ctx, sess, clientID, appCode.Tenant, atSignIn)
 	if !ok {
 		return
 	}
@@ -304,22 +296,18 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 	sess.ClientID = clientID
 	sess.Tenant = outcome.tenant
 
-	// The first exchange of a session answers its refresh token: a value of its
-	// own, bound to this client, kept only as a hash. A step-up's exchange finds
-	// one already issued and answers none; the client keeps the one it holds
-	// ([RFC 6749 §5.1] makes it optional).
-	refresh := ""
-	if sess.RefreshKey == "" {
-		refresh = randomToken(refreshTokenBytes)
-		sess.RefreshKey = refreshKey(refresh)
-		if err := r.Session().SaveRefresh(ctx, sess.RefreshKey, &session.RefreshGrant{
-			SessionID: appCode.SessionID,
-			ClientID:  clientID,
-		}, sess.ExpiresAt); err != nil {
-			storeRefusal(ctx, err)
+	// The exchange answers the session's refresh token: a value of its own, bound
+	// to this client, kept only as a hash. A session is exchanged once, since its
+	// code is used up.
+	refresh := randomToken(refreshTokenBytes)
+	sess.RefreshKey = refreshKey(refresh)
+	if err := r.Session().SaveRefresh(ctx, sess.RefreshKey, &session.RefreshGrant{
+		SessionID: appCode.SessionID,
+		ClientID:  clientID,
+	}, sess.ExpiresAt); err != nil {
+		storeRefusal(ctx, err)
 
-			return
-		}
+		return
 	}
 
 	if err := r.Session().ReplaceSession(ctx, appCode.SessionID, sess); err != nil {
@@ -349,7 +337,7 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 	}
 
 	// A sign-in that asked for an ID token gets one, stating what it proved;
-	// any other exchange, a step-up's included, gets none.
+	// any other gets none.
 	idToken := ""
 	if appCode.OpenID {
 		idToken, err = r.Issuer().IssueID(issuer.IDTokenInput{
@@ -544,11 +532,6 @@ func (r *router) serviceAccountScopes(ctx *azugo.Context, clientID, tenant strin
 	}
 
 	return scopes, nil
-}
-
-// sessionLoader is the store call that loads a session by its internal id.
-type sessionLoader interface {
-	LoadSession(ctx context.Context, sid string) (*session.Session, error)
 }
 
 // grantRefreshToken re-issues a user token within an existing session. The

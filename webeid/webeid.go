@@ -1,6 +1,6 @@
 // Package webeid is the adapter to the Web eID engine's STATELESS
 // authentication-token validation. The Auth service owns the challenge nonce
-// (issued at /webeid/challenge) and calls the engine's POST /auth/validate
+// (made as its sign-in page shows the card) and calls the engine's POST /auth/validate
 // server-to-server with a DPoP-bound service token, receiving the validated
 // eID subject which is then mapped to an internal identity.
 //

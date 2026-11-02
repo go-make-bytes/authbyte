@@ -12,7 +12,6 @@ import (
 
 	authbytecore "github.com/go-make-bytes/authbyte"
 	"github.com/go-make-bytes/authbyte/identity"
-	"github.com/go-make-bytes/authbyte/session"
 	"github.com/go-make-bytes/authbyte/session/sessiontest"
 	"github.com/go-make-bytes/authbyte/store"
 	"github.com/go-make-bytes/authbyte/webeid"
@@ -140,7 +139,6 @@ func TestThePageOffersTheCard(t *testing.T) {
 	qt.Check(t, qt.Equals(flow.Binding, bindingHash(tc.Cookies()[signInCookie])))
 	qt.Check(t, qt.DeepEquals(flow.RequestedMethods, []string{identity.LoginWebEID}))
 	qt.Check(t, qt.IsTrue(flow.Picker))
-	qt.Check(t, qt.IsFalse(flow.StepUp))
 
 	csp := p.header["Content-Security-Policy"]
 	qt.Check(t, qt.StringContains(csp, "script-src 'self'"))
@@ -321,21 +319,6 @@ func TestTheCardWithoutScriptSaysWhy(t *testing.T) {
 	qt.Check(t, qt.StringContains(a.body, "Signing in with a card needs JavaScript turned on in this browser."))
 	qt.Check(t, qt.Equals(a.location, ""))
 	qt.Check(t, qt.Equals(flowCount(mem), before+1))
-}
-
-// Cases 32, 33: the card door's completion takes a step-up only; a sign-in's
-// challenge is the page's.
-func TestTheCardDoorCompletesOnlyAStepUp(t *testing.T) {
-	app, mem, card := cardApp(t)
-
-	qt.Assert(t, qt.IsNil(mem.SaveFlow(context.Background(), "a-sign-in", &session.Flow{
-		ClientID: "every-way", AppRedirectURI: everyReturn, WebEIDNonce: "n", CodeChallenge: "c", CodeChallengeMethod: "S256",
-	}, flowTTL)))
-	resp, err := app.TestClient().PostJSON("/webeid/login", map[string]any{"state": "a-sign-in", "authToken": json.RawMessage(cardToken("n", selfOriginInTests))})
-	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.Equals(resp.StatusCode(), fasthttp.StatusUnauthorized))
-	fasthttp.ReleaseResponse(resp)
-	qt.Check(t, qt.Equals(card.calls, 0))
 }
 
 // The page's own files: the card's script and the Web eID library, the

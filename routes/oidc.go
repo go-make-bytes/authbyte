@@ -150,8 +150,8 @@ func (a signInAsk) upstreamPrompt() string {
 }
 
 // upstreamACR is what the provider is sent as acr_values for the methods a
-// request named: each method's own code at that provider (acrFor, the map the
-// step-up uses), in the order named. A method the provider forces by no code of
+// request named: each method's own code at that provider (acrFor), in the order
+// named. A method the provider forces by no code of
 // its own (a generic provider's sign-in, the card) adds nothing.
 func upstreamACR(acrFor func(method string) string, methods []string) string {
 	codes := make([]string, 0, len(methods))
@@ -204,12 +204,8 @@ func registeredAMR(amr []string) []string {
 }
 
 // stampSignIn records on a new session what its ID tokens will state: when the
-// person authenticated, how, and the session's public name. A step-up's session
-// keeps what its sign-in stated, since a step-up's exchange answers no ID token.
-func stampSignIn(flow *session.Flow, sess *session.Session, authTime int64, amr []string) {
-	if flow.StepUp {
-		return
-	}
+// person authenticated, how, and the session's public name.
+func stampSignIn(sess *session.Session, authTime int64, amr []string) {
 	sess.AuthTime = authTime
 	sess.AMR = amr
 	sess.SID = randomToken(24)

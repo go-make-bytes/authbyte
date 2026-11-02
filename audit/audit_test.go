@@ -81,12 +81,12 @@ func TestLoginSuccessEmitsSecurityEvent(t *testing.T) {
 	qt.Check(t, qt.Equals(ev.Actor.Type, "user"))
 }
 
-func TestStepUpFailureIsWarning(t *testing.T) {
+func TestLoginFailureIsWarning(t *testing.T) {
 	sink := &captureSink{}
 	rec := audit.New(secevents.NewEmitter(sink), nil, zap.NewNop())
 
 	withCtx(t, func(ctx *azugo.Context) {
-		rec.StepUpFailure(ctx, "eid", "achieved method mismatch")
+		rec.LoginFailure(ctx, "web eid token validation failed")
 	})
 
 	ev := sink.latest()
@@ -94,7 +94,8 @@ func TestStepUpFailureIsWarning(t *testing.T) {
 	qt.Check(t, qt.Equals(ev.EventType, secevents.EventAuthentication))
 	qt.Check(t, qt.Equals(ev.Outcome, broker.OutcomeFailure))
 	qt.Check(t, qt.Equals(str(ev.Attributes[secevents.AttrSeverity]), string(secevents.SeverityWarning)))
-	qt.Check(t, qt.Equals(str(ev.Attributes[secevents.AttrKind]), "step_up"))
+	qt.Check(t, qt.Equals(str(ev.Attributes[secevents.AttrReason]), "web eid token validation failed"))
+	qt.Check(t, qt.Equals(str(ev.Attributes[secevents.AttrKind]), ""))
 }
 
 func TestServiceTokenIssued(t *testing.T) {

@@ -1,7 +1,6 @@
 package routes
 
 import (
-	"context"
 	"errors"
 	"slices"
 	"strings"
@@ -22,18 +21,6 @@ import (
 const (
 	flowTTL    = 10 * time.Minute
 	appCodeTTL = 60 * time.Second
-)
-
-// Step-up elevation can fail three distinguishable ways. They are surfaced as
-// separate errors so the audit trail records the true cause instead of
-// attributing every failure to a method mismatch: the session to elevate is gone
-// (it expired or was signed out between starting the step-up and completing
-// it), the login was another person's, or the login method actually achieved
-// did not match the one requested.
-var (
-	errStepUpSessionGone    = errors.New("step-up session not found or expired")
-	errStepUpMethodMismatch = errors.New("achieved login method did not match the requested step-up method")
-	errStepUpPersonMismatch = errors.New("the step-up login is not the person the session belongs to")
 )
 
 // authorizeRequest is an authorization request that passed every check.
@@ -377,12 +364,7 @@ func (r *router) callback(ctx *azugo.Context) {
 
 	sess, sid, err := r.establishSession(ctx, flow, id)
 	if err != nil {
-		if flow.StepUp {
-			// err is errStepUpSessionGone, errStepUpPersonMismatch or errStepUpMethodMismatch — its message
-			// is the true cause; either way the step-up is unauthorized.
-			r.Audit().StepUpFailure(ctx, id.LoginMethod, err.Error())
-			ctx.Error(corehttp.UnauthorizedError{})
-		} else if errors.Is(err, errMethodNotRequested) {
+		if errors.Is(err, errMethodNotRequested) {
 			// The provider answered with a method the client did not ask for: no
 			// session, and the client hears it at its own address.
 			r.Audit().LoginFailure(ctx, "login method not requested: "+id.LoginMethod)
@@ -397,16 +379,14 @@ func (r *router) callback(ctx *azugo.Context) {
 
 	// This login's identification also read the person's sign-identity
 	// catalog (when the profile scope is on) — derive the session's signing
-	// capabilities from it while the upstream token is still at hand. Assigned
-	// unconditionally: capabilities describe the CURRENT login method, so a
-	// step-up replaces (or clears) whatever the previous login captured.
+	// capabilities from it while the upstream token is still at hand.
 	client, _ := r.Registry().SignInClient(flow.ClientID)
 	sess.Capabilities = r.captureCapabilities(ctx, client, tokens.AccessToken, info, id.LoginMethod)
 	// What the sign-in's ID tokens will state: the moment, and the means the
 	// provider named that are registered ones; nothing authbyte did not see.
-	stampSignIn(flow, sess, authTime, registeredAMR(info.AMR))
+	stampSignIn(sess, authTime, registeredAMR(info.AMR))
 
-	if !r.saveEstablishedSession(ctx, flow, sid, sess) {
+	if !r.saveEstablishedSession(ctx, sid, sess) {
 		return
 	}
 
@@ -428,28 +408,15 @@ func (r *router) callback(ctx *azugo.Context) {
 		return
 	}
 
-	if flow.StepUp {
-		r.Audit().StepUpSuccess(ctx, sess.Subject, sess.LoA, sess.LoginMethod)
-	} else {
-		r.Audit().LoginSuccess(ctx, sess.Subject, sess.LoA, sess.LoginMethod)
-	}
+	r.Audit().LoginSuccess(ctx, sess.Subject, sess.LoA, sess.LoginMethod)
 
 	// Client app redirect URI (cross-origin) — bypass same-origin sanitizing.
 	ctx.RedirectUnsafe(appendCodeState(flow.AppRedirectURI, r.issuerID(), appCode, flow.SPAState))
 }
 
-// establishSession either creates a new session (normal login) or updates the
-// existing one with elevated assurance / a new login method (step-up).
+// establishSession resolves the person a sign-in proved and makes their new
+// session.
 func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id identity.Identity) (*session.Session, string, error) {
-	if flow.StepUp {
-		sess, err := stepUpSession(ctx, r.Session(), flow, id)
-		if err != nil {
-			return nil, "", err
-		}
-
-		return sess, flow.SessionID, nil
-	}
-
 	// A sign-in completes only with a method the request asked for. Checked before
 	// the identity store is touched, so a refused sign-in writes nothing.
 	if !methodRequested(flow.RequestedMethods, id.LoginMethod) {
@@ -487,35 +454,13 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 		// door at token issue ("" for a card login).
 		DirectoryIssuer: id.Issuer,
 		DirectoryGuest:  id.DirectoryGuest,
-		ProviderSubject: id.IdPSubject,
-		ProviderIssuer:  id.Issuer,
 	}, randomToken(24), nil
 }
 
-// saveEstablishedSession stores what establishSession produced: a sign-in's new
-// session, given its whole lifetime from now, or a step-up's raised session,
-// written only over the session it raises and keeping its end. A session ended
-// while the step-up was under way stays ended. ok is false when the answer is
-// already written.
-func (r *router) saveEstablishedSession(ctx *azugo.Context, flow *session.Flow, sid string, sess *session.Session) bool {
-	if !flow.StepUp {
-		if err := r.Session().CreateSession(ctx, sid, sess, r.Config().SessionTTL); err != nil {
-			ctx.Error(err)
-
-			return false
-		}
-
-		return true
-	}
-
-	err := r.Session().ReplaceSession(ctx, sid, sess)
-	if errors.Is(err, session.ErrNotFound) {
-		r.Audit().StepUpFailure(ctx, sess.LoginMethod, errStepUpSessionGone.Error())
-		ctx.Error(corehttp.UnauthorizedError{})
-
-		return false
-	}
-	if err != nil {
+// saveEstablishedSession stores a sign-in's new session, given its whole
+// lifetime from now. ok is false when the answer is already written.
+func (r *router) saveEstablishedSession(ctx *azugo.Context, sid string, sess *session.Session) bool {
+	if err := r.Session().CreateSession(ctx, sid, sess, r.Config().SessionTTL); err != nil {
 		ctx.Error(err)
 
 		return false
@@ -524,73 +469,16 @@ func (r *router) saveEstablishedSession(ctx *azugo.Context, flow *session.Flow, 
 	return true
 }
 
-// stepUpSession loads the session a step-up raises and checks the login that
-// completed it, then reflects the new assurance and method on it. Nothing is
-// changed on a refusal.
-func stepUpSession(ctx context.Context, store sessionLoader, flow *session.Flow, id identity.Identity) (*session.Session, error) {
-	sess, err := store.LoadSession(ctx, flow.SessionID)
-	if err != nil {
-		return nil, errStepUpSessionGone
-	}
-
-	// The login must be the session's person, or one person's proof would raise
-	// another person's session.
-	if !samePerson(sess, id) {
-		return nil, errStepUpPersonMismatch
-	}
-
-	// Enforce that the achieved method matches the one requested at step-up.
-	// Without this, an eID-logged-in user could "step up" to eParaksts Mobile
-	// yet authenticate with eID again and the binding would not actually
-	// change.
-	if !stepUpMethodMatches(flow.RequestedLogin, id.LoginMethod) {
-		return nil, errStepUpMethodMismatch
-	}
-
-	// Reflect the new assurance/method; identity and scopes are unchanged.
-	sess.LoA = id.LoA
-	sess.LoginMethod = id.LoginMethod
-	// A step-up through an upstream provider is a login through that
-	// provider's directory too; a card step-up says nothing about one.
-	if id.Issuer != "" {
-		sess.DirectoryIssuer = id.Issuer
-		sess.DirectoryGuest = id.DirectoryGuest
-	}
-
-	return sess, nil
-}
-
-// samePerson reports whether a step-up's login is the person the session
-// belongs to. A session with an identity code needs the same code (both login
-// paths canonicalise it). A session without one needs the same credential at the
-// same provider, since nothing else names the person. A login with a code never
-// steps up a session without one, nor the other way round: nothing links the two.
-func samePerson(sess *session.Session, id identity.Identity) bool {
-	if sess.SerialNumber != "" || id.SerialNumber != "" {
-		return sess.SerialNumber == id.SerialNumber
-	}
-
-	return sess.ProviderSubject != "" && sess.ProviderSubject == id.IdPSubject && sess.ProviderIssuer == id.Issuer
-}
-
-// stepUpMethodMatches reports whether the login method actually achieved during
-// a step-up satisfies the method requested when it began. An empty requested
-// method imposes no constraint. The match is exact (case-sensitive): both values
-// come from the same fixed login-method vocabulary, so any difference is a real
-// mismatch, not a formatting one.
-func stepUpMethodMatches(requested, achieved string) bool {
-	return requested == "" || achieved == requested
-}
-
 func (r *router) entrustRedirectURI() string {
 	return r.Config().RedirectURI()
 }
 
 // returnedHere reports whether the provider's answer reached the browser that
-// started the sign-in, and answers the refusal when it did not. A flow a
-// client's server started (a step-up) carries no binding and is not checked.
+// started the sign-in, and answers the refusal when it did not. Every sign-in is
+// bound to a browser, so a flow bound to none (a step-up saved before the
+// step-up was removed) completes nowhere.
 func (r *router) returnedHere(ctx *azugo.Context, flow *session.Flow) bool {
-	if flow.Binding == "" || boundHere(ctx, flow.Binding) {
+	if boundHere(ctx, flow.Binding) {
 		return true
 	}
 	r.Audit().LoginFailure(ctx, "the provider's answer reached a browser that did not start the sign-in")

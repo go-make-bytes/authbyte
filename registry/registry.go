@@ -94,9 +94,6 @@ type SignInClient struct {
 	// Methods are the sign-in methods it allows, by this service's method names;
 	// those the deployment does not offer are never offered to it.
 	Methods []string `yaml:"methods"`
-	// StepUpMethods are the methods a session of this client may step up to; a
-	// subset of Methods, and none means no step-up.
-	StepUpMethods []string `yaml:"step_up_methods"`
 	// Signing says the client signs: its identity answer carries the signing flows
 	// a login method permits, and a sign-in through it captures the person's
 	// signing identities.
@@ -268,11 +265,6 @@ func validateSignInClient(c SignInClient) error {
 	// The baseline is minted only to people no membership is asked about.
 	if len(c.BaselineScopes) > 0 && c.MembershipRequired != nil && *c.MembershipRequired {
 		return bad("requires a membership, so its baseline_scopes could never apply")
-	}
-	for _, m := range c.StepUpMethods {
-		if !slices.Contains(c.Methods, m) {
-			return bad("lists step_up_methods %q, which is not among its methods", m)
-		}
 	}
 	for _, claim := range c.Claims {
 		if !slices.Contains(knownClaims, claim) {

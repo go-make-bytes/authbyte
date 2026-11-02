@@ -1,7 +1,7 @@
 // Package audit records the Identity/Auth service's audit events through the
 // platform's reusable emitter libraries:
 //
-// - NIS2-audit (NIS2 security telemetry) via go-sec-events — login / step-up,
+// - NIS2-audit (NIS2 security telemetry) via go-sec-events — login and logout,
 // user- and service-token issuance, and authorization denials — emitted as
 // structured security events the log pipeline ships to the SIEM.
 // - GDPR-audit (GDPR personal-data access) via go-gdpr-audit — the identity-record
@@ -27,7 +27,7 @@ import (
 	"github.com/gmb-lib/go-sec-events/secevents"
 )
 
-// Security event types this service emits. Login/step-up share the canonical
+// Security event types this service emits. Login uses the canonical
 // go-sec-events type; token issuance uses these service-specific types
 // alongside the library's service-token type.
 const (
@@ -67,22 +67,12 @@ func (r *Recorder) logger(ctx *azugo.Context) *zap.Logger {
 
 // LoginSuccess records a successful interactive login.
 func (r *Recorder) LoginSuccess(ctx *azugo.Context, actorID, loa, method string) {
-	r.auth(ctx, actorID, loa, method, false, broker.OutcomeSuccess, "")
+	r.auth(ctx, actorID, loa, method, broker.OutcomeSuccess, "")
 }
 
 // LoginFailure records a failed login (no subject established).
 func (r *Recorder) LoginFailure(ctx *azugo.Context, reason string) {
-	r.auth(ctx, "", "", "", false, broker.OutcomeFailure, reason)
-}
-
-// StepUpSuccess records a successful step-up / re-auth.
-func (r *Recorder) StepUpSuccess(ctx *azugo.Context, actorID, loa, method string) {
-	r.auth(ctx, actorID, loa, method, true, broker.OutcomeSuccess, "")
-}
-
-// StepUpFailure records a failed step-up (e.g. achieved method mismatch).
-func (r *Recorder) StepUpFailure(ctx *azugo.Context, method, reason string) {
-	r.auth(ctx, "", "", method, true, broker.OutcomeFailure, reason)
+	r.auth(ctx, "", "", "", broker.OutcomeFailure, reason)
 }
 
 // SessionEnded records a session ended at its client's request, server to server:
@@ -111,7 +101,7 @@ func (r *Recorder) Logout(ctx *azugo.Context, actorID, method string, federated 
 		actorRef(actorID, "user", ""), attrs)
 }
 
-func (r *Recorder) auth(ctx *azugo.Context, actorID, loa, method string, stepUp bool, outcome broker.Outcome, reason string) {
+func (r *Recorder) auth(ctx *azugo.Context, actorID, loa, method string, outcome broker.Outcome, reason string) {
 	sev := secevents.SeverityInfo
 	if outcome != broker.OutcomeSuccess {
 		sev = secevents.SeverityWarning
@@ -123,9 +113,6 @@ func (r *Recorder) auth(ctx *azugo.Context, actorID, loa, method string, stepUp 
 	}
 	if loa != "" {
 		attrs["loa"] = loa
-	}
-	if stepUp {
-		attrs[secevents.AttrKind] = "step_up"
 	}
 	if reason != "" {
 		attrs[secevents.AttrReason] = reason

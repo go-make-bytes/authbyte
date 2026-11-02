@@ -3,6 +3,22 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.5.0
+
+### Removed — the step-up (breaking change)
+
+- **Breaking change: `POST /step-up` and `POST /webeid/login` are gone** (both answer `404`). A session's login method
+  and assurance are fixed by its sign-in. A client that needs another proof, such as a signing step that needs a
+  certificate the session did not capture, starts a fresh sign-in naming the way it wants in `acr_values`; that makes
+  a new session. The card is read on this service's own sign-in page, as before.
+- **Breaking change for the client registry: `step_up_methods` is no longer a setting.** The registry refuses unknown
+  keys, so a registry that still lists it stops the start, naming the key. Remove the line from every row before
+  taking this release.
+- **A code exchange always answers a refresh token**, since every code now belongs to a new session.
+- **The security events have no step-up any more:** no authentication event carries `kind: step_up`.
+- **A step-up begun before the upgrade completes nothing:** its return from the provider is refused with the page that
+  says the sign-in cannot start, and a card answer to it shows the sign-in page again. Such a flow lives ten minutes.
+
 ## v0.4.0
 
 ### Changed — the ID card is read on this service's own sign-in page

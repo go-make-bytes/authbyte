@@ -388,9 +388,10 @@ func (r *router) cardAnswer(ctx *azugo.Context) {
 	}
 
 	flow, err := r.Session().ConsumeFlow(ctx, string(form.Peek("state")))
-	if err != nil || flow.WebEIDNonce == "" || flow.StepUp || flow.ClientID != req.clientID {
-		// Used, expired, or never this page's: the page again, with a fresh
-		// challenge.
+	if err != nil || flow.WebEIDNonce == "" || flow.Binding == "" || flow.ClientID != req.clientID {
+		// Used, expired, or never this page's (a flow bound to no browser is a
+		// step-up saved before the step-up was removed): the page again, with a
+		// fresh challenge.
 		r.showPage(ctx, req, bindBrowser(ctx), noticeExpired)
 
 		return

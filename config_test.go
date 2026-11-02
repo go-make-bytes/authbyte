@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-// TestACRForMethodDistinct proves step-up requests a method-specific acr_values,
+// TestACRForMethodDistinct proves a sign-in requests a method-specific acr_values,
 // and the permitted methods (eParaksts Mobile vs eID Scan) resolve to DIFFERENT
 // values, so Entrust can actually force the requested method (the login-method ↔
 // signing-flow binding). It also proves the eID-card (sc_plugin) "eid" method has
@@ -25,8 +25,8 @@ func TestACRForMethodDistinct(t *testing.T) {
 	qt.Check(t, qt.Not(qt.Equals(c.ACRForMethod("eparakstsMobile"), c.ACRForMethod("eidScan"))))
 	// eID (sc_plugin) is no longer a TrustedX login method → no acr.
 	qt.Check(t, qt.Equals(c.ACRForMethod("eid"), ""))
-	// Web eID card login is not an Entrust method → no acr (step-up to it goes
-	// through the Web eID challenge route, not /authorize).
+	// Web eID card login is not an Entrust method → no acr (the card is read on
+	// this service's own sign-in page).
 	qt.Check(t, qt.Equals(c.ACRForMethod("webEid"), ""))
 	qt.Check(t, qt.Equals(c.ACRForMethod("unknown"), ""))
 }

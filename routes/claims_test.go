@@ -14,6 +14,9 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// codeA is the person's identity code, in its stored spelling.
+const codeA = "PNOLV-010190-10007"
+
 // seedPersonSignIn is seedSignIn for a login that carried a name and an
 // identity code.
 func seedPersonSignIn(t *testing.T, mem *sessiontest.Memory, clientID, redirectURI string) signIn {

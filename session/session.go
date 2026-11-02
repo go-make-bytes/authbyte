@@ -24,15 +24,10 @@ type Flow struct {
 	SPAState string `json:"spa_state"`
 	// Entrust leg.
 	EntrustRedirectURI string `json:"entrust_redirect_uri"`
-	// Whether this flow is a step-up (re-auth) and the method requested.
-	StepUp         bool   `json:"step_up"`
-	RequestedLogin string `json:"requested_login"`
-	// RequestedMethods are the login methods an ordinary sign-in's acr_values
-	// asked for, in order; empty when it asked for none. The sign-in completes only
-	// with one of them.
+	// RequestedMethods are the login methods a sign-in's acr_values asked for, in
+	// order; empty when it asked for none. The sign-in completes only with one of
+	// them.
 	RequestedMethods []string `json:"requested_methods,omitempty"`
-	// ExistingSession id to update on step-up completion.
-	SessionID string `json:"session_id"`
 	// ClientID of the public client that initiated the authorization request.
 	ClientID string `json:"client_id"`
 	// WebEIDNonce is the challenge nonce issued for a Web eID card login (the Auth
@@ -63,8 +58,7 @@ type Flow struct {
 	Started int64 `json:"started,omitempty"`
 	// Binding is the hash of the cookie that tied this sign-in to the browser
 	// that started it; the provider's answer completes it only in that browser.
-	// Empty for a flow a client's server started (a step-up), which no browser
-	// cookie of this service could have started.
+	// Every sign-in has one, so a flow without one completes nowhere.
 	Binding string `json:"binding,omitempty"`
 	// Picker says the person chose the method on this service's sign-in page,
 	// and Request is the client's authorization request, so a cancel or a
@@ -123,12 +117,6 @@ type Session struct {
 	// visitors; such a login is refused exactly as any other stranger's.
 	DirectoryIssuer string `json:"directory_issuer,omitempty"`
 	DirectoryGuest  bool   `json:"directory_guest,omitempty"`
-	// ProviderSubject and ProviderIssuer name the credential the session's login
-	// used: the provider's handle for the person and the provider ("" for a card
-	// login). A step-up of a session without an identity code must come back with
-	// the same pair, since nothing else says it is the same person.
-	ProviderSubject string `json:"provider_subject,omitempty"`
-	ProviderIssuer  string `json:"provider_issuer,omitempty"`
 	// ExpiresAt is the end of the session's lifetime, fixed when it is created. A
 	// later save keeps it: nothing but a new sign-in gives a person more time.
 	ExpiresAt time.Time `json:"expires_at"`

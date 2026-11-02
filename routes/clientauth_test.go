@@ -2,7 +2,6 @@ package routes
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"net/url"
 	"testing"
 
@@ -98,49 +97,6 @@ func TestAPublicClientSendsNoSecret(t *testing.T) {
 
 	status, body = e.exchangeWith(in, "portal-spa", portalRedirect, nil)
 	qt.Check(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%s", body["_raw"]))
-}
-
-// A confidential client's step-up needs its secret, in the body, since the
-// Authorization header carries the person's token; without it no flow is stored.
-func TestAConfidentialClientStepsUpOnlyWithItsSecret(t *testing.T) {
-	app, mem := signInApp(t)
-	e := newEdge(t, app)
-	e.basic = []string{"edge-app", "edge-secret"}
-
-	in := seedSignIn(t, mem, "edge-app", edgeRedirect)
-	status, body := e.exchangeWith(in, "edge-app", edgeRedirect, nil)
-	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%s", body["_raw"]))
-	refresh, _ := body["refresh_token"].(string)
-
-	stepUp := func(extra map[string]string) int {
-		req := map[string]string{
-			"refresh_token":  refresh,
-			"client_id":      "edge-app",
-			"method":         "webEid",
-			"code_challenge": "a-challenge",
-			"redirect_uri":   edgeRedirect,
-		}
-		for k, v := range extra {
-			req[k] = v
-		}
-		raw, err := json.Marshal(req)
-		qt.Assert(t, qt.IsNil(err))
-
-		tc := app.TestClient()
-		resp, err := tc.Post("/step-up", raw, tc.WithHost(testHost), tc.WithHeader("Content-Type", "application/json"))
-		qt.Assert(t, qt.IsNil(err))
-		defer fasthttp.ReleaseResponse(resp)
-
-		return resp.StatusCode()
-	}
-	flows := func() int { return len(mem.Keys("flow:")) }
-
-	qt.Check(t, qt.Equals(stepUp(nil), fasthttp.StatusUnauthorized), qt.Commentf("no secret"))
-	qt.Check(t, qt.Equals(stepUp(map[string]string{"client_secret": "wrong"}), fasthttp.StatusUnauthorized), qt.Commentf("a wrong secret"))
-	qt.Check(t, qt.Equals(flows(), 0))
-
-	qt.Check(t, qt.Equals(stepUp(map[string]string{"client_secret": "edge-secret"}), fasthttp.StatusOK))
-	qt.Check(t, qt.Equals(flows(), 1))
 }
 
 // A confidential client's refresh and revocation need its secret too [RFC 7009

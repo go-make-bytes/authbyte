@@ -20,7 +20,6 @@ sign_in_clients:
     baseline_scopes: [records:read, records:write]
     claims: [name, given_name, family_name, serial_number]
     methods: [cardLogin, mobileLogin]
-    step_up_methods: [cardLogin]
     signing: true
     client_name: The App
     logo_uri: https://app.example/logo.svg
@@ -91,8 +90,7 @@ func TestLoadKeepsEverySignInSetting(t *testing.T) {
 	}
 	if !slices.Equal(c.BaselineScopes, []string{"records:read", "records:write"}) ||
 		!slices.Equal(c.Claims, []string{"name", "given_name", "family_name", "serial_number"}) ||
-		!slices.Equal(c.Methods, []string{"cardLogin", "mobileLogin"}) ||
-		!slices.Equal(c.StepUpMethods, []string{"cardLogin"}) {
+		!slices.Equal(c.Methods, []string{"cardLogin", "mobileLogin"}) {
 		t.Errorf("a list setting was lost: %+v", c)
 	}
 	// Kept for the code that will use them: the hosted page and the sign-out
@@ -131,7 +129,7 @@ func TestLoadRefusesABadSignInRow(t *testing.T) {
 		{"confidential without a secret", "    type: confidential\n" + base, "secret_ref"},
 		{"public with a secret", "    type: public\n    secret_ref: env:X\n" + base, "secret_ref"},
 		{"baseline with a membership", "    type: public\n    membership_required: true\n    baseline_scopes: [a:b]\n" + base, "baseline_scopes"},
-		{"step-up outside the methods", "    type: public\n    methods: [cardLogin]\n    step_up_methods: [mobileLogin]\n" + base, "step_up_methods"},
+		{"a step-up list, which is no setting any more", "    type: public\n    methods: [cardLogin]\n    step_up_methods: [cardLogin]\n" + base, "step_up_methods"},
 		{"an unknown claim", "    type: public\n    claims: [serialNumber]\n" + base, "serialNumber"},
 		{"a relative login address", "    type: public\n    audience: a\n    redirect_uris: [/cb]\n", "redirect_uris"},
 		{"a login address with a fragment", "    type: public\n    audience: a\n    redirect_uris: [https://app.example/cb#x]\n", "redirect_uris"},

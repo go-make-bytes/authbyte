@@ -363,14 +363,3 @@ func (BindingResolver) PermittedFlows(loginMethod string) []string {
 		return nil
 	}
 }
-
-// StepUpRequired reports whether the current login method can satisfy a signing
-// request made with requestedMethod. When it cannot, it returns the login
-// method the user must re-authenticate with.
-func (BindingResolver) StepUpRequired(current, requested string) (bool, string) {
-	if requested == "" || current == requested {
-		return false, ""
-	}
-
-	return true, requested
-}
