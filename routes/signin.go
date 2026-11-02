@@ -41,20 +41,21 @@ func (r *router) offered(client registry.SignInClient) []string {
 }
 
 // canStart reports whether this deployment can start a sign-in with method:
-// a way its provider offers, or the card where it reads cards.
+// a way one of its providers offers, or the card where it reads cards.
 func (r *router) canStart(method string) bool {
-	return r.Upstream().MethodAllowed(method) || (method == identity.LoginWebEID && r.WebEID() != nil)
+	return r.Upstreams().ByMethod(method) != nil || (method == identity.LoginWebEID && r.WebEID() != nil)
 }
 
 // pageWays are the ways the page shows a request, and whether it is shown at
 // all: every way offered when the request names none; the ways it names when
-// the card is among them, since the card is read on this page; none, and no
-// page, when it names only the provider's ways, which go straight there.
-func pageWays(req *authorizeRequest, offered []string) ([]string, bool) {
+// the card is among them, since the card is read on this page, or when they
+// are ways of more than one provider, which the person picks between; none, and
+// no page, when it names only one provider's ways, which go straight there.
+func (r *router) pageWays(req *authorizeRequest, offered []string) ([]string, bool) {
 	switch {
 	case len(req.named) == 0:
 		return offered, true
-	case slices.Contains(req.named, identity.LoginWebEID):
+	case slices.Contains(req.named, identity.LoginWebEID), r.providerOf(req.named) == nil:
 		return req.named, true
 	default:
 		return nil, false
@@ -71,9 +72,9 @@ func (r *router) wayName(method string, w signin.Words) (name, hint string) {
 	case identity.LoginWebEID:
 		return "eID", w.HintCard
 	default:
-		// The generic provider's way, named as the deployment names it.
-		if n := r.Config().OIDCUpstreamDisplayName; n != "" {
-			return n, w.HintRedirect
+		// A generic provider's way, named as the deployment names it.
+		if e := r.Upstreams().ByMethod(method); e != nil && e.DisplayName != "" {
+			return e.DisplayName, w.HintRedirect
 		}
 
 		return w.Organisation, w.HintRedirect
@@ -141,7 +142,7 @@ func (r *router) showPageWith(ctx *azugo.Context, status int, req *authorizeRequ
 		OperatorMark: r.operatorMark != nil,
 		Languages:    languageMenu(lang, request),
 	}
-	ways, _ := pageWays(req, r.offered(req.client))
+	ways, _ := r.pageWays(req, r.offered(req.client))
 	for _, m := range ways {
 		name, hint := r.wayName(m, w)
 		p.Ways = append(p.Ways, signin.Way{Code: m, Name: name, Hint: signin.Fill(hint, map[string]string{"name": name})})
@@ -245,7 +246,11 @@ func (r *router) renderPage(ctx *azugo.Context, status int, p signin.Page, formT
 
 		return
 	}
-	for k, v := range signin.Headers(append([]string{r.Upstream().AuthorizationOrigin()}, formTargets...)...) {
+	var targets []string
+	for _, e := range r.Upstreams().Entries() {
+		targets = append(targets, e.Provider.AuthorizationOrigin())
+	}
+	for k, v := range signin.Headers(append(targets, formTargets...)...) {
 		ctx.Header.Set(k, v)
 	}
 	ctx.StatusCode(status)
@@ -299,7 +304,7 @@ func (r *router) choose(ctx *azugo.Context) {
 		return
 	}
 	// The page is shown only for a request that names no way, or names the card.
-	ways, page := pageWays(req, r.offered(req.client))
+	ways, page := r.pageWays(req, r.offered(req.client))
 	if !page {
 		r.cannotStart(ctx, fasthttp.StatusBadRequest, azugo.ParamInvalidError{Name: "acr_values", Tag: "absent"}, "")
 
@@ -376,7 +381,7 @@ func (r *router) cardAnswer(ctx *azugo.Context) {
 
 		return
 	}
-	if ways, page := pageWays(req, r.offered(req.client)); !page || !slices.Contains(ways, identity.LoginWebEID) {
+	if ways, page := r.pageWays(req, r.offered(req.client)); !page || !slices.Contains(ways, identity.LoginWebEID) {
 		r.Audit().LoginFailure(ctx, "card answer for a request the card is not offered to")
 		r.cannotStart(ctx, fasthttp.StatusForbidden, corehttp.ForbiddenError{}, "")
 

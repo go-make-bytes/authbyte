@@ -85,8 +85,8 @@ func TestOnlyASigningClientsSignInCapturesSigningIdentities(t *testing.T) {
 		a.Get("/testonly/capture", func(ctx *azugo.Context) {
 			portal, _ := r.Registry().SignInClient("portal-spa")
 			product, _ := r.Registry().SignInClient("product-spa")
-			signing = r.captureCapabilities(ctx, portal, "idp-token", identity.UserInfo{SignIdentities: []identity.SignIdentity{}}, identity.LoginEParakstsMobile)
-			plain = r.captureCapabilities(ctx, product, "idp-token", identity.UserInfo{SignIdentities: seal}, identity.LoginEParakstsMobile)
+			signing = r.captureCapabilities(ctx, portal, r.Upstreams().Entries()[0].Provider, "idp-token", identity.UserInfo{SignIdentities: []identity.SignIdentity{}}, identity.LoginEParakstsMobile)
+			plain = r.captureCapabilities(ctx, product, r.Upstreams().Entries()[0].Provider, "idp-token", identity.UserInfo{SignIdentities: seal}, identity.LoginEParakstsMobile)
 		})
 	})
 

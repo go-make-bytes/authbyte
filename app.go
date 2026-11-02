@@ -51,8 +51,7 @@ type App struct {
 	keys       *keys.Manager
 	issuer     *issuer.Issuer
 	registry   *registry.Registry
-	upstream   *upstream.Provider
-	resolver   *identity.Resolver
+	upstreams  *upstream.Set
 	binding    identity.BindingResolver
 	nonce      *nonce.Issuer
 	session    SessionStore
@@ -161,9 +160,31 @@ type SessionStore interface {
 	Ping(ctx context.Context) error
 }
 
+// Option changes how New composes the application.
+type Option func(*options)
+
+type options struct {
+	upstreams []upstream.Entry
+}
+
+// WithUpstreams runs the service with the given upstream providers in place of
+// the one its settings describe. The upstream settings are then neither
+// required nor read. The entries must make a set (upstream.NewSet), and no
+// return path may be one of the service's own routes; the service refuses to
+// start otherwise, naming what is wrong.
+func WithUpstreams(entries ...upstream.Entry) Option {
+	return func(o *options) { o.upstreams = entries }
+}
+
 // New constructs the Identity/Auth application.
-func New(cmd *cobra.Command, version string) (*App, error) {
+func New(cmd *cobra.Command, version string, opts ...Option) (*App, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	config := NewConfiguration()
+	config.upstreamsGiven = o.upstreams != nil
 
 	a, err := server.New(cmd, server.Options{
 		AppName:       "Identity/Auth Service",
@@ -176,14 +197,14 @@ func New(cmd *cobra.Command, version string) (*App, error) {
 
 	instance := &App{App: a, config: config}
 
-	if err := instance.init(); err != nil {
+	if err := instance.init(o); err != nil {
 		return nil, err
 	}
 
 	return instance, nil
 }
 
-func (a *App) init() error {
+func (a *App) init(o options) error {
 	cfg := a.config
 
 	// Platform glue FIRST (before any service routes/middleware): standardized
@@ -234,18 +255,26 @@ func (a *App) init() error {
 	}
 	a.registry = reg
 
-	// Upstream OIDC provider + identity resolution. The provider is built from
-	// one Config value (profile-resolved by the configuration) and handed to
-	// the routes as a value; when the generic profile has no explicit
+	// Upstream OIDC providers + identity resolution: the set a composing program
+	// passed, or the one provider the settings describe. That provider is built
+	// from one Config value (profile-resolved by the configuration) and handed
+	// to the routes as a value; when the generic profile has no explicit
 	// endpoints, construction performs OIDC discovery — bounded, fail closed.
-	upCtx, upCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer upCancel()
-	up, err := upstream.New(upCtx, cfg.UpstreamConfig(), a.Log())
-	if err != nil {
-		return fmt.Errorf("upstream provider: %w", err)
+	entries := o.upstreams
+	if entries == nil {
+		upCtx, upCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer upCancel()
+		up, err := upstream.New(upCtx, cfg.UpstreamConfig(), a.Log())
+		if err != nil {
+			return fmt.Errorf("upstream provider: %w", err)
+		}
+		entries = []upstream.Entry{cfg.upstreamEntry(up)}
 	}
-	a.upstream = up
-	a.resolver = up.Resolver()
+	set, err := upstream.NewSet(entries...)
+	if err != nil {
+		return err
+	}
+	a.upstreams = set
 
 	// Server nonce issuer for the /token issuance hop.
 	if cfg.DPoPNonceEnabled {
@@ -468,8 +497,7 @@ func (a *App) Config() *Configuration {
 func (a *App) Keys() *keys.Manager               { return a.keys }
 func (a *App) Issuer() *issuer.Issuer            { return a.issuer }
 func (a *App) Registry() *registry.Registry      { return a.registry }
-func (a *App) Upstream() *upstream.Provider      { return a.upstream }
-func (a *App) Resolver() *identity.Resolver      { return a.resolver }
+func (a *App) Upstreams() *upstream.Set          { return a.upstreams }
 func (a *App) Binding() identity.BindingResolver { return a.binding }
 func (a *App) Nonce() *nonce.Issuer              { return a.nonce }
 func (a *App) Session() SessionStore             { return a.session }
@@ -596,10 +624,10 @@ func inboundAuthConfig(cfg *Configuration, reg *registry.Registry) *authclient.C
 	return c
 }
 
-// offersMethod reports whether this deployment offers a sign-in method: one its
-// provider allows, or the card where the card engine is named.
+// offersMethod reports whether this deployment offers a sign-in method: one a
+// provider of its set allows, or the card where the card engine is named.
 func (a *App) offersMethod(method string) bool {
-	return a.upstream.MethodAllowed(method) || (method == identity.LoginWebEID && a.webeid != nil)
+	return a.upstreams.ByMethod(method) != nil || (method == identity.LoginWebEID && a.webeid != nil)
 }
 
 // clientsOfferedNothing names the enabled sign-in clients none of whose methods

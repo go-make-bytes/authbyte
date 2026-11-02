@@ -66,17 +66,22 @@ func (r *router) logout(ctx *azugo.Context) {
 		method = *m
 	}
 
-	federated := r.Upstream().FederatedMethod(method)
+	// The provider the method names, whose own session a federated method's
+	// sign-out also clears.
+	entry := r.Upstreams().ByMethod(method)
+	federated := entry != nil && entry.Provider.FederatedMethod(method)
 	r.Audit().Logout(ctx, "", method, federated)
 
-	if idpLogout := r.Upstream().LogoutURL(redirectURI); federated && idpLogout != "" {
-		// Front-channel: navigate to the upstream IdP's logout, which clears its
-		// SSO cookie and then redirects the browser back to redirectURI. A
-		// provider with no logout endpoint falls through to the local redirect.
-		// External IdP target (cross-origin) — bypass same-origin sanitizing.
-		ctx.RedirectUnsafe(idpLogout)
+	if federated {
+		if idpLogout := entry.Provider.LogoutURL(redirectURI); idpLogout != "" {
+			// Front-channel: navigate to the upstream IdP's logout, which clears its
+			// SSO cookie and then redirects the browser back to redirectURI. A
+			// provider with no logout endpoint falls through to the local redirect.
+			// External IdP target (cross-origin) — bypass same-origin sanitizing.
+			ctx.RedirectUnsafe(idpLogout)
 
-		return
+			return
+		}
 	}
 
 	// Non-federated (e.g. Web eID card login) — no IdP cookie to clear.

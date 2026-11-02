@@ -4,6 +4,7 @@ import (
 	"github.com/go-make-bytes/authbyte/identity"
 	"github.com/go-make-bytes/authbyte/registry"
 	"github.com/go-make-bytes/authbyte/session"
+	"github.com/go-make-bytes/authbyte/upstream"
 
 	"azugo.io/azugo"
 )
@@ -25,8 +26,8 @@ import (
 //
 // The certificates and the catalog carry personal data: log identity ids at
 // most, never payloads.
-func (r *router) captureCapabilities(ctx *azugo.Context, client registry.SignInClient, idpToken string, info identity.UserInfo, loginMethod string) *session.Capabilities {
-	if !client.Signing || !r.Upstream().IdentityCatalogEnabled() || info.SignIdentities == nil {
+func (r *router) captureCapabilities(ctx *azugo.Context, client registry.SignInClient, provider *upstream.Provider, idpToken string, info identity.UserInfo, loginMethod string) *session.Capabilities {
+	if !client.Signing || !provider.IdentityCatalogEnabled() || info.SignIdentities == nil {
 		return nil
 	}
 
@@ -34,7 +35,7 @@ func (r *router) captureCapabilities(ctx *azugo.Context, client registry.SignInC
 
 	if id, ok := identity.SelectSigning(info.SignIdentities, loginMethod); ok {
 		caps.SignIdentityID = id.ID
-		if cert, err := r.Upstream().SignIdentityCert(ctx, idpToken, id.ID); err != nil {
+		if cert, err := provider.SignIdentityCert(ctx, idpToken, id.ID); err != nil {
 			ctx.Log().Warn("capability capture: signing certificate fetch failed for identity " + id.ID + ": " + err.Error())
 		} else {
 			caps.SigningCertificate = cert
@@ -42,7 +43,7 @@ func (r *router) captureCapabilities(ctx *azugo.Context, client registry.SignInC
 	}
 
 	if id, ok := identity.SelectAuth(info.SignIdentities, loginMethod); ok {
-		if cert, err := r.Upstream().SignIdentityCert(ctx, idpToken, id.ID); err != nil {
+		if cert, err := provider.SignIdentityCert(ctx, idpToken, id.ID); err != nil {
 			ctx.Log().Warn("capability capture: auth certificate fetch failed for identity " + id.ID + ": " + err.Error())
 		} else {
 			caps.AuthCertificate = cert
@@ -51,7 +52,7 @@ func (r *router) captureCapabilities(ctx *azugo.Context, client registry.SignInC
 
 	for _, s := range identity.Seals(info.SignIdentities) {
 		seal := session.Seal{ID: s.ID, Label: s.Label}
-		if cert, err := r.Upstream().SignIdentityCert(ctx, idpToken, s.ID); err != nil {
+		if cert, err := provider.SignIdentityCert(ctx, idpToken, s.ID); err != nil {
 			// The seal still gates and lists without its certificate; a
 			// signing act with it just takes the fallback path.
 			ctx.Log().Warn("capability capture: seal certificate fetch failed for identity " + s.ID + ": " + err.Error())

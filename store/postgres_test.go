@@ -23,3 +23,17 @@ func TestUpsertInputCarriesTheEmail(t *testing.T) {
 	qt.Check(t, qt.IsTrue(present))
 	qt.Check(t, qt.Equals(v, any("")))
 }
+
+// Case 20: the upsert request names the provider the handle came from, since a
+// handle is unique only there; a login through the deployment's first provider
+// (and the card) names the empty one, as every stored credential does.
+func TestUpsertInputNamesTheProvider(t *testing.T) {
+	in := upsertInput("oid-1", Profile{Provider: "https://accounts.example", LoginMethod: "google"})
+	qt.Check(t, qt.Equals(in["provider"], any("https://accounts.example")))
+	qt.Check(t, qt.Equals(in["idp_sub"], any("oid-1")))
+
+	first := upsertInput("oid-2", Profile{LoginMethod: "upstream"})
+	v, present := first["provider"]
+	qt.Check(t, qt.IsTrue(present))
+	qt.Check(t, qt.Equals(v, any("")))
+}

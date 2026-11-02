@@ -3,6 +3,38 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.6.0
+
+### Added — several upstream providers, for a Go program composing the service
+
+- **`authbytecore.WithUpstreams(entries ...upstream.Entry)`** passes `New` a set of providers in place of the one the
+  settings describe; the `OIDC_UPSTREAM_*` and `EPARAKSTS_*` settings are then neither required nor read. Each entry
+  names its provider, the path its answers come back on, its button's name, its own words for each method, and
+  whether it holds the sign-ins stored before the deployment had several providers (exactly one does). The README's
+  "Several providers side by side" says what each means. This server still runs one provider from its settings: it
+  has no setting, file or list for more.
+- **The start is refused, naming what is wrong,** when two entries claim one name, return path or method, when an
+  entry claims `webEid`, allows no method, has no issuer or authority, or returns on one of the service's own routes.
+- **Each provider answers only on its own path.** A sign-in records the provider it was sent to; an answer arriving on
+  another provider's path is refused before any code is exchanged, with the page that says the sign-in cannot start,
+  and recorded as a failed sign-in (RFC 9700 §4.4.2). The page lists the client's ways across every provider, discovery
+  offers every provider's methods, a sign-out visits the provider of the method signed in with, and a signing client's
+  identities are read from the provider signed in through. A request naming ways of more than one provider in
+  `acr_values` is shown the page with those ways.
+
+### Changed
+
+- **An answer that carries `iss` naming another issuer than the provider's is refused** before any code is exchanged
+  (RFC 9207 §2.4), in this server too. A provider that sends its own issuer, or none, is answered as before.
+- **A sign-in is stored under its provider and its handle,** since a handle is unique only at its provider (OpenID
+  Connect Core §5.7). This server, and the card, store under the empty provider exactly as before; several providers
+  need the database's identity location at `V5` (the platform database's 2026-11-02 entry). A sign-in whose provider
+  sends no name keeps the person's stored name, with that database release.
+- **Breaking change for a program embedding the service:** `App.Upstream()` and `App.Resolver()` are replaced by
+  `App.Upstreams()`, `Configuration.RedirectURI()` is gone (each entry has its own return path), and `New` and
+  `TestApp` take options.
+- **A sign-in begun before the upgrade** completes on the path it was sent to, as before.
+
 ## v0.5.0
 
 ### Removed — the step-up (breaking change)

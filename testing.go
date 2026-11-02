@@ -10,11 +10,11 @@ import (
 // TestApp constructs an App wired for tests. Backing stores are reached lazily,
 // so this works without a live Valkey or PostgreSQL; a test that exercises
 // login or sessions sets an in-memory session store (SetSessionStore) or names a
-// live Valkey.
-func TestApp(tb testing.TB) *App {
+// live Valkey. opts are passed to New.
+func TestApp(tb testing.TB, opts ...Option) *App {
 	tb.Helper()
 
-	app, err := startTestApp(tb)
+	app, err := startTestApp(tb, opts...)
 	qt.Assert(tb, qt.IsNil(err))
 
 	return app
@@ -22,7 +22,7 @@ func TestApp(tb testing.TB) *App {
 
 // startTestApp is TestApp answering what New refuses, for a test of the start's
 // own checks.
-func startTestApp(tb testing.TB) (*App, error) {
+func startTestApp(tb testing.TB, opts ...Option) (*App, error) {
 	tb.Helper()
 
 	tb.Setenv("METRICS_ENABLED", "false")
@@ -57,5 +57,5 @@ func startTestApp(tb testing.TB) (*App, error) {
 		tb.Setenv("CACHE_CONNECTION", "redis://localhost:6379/0")
 	}
 
-	return New(nil, "0.0.0-test")
+	return New(nil, "0.0.0-test", opts...)
 }

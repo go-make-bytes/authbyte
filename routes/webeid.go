@@ -49,7 +49,7 @@ func (r *router) completeCard(ctx *azugo.Context, flow *session.Flow, authToken 
 		return refused("web eid identity code: " + err.Error())
 	}
 
-	sess, sid, err := r.establishSession(ctx, flow, id)
+	sess, sid, err := r.establishSession(ctx, flow, id, "")
 	switch {
 	case errors.Is(err, errMethodNotRequested):
 		return refused("login method not requested: " + id.LoginMethod)

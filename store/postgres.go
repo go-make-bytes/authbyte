@@ -63,6 +63,11 @@ type Profile struct {
 	// keeps only an address-shaped value, and none at all for a person who holds
 	// a national identity code; it never refuses a login over it.
 	Email string
+	// Provider names the provider the sign-in's handle came from: a handle is
+	// unique only there. "" is the deployment's first provider, under which
+	// every credential stored before providers were told apart is kept, and the
+	// card's.
+	Provider string
 }
 
 // Mapping is an identity row as returned by identity.get.
@@ -177,6 +182,7 @@ func upsertInput(idpSubject string, p Profile) map[string]any {
 		"serial_number": p.SerialNumber, // the national id — the person key
 		"login_method":  p.LoginMethod,
 		"email":         p.Email,
+		"provider":      p.Provider,
 	}
 }
 

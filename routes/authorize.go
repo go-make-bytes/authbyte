@@ -76,7 +76,7 @@ func (r *router) authorize(ctx *azugo.Context) {
 	}
 
 	binding := bindBrowser(ctx)
-	if _, page := pageWays(req, r.offered(req.client)); page {
+	if _, page := r.pageWays(req, r.offered(req.client)); page {
 		r.showPage(ctx, req, binding, takeNotice(ctx))
 
 		return
@@ -202,18 +202,21 @@ func newFlow(req *authorizeRequest, methods []string, binding string, fromPage b
 }
 
 // startProvider stores the flow, bound to this browser, and sends the browser to
-// the provider asking for methods in the provider's own words.
+// the provider of methods asking for them in the provider's own words. The flow
+// records the provider, whose own return path alone completes it.
 func (r *router) startProvider(ctx *azugo.Context, req *authorizeRequest, methods []string, binding, uiLocales string, fromPage bool) {
-	entrustRedirect := r.entrustRedirectURI()
-	if entrustRedirect == "" {
-		ctx.Error(corehttp.NotFoundError{Resource: "eParaksts redirect uri"})
+	entry := r.providerOf(methods)
+	if entry == nil {
+		ctx.Error(corehttp.NotFoundError{Resource: "upstream provider"})
 
 		return
 	}
+	entrustRedirect := strings.TrimSuffix(r.Config().BaseURL, "/") + entry.ReturnPath
 
 	state := randomToken(24)
 	flow := newFlow(req, methods, binding, fromPage)
 	flow.EntrustRedirectURI = entrustRedirect
+	flow.Upstream = entry.Name
 	// The nonce binds the id_token the provider issues to this flow: it travels
 	// out with the authorize request and must come back inside the token.
 	flow.Nonce = randomToken(24)
@@ -231,7 +234,7 @@ func (r *router) startProvider(ctx *azugo.Context, req *authorizeRequest, method
 		State:       state,
 		RedirectURI: entrustRedirect,
 		Nonce:       flow.Nonce,
-		ACRValues:   upstreamACR(r.Config().ACRForMethod, methods),
+		ACRValues:   upstreamACR(entry.ACRFor, methods),
 		Prompt:      req.signAsk.upstreamPrompt(),
 		MaxAge:      req.signAsk.maxAge,
 		UILocales:   uiLocales,
@@ -243,15 +246,37 @@ func (r *router) startProvider(ctx *azugo.Context, req *authorizeRequest, method
 	}
 	// External IdP authorize endpoint — use the unsanitized redirect so the
 	// cross-origin target is preserved (a same-origin-only redirect would drop it).
-	ctx.RedirectUnsafe(r.Upstream().AuthorizeURL(params))
+	ctx.RedirectUnsafe(entry.Provider.AuthorizeURL(params))
 }
 
-// callback handles the Entrust redirect: it exchanges the code, maps the user,
-// establishes a session, and returns an application authorization code to the
-// SPA's redirect URI.
+// providerOf is the one provider that offers every one of methods, or nil when
+// they are none or belong to more than one.
+func (r *router) providerOf(methods []string) *upstream.Entry {
+	var entry *upstream.Entry
+	for _, m := range methods {
+		e := r.Upstreams().ByMethod(m)
+		if e == nil || (entry != nil && e != entry) {
+			return nil
+		}
+		entry = e
+	}
+
+	return entry
+}
+
+// callbackFor handles entry's answers on its own return path.
 //
 // @route /callback [get].
-func (r *router) callback(ctx *azugo.Context) {
+func (r *router) callbackFor(entry *upstream.Entry) azugo.RequestHandler {
+	return func(ctx *azugo.Context) { r.callback(ctx, entry) }
+}
+
+// callback handles a provider's redirect: it exchanges the code, maps the user,
+// establishes a session, and returns an application authorization code to the
+// SPA's redirect URI. Nothing reaches the provider unless the answer came back
+// to the browser that started the sign-in, on the return path of the provider
+// the sign-in was sent to.
+func (r *router) callback(ctx *azugo.Context, entry *upstream.Entry) {
 	// The IdP may return an error instead of a code — the user cancelled or denied
 	// access, or consent failed. There is no code in that case, so handle it before
 	// the required-code binding: propagate the error back to the client that began
@@ -266,7 +291,7 @@ func (r *router) callback(ctx *azugo.Context) {
 		// Resolve the originating client so the error lands where login began.
 		if state := ctx.Query.StringOptional("state"); state != nil {
 			if flow, ferr := r.Session().ConsumeFlow(ctx, *state); ferr == nil {
-				if !r.returnedHere(ctx, flow) {
+				if !r.returnedHere(ctx, flow) || !r.answeredBy(ctx, flow, entry) {
 					return
 				}
 				// A sign-in begun on this service's page goes back to the page,
@@ -315,22 +340,23 @@ func (r *router) callback(ctx *azugo.Context) {
 		return
 	}
 	// Checked before the provider's code is exchanged: a return that reached
-	// another browser sends nothing to the provider.
-	if !r.returnedHere(ctx, flow) {
-
+	// another browser, or another provider's return path, sends nothing to any
+	// provider.
+	if !r.returnedHere(ctx, flow) || !r.answeredBy(ctx, flow, entry) {
 		return
 	}
+	provider := entry.Provider
 
 	// Exchange the code with the provider and read the person's claims: the
 	// verified id_token where the provider publishes a key set, userinfo always.
-	tokens, err := r.Upstream().Exchange(ctx, code, flow.EntrustRedirectURI)
+	tokens, err := provider.Exchange(ctx, code, flow.EntrustRedirectURI)
 	if err != nil {
 		ctx.Error(err)
 
 		return
 	}
 
-	info, err := r.Upstream().Claims(ctx, tokens, flow.Nonce)
+	info, err := provider.Claims(ctx, tokens, flow.Nonce)
 	if err != nil {
 		switch {
 		case errors.Is(err, upstream.ErrIdentityCode):
@@ -353,7 +379,7 @@ func (r *router) callback(ctx *azugo.Context) {
 		return
 	}
 
-	id := r.Resolver().Resolve(info)
+	id := entry.Resolver().Resolve(info)
 
 	// Enforce the provider's allowed-method set (fail closed) even if the IdP's
 	// hosted page offered something else, so removing the request-side
@@ -361,7 +387,7 @@ func (r *router) callback(ctx *azugo.Context) {
 	// what rejects the legacy plugin eID card (sc_plugin → "eid" — eID cards
 	// log in through Web eID); for a generic provider it pins the callback to
 	// the methods its configuration declares.
-	if !r.Upstream().MethodAllowed(id.LoginMethod) {
+	if !provider.MethodAllowed(id.LoginMethod) {
 		r.Audit().LoginFailure(ctx, "login method not permitted via the upstream IdP: "+id.LoginMethod)
 		ctx.Error(corehttp.ForbiddenError{})
 
@@ -379,7 +405,7 @@ func (r *router) callback(ctx *azugo.Context) {
 		return
 	}
 
-	sess, sid, err := r.establishSession(ctx, flow, id)
+	sess, sid, err := r.establishSession(ctx, flow, id, entry.CredentialProvider())
 	if err != nil {
 		if errors.Is(err, errMethodNotRequested) {
 			// The provider answered with a method the client did not ask for: no
@@ -398,7 +424,7 @@ func (r *router) callback(ctx *azugo.Context) {
 	// catalog (when the profile scope is on) — derive the session's signing
 	// capabilities from it while the upstream token is still at hand.
 	client, _ := r.Registry().SignInClient(flow.ClientID)
-	sess.Capabilities = r.captureCapabilities(ctx, client, tokens.AccessToken, info, id.LoginMethod)
+	sess.Capabilities = r.captureCapabilities(ctx, client, provider, tokens.AccessToken, info, id.LoginMethod)
 	// What the sign-in's ID tokens will state: the moment, and the means the
 	// provider named that are registered ones; nothing authbyte did not see.
 	stampSignIn(sess, authTime, registeredAMR(info.AMR))
@@ -432,8 +458,9 @@ func (r *router) callback(ctx *azugo.Context) {
 }
 
 // establishSession resolves the person a sign-in proved and makes their new
-// session.
-func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id identity.Identity) (*session.Session, string, error) {
+// session. provider names where the sign-in's handle came from ("" for the
+// deployment's first provider and the card).
+func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id identity.Identity, provider string) (*session.Session, string, error) {
 	// A sign-in completes only with a method the request asked for. Checked before
 	// the identity store is touched, so a refused sign-in writes nothing.
 	if !methodRequested(flow.RequestedMethods, id.LoginMethod) {
@@ -449,6 +476,7 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 		SerialNumber: id.SerialNumber,
 		LoginMethod:  id.LoginMethod,
 		Email:        id.Email,
+		Provider:     provider,
 	})
 	if err != nil {
 		return nil, "", err
@@ -496,8 +524,27 @@ func (r *router) saveSignedIn(ctx *azugo.Context, client, sid string, sess *sess
 	return true
 }
 
-func (r *router) entrustRedirectURI() string {
-	return r.Config().RedirectURI()
+// answeredBy reports whether a provider's answer came from the provider the
+// sign-in was sent to, and answers the refusal when it did not: it arrived on
+// another provider's return path, or names another issuer than that provider's
+// [RFC 9700 §4.4.2; RFC 9207 §2.4]. A flow stored before providers were named
+// was sent to the only one there was.
+func (r *router) answeredBy(ctx *azugo.Context, flow *session.Flow, entry *upstream.Entry) bool {
+	sent := flow.Upstream == entry.Name || (flow.Upstream == "" && len(r.Upstreams().Entries()) == 1)
+	if !sent {
+		r.Audit().LoginFailure(ctx, "the provider's answer arrived on another provider's return path")
+		r.cannotStart(ctx, fasthttp.StatusUnauthorized, corehttp.UnauthorizedError{}, "")
+
+		return false
+	}
+	if iss := ctx.Query.StringOptional("iss"); iss != nil && entry.Provider.Issuer() != "" && *iss != entry.Provider.Issuer() {
+		r.Audit().LoginFailure(ctx, "the provider's answer names another issuer")
+		r.cannotStart(ctx, fasthttp.StatusUnauthorized, corehttp.UnauthorizedError{}, "")
+
+		return false
+	}
+
+	return true
 }
 
 // returnedHere reports whether the provider's answer reached the browser that
