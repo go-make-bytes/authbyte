@@ -13,9 +13,10 @@ import (
 //
 // It is a FRONT-CHANNEL endpoint: the browser MUST navigate here (a top-level
 // redirect). A server-to-server call cannot clear a cookie that lives in the
-// user's browser on the eParaksts domain. It ends no session and takes no value
-// that names one, because a browser address is kept in history and logs: the
-// client ends the authority's session server to server first (/revoke).
+// user's browser on the eParaksts domain. It takes no value that names a session,
+// because a browser address is kept in history and logs: the client ends its own
+// session server to server first (/revoke). The browser's shared-session cookie,
+// when it holds one, ends the shared session and every app session under it.
 //
 // Query:
 //
@@ -53,9 +54,10 @@ func (r *router) logout(ctx *azugo.Context) {
 		return
 	}
 
-	// The browser's shared session ends with its sign-out, and its cookie goes.
+	// The browser's shared session ends with its sign-out, with every app session
+	// signed in under it, and its cookie goes.
 	if id, sh := r.browserShared(ctx); sh != nil {
-		r.signOutShared(ctx, id)
+		r.endShared(ctx, id, sh.Subject, endedSignOut)
 		clearCookie(ctx, sharedCookie)
 	}
 

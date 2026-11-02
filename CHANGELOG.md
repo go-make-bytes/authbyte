@@ -3,7 +3,21 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
-## v0.6.0
+## v0.5.0
+
+### Removed — the step-up (breaking change)
+
+- **Breaking change: `POST /step-up` and `POST /webeid/login` are gone** (both answer `404`). A session's login method
+  and assurance are fixed by its sign-in. A client that needs another proof, such as a signing step that needs a
+  certificate the session did not capture, starts a fresh sign-in naming the way it wants in `acr_values`; that makes
+  a new session. The card is read on this service's own sign-in page, as before.
+- **Breaking change for the client registry: `step_up_methods` is no longer a setting.** The registry refuses unknown
+  keys, so a registry that still lists it stops the start, naming the key. Remove the line from every row before
+  taking this release.
+- **A code exchange always answers a refresh token**, since every code now belongs to a new session.
+- **The security events have no step-up any more:** no authentication event carries `kind: step_up`.
+- **A step-up begun before the upgrade completes nothing:** its return from the provider is refused with the page that
+  says the sign-in cannot start, and a card answer to it shows the sign-in page again. Such a flow lives ten minutes.
 
 ### Added — single sign-on: a browser that has signed in signs the next app in without a page
 
@@ -25,34 +39,24 @@ runs the service or integrates against it.
 - **One person per browser:** another person's sign-in in the same browser ends the earlier shared session and every
   session signed in under it, whose refresh tokens are refused from then on. The same client signing in again in a
   browser ends its own earlier session there.
-- **Signing out ends the shared session:** `POST /revoke` of a session ends the shared session it was signed in
-  under, and the browser's `GET /logout` ends the one its cookie names and clears the cookie, so the next app shows
-  the page again. The other sessions signed in under it are not ended by this release.
+- **Signing out of one app signs out of every app:** `POST /revoke` of a session ends the shared session it was
+  signed in under and, at once, every session signed in under it, of every client (single sign-on or not), with their
+  refresh tokens; the browser's `GET /logout` does the same for the shared session its cookie names and clears the
+  cookie. Another app open in the browser ends at its next renewal, at the latest when its access token ends
+  (`USER_TOKEN_TTL`, 15 minutes by default); until then the access token it holds still works. A revoke says nothing
+  of why, so a session an app discards after a failed ID token check ends the others too. An app answered from the
+  shared session at the moment it is ended is not answered, and is shown the page. Nothing is sent to the apps
+  themselves (no back-channel sign-out yet), and discovery still advertises no `end_session_endpoint`.
 - **Security events:** authentication events of kind `shared_session_created`, `shared_session_reused` (naming the
   client), `shared_session_refused` (naming the client and why: way, age, identity, membership, register) and
-  `shared_session_ended` (why: another person, sign-out). None names the identity code or a name.
+  `shared_session_ended` (why: another person, sign-out; and `sessions`, how many sessions ended with it, once per
+  end). None names the identity code or a name.
 - **New cache keys:** `shared:{id}` and `shared-apps:{id}` (see the state table in the README).
 
 ### Fixed
 
 - **`secret_ref: file:/path` reads the secret from the file at that path**, as the settings table says. It used to
   read a variable named after the text, found nothing, and fell through to the derived name.
-
-## v0.5.0
-
-### Removed — the step-up (breaking change)
-
-- **Breaking change: `POST /step-up` and `POST /webeid/login` are gone** (both answer `404`). A session's login method
-  and assurance are fixed by its sign-in. A client that needs another proof, such as a signing step that needs a
-  certificate the session did not capture, starts a fresh sign-in naming the way it wants in `acr_values`; that makes
-  a new session. The card is read on this service's own sign-in page, as before.
-- **Breaking change for the client registry: `step_up_methods` is no longer a setting.** The registry refuses unknown
-  keys, so a registry that still lists it stops the start, naming the key. Remove the line from every row before
-  taking this release.
-- **A code exchange always answers a refresh token**, since every code now belongs to a new session.
-- **The security events have no step-up any more:** no authentication event carries `kind: step_up`.
-- **A step-up begun before the upgrade completes nothing:** its return from the provider is refused with the page that
-  says the sign-in cannot start, and a card answer to it shows the sign-in page again. Such a flow lives ten minutes.
 
 ## v0.4.0
 

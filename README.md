@@ -154,7 +154,7 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 | `GET /signin/language` | Keeps the language the person picked (`lang`) and shows the page again (`next`, this service's own `/authorize` only, rebuilt from its parsed query) | anonymous |
 | `GET /signin/{name}` | The page's stylesheet and typeface, and the operator's mark | anonymous |
 | `GET /callback` | Handle the identity-provider redirect: exchange the code, read claims, resolve the person, establish a session, mint a single-use app authorization code | state-verified (path configurable) |
-| `GET /logout` | The browser's leg of a sign-out (`client_id`, `redirect_uri`, optional `login_method`): send the browser to `redirect_uri`, which must be on the client's `post_logout_redirect_uris` (a sign-in return is not a sign-out landing). For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone. It ends no session and takes no value naming one: the client ends the session with `POST /revoke` first | anonymous (`redirect_uri` allowlisted) |
+| `GET /logout` | The browser's leg of a sign-out (`client_id`, `redirect_uri`, optional `login_method`): send the browser to `redirect_uri`, which must be on the client's `post_logout_redirect_uris` (a sign-in return is not a sign-out landing). For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone. It takes no value naming a session: the client ends its own with `POST /revoke` first. The browser's single sign-on cookie, when it holds one, ends that shared session and every session signed in under it, and is cleared | anonymous (`redirect_uri` allowlisted) |
 | `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` (with the `client_id` the token was issued to) \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof. A confidential client proves itself at every grant with its secret, by HTTP Basic (`client_secret_basic`) or in the form (`client_secret_post`), never both in one request, and at the code exchange before the code is spent; a public client sends none | PKCE / client secret / refresh token + client + session key / subject token — all + DPoP |
 | `POST /revoke` | End a session server to server ([RFC 7009]): `token` (the refresh token), `client_id`, optional `token_type_hint` (ignored). `200` when ended or when the token is unknown; `401` for another client's token, a proof of another key, or a confidential client without its secret; `503` when the store cannot be read | the session's own client (its secret, when confidential) + its DPoP key |
 | `GET /identity` | The internal identity plus `loa`, `login_method` and, to a token of a client whose row says `signing: true`, the signing flows that method permits. A token for any enabled sign-in client's audience is accepted | valid user token (DPoP) |
@@ -218,13 +218,19 @@ the client.
 - **One person per browser.** Another person signing in in the same browser ends the earlier shared session and every
   session signed in under it; their refresh tokens are refused from then on. The same client signing in again in a
   browser ends its own earlier session there.
-- **Signing out.** `POST /revoke` of a session ends the shared session it was signed in under, and `GET /logout` ends
-  the one its cookie names and clears the cookie, so no app is answered from it again. Sessions of other clients signed
-  in under it are not ended by this.
+- **Signing out of one app signs out of every app.** `POST /revoke` of a session ends the shared session it was signed
+  in under and, at once, every session signed in under that, of every client, single sign-on or not; `GET /logout`
+  does the same for the shared session its cookie names and clears the cookie. Their refresh tokens are refused from
+  that moment, so an app open elsewhere ends at its next renewal, at the latest when its access token ends
+  (`USER_TOKEN_TTL`); until then the access token it holds still works. The revoke does not say why the app revoked,
+  so a session an app discards (go-authbyte does after a failed ID token check) ends the others too. An app answered
+  from the shared session while it is being ended is not answered: it gets the page. Nothing is sent to the apps
+  themselves yet (no back-channel sign-out).
 - **A signing client cannot be single sign-on** (the registry refuses both on one row): a signing session's identities
   are read from the provider at a sign-in.
 - **Security events:** kind `shared_session_created`, `shared_session_reused` (with the client),
-  `shared_session_refused` (with the client and why) and `shared_session_ended` (with why).
+  `shared_session_refused` (with the client and why) and `shared_session_ended` (with why, and `sessions`: how many
+  sessions ended with it).
 
 ## Architecture
 
@@ -335,7 +341,7 @@ the session. A sign-in through any other client fetches and keeps none of it.
 
 **The refresh token is a value of its own.** The first code exchange of a session answers a new random `refresh_token`; the session's internal id never leaves the service, and the store keeps the token only as a hash, under which it records the session and the client it was issued to. A refresh (`grant_type=refresh_token`, `refresh_token`, `client_id`) re-issues a user token only for the client the token was issued to and only when the caller presents the **same DPoP key** the session was bound to at the code exchange, so a refresh token taken from its client is useless. Tokens are not rotated: two refreshes of one session at the same moment both succeed. A session lives `SESSION_TTL` (12h) from its sign-in and nothing saved on it later extends that; at its end every refresh is refused. A refresh token that is gone, another client's, or whose session has ended is refused `401`. A session store that cannot be read answers `503` `err:upstream:unavailable`, because it says nothing about the session: a caller that ends its own session on a refusal keeps it through an outage here.
 
-**Sign-out runs in two legs.** The client first ends the session at this service, server to server: `POST /revoke` with `token` (the refresh token), `client_id` and a DPoP proof of the session's key ([RFC 7009]). The session and its refresh token are deleted and the ending is recorded as a security event naming the person. The right token from another client, or without the session's key, is refused `401` and the session goes on; a token this service does not hold is answered `200`, because there is nothing to end ([RFC 7009 §2.2]). Then the client sends the browser to `GET /logout?client_id=…&redirect_uri=…&login_method=…`, which carries no value naming the session: it only decides whether the browser passes through the identity provider's logout first.
+**Sign-out runs in two legs.** The client first ends the session at this service, server to server: `POST /revoke` with `token` (the refresh token), `client_id` and a DPoP proof of the session's key ([RFC 7009]). The session and its refresh token are deleted and the ending is recorded as a security event naming the person. The right token from another client, or without the session's key, is refused `401` and the session goes on; a token this service does not hold is answered `200`, because there is nothing to end ([RFC 7009 §2.2]). A session signed in under the browser's shared session ends that and every other session under it too (single sign-on, above). Then the client sends the browser to `GET /logout?client_id=…&redirect_uri=…&login_method=…`, which carries no value naming the session: it ends the shared session its cookie names, if any, and decides whether the browser passes through the identity provider's logout first.
 
 ---
 

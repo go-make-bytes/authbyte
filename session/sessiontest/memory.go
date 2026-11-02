@@ -315,13 +315,25 @@ func (m *Memory) SharedApps(_ context.Context, id string) (map[string]string, er
 	return apps, nil
 }
 
-func (m *Memory) EndShared(_ context.Context, id string) error {
+func (m *Memory) EndShared(_ context.Context, id string) (map[string]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	e, ok := m.entries["shared:"+id]
 	delete(m.entries, "shared:"+id)
+	if !ok || !m.live(e) {
+		return nil, session.ErrNotFound
+	}
+
+	apps := map[string]string{}
+	if e, ok := m.entries["shared-apps:"+id]; ok && m.live(e) {
+		if err := json.Unmarshal(e.value, &apps); err != nil {
+			return nil, err
+		}
+	}
 	delete(m.entries, "shared-apps:"+id)
 
-	return nil
+	return apps, nil
 }
 
 func (m *Memory) Ping(context.Context) error { return nil }

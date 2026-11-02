@@ -34,6 +34,12 @@ redis.call('PEXPIRE', KEYS[1], ARGV[3])
 if o then return o end
 return ''`
 
+// takeSharedApps answers a shared session's list of app sessions and removes it
+// in one step, so the list is taken once.
+const takeSharedApps = `local a = redis.call('HGETALL', KEYS[1])
+redis.call('DEL', KEYS[1])
+return a`
+
 // Store keeps flows, application codes, sessions and refresh grants in the
 // application's shared cache, so they survive a restart and are shared by every
 // instance. Values are serialized by the cache, so nothing stored shares memory
@@ -330,19 +336,29 @@ func (s *Store) SharedApps(ctx context.Context, id string) (map[string]string, e
 	return con.Do(ctx, con.B().Hgetall().Key(s.key(sharedAppsInstance, id)).Build()).AsStrMap()
 }
 
-// EndShared removes the shared session id and its list of app sessions. The app
-// sessions themselves are the caller's to end.
-func (s *Store) EndShared(ctx context.Context, id string) error {
-	if err := s.shared.Delete(ctx, id); err != nil {
-		return err
-	}
-
+// EndShared removes the shared session id and answers the app sessions signed in
+// under it, by client, for the caller to end. The record goes first and its list
+// after it, each in one step, so of two ends at once only one takes the list (the
+// other is answered session.ErrNotFound, as the end of one already gone is), and
+// an app recorded after the list was taken finds the record gone when it reads it
+// again. Each step names one key, as a cluster needs.
+func (s *Store) EndShared(ctx context.Context, id string) (map[string]string, error) {
 	con := s.cache.Connection()
 	if con == nil {
-		return cache.ErrCacheUnavailable
+		return nil, cache.ErrCacheUnavailable
 	}
 
-	return con.Do(ctx, con.B().Del().Key(s.key(sharedAppsInstance, id)).Build()).Error()
+	removed, err := con.Do(ctx, con.B().Del().Key(s.key(sharedInstance, id)).Build()).AsInt64()
+	if err != nil {
+		return nil, err
+	}
+	if removed == 0 {
+		return nil, ErrNotFound
+	}
+
+	cmd := con.B().Eval().Script(takeSharedApps).Numkeys(1).Key(s.key(sharedAppsInstance, id)).Build()
+
+	return con.Do(ctx, cmd).AsStrMap()
 }
 
 // Ping verifies the cache can be reached.

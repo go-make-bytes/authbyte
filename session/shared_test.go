@@ -21,7 +21,7 @@ type sharedStore interface {
 	LoadShared(ctx context.Context, id string) (*session.Shared, error)
 	PutSharedApp(ctx context.Context, id, client, sid string, until time.Time) (string, error)
 	SharedApps(ctx context.Context, id string) (map[string]string, error)
-	EndShared(ctx context.Context, id string) error
+	EndShared(ctx context.Context, id string) (map[string]string, error)
 }
 
 // bothSharedStores runs check over the in-memory store and, with
@@ -61,13 +61,61 @@ func TestASharedSessionLivesAndEnds(t *testing.T) {
 
 		_, err = s.PutSharedApp(ctx, "one", "app", "sid-1", sh.ExpiresAt)
 		qt.Check(t, qt.IsNil(err))
-		qt.Assert(t, qt.IsNil(s.EndShared(ctx, "one")))
+		apps, err := s.EndShared(ctx, "one")
+		qt.Assert(t, qt.IsNil(err))
+		qt.Check(t, qt.DeepEquals(apps, map[string]string{"app": "sid-1"}))
 		_, err = s.LoadShared(ctx, "one")
 		qt.Check(t, qt.ErrorIs(err, session.ErrNotFound))
-		apps, err := s.SharedApps(ctx, "one")
+		apps, err = s.SharedApps(ctx, "one")
 		qt.Check(t, qt.IsNil(err))
 		qt.Check(t, qt.HasLen(apps, 0))
 		qt.Check(t, qt.ErrorIs(s.ReplaceShared(ctx, "one", got), session.ErrNotFound))
+	})
+}
+
+// C7 cases 12, 13: a shared session is ended once. Of two ends at once, one takes
+// its list of app sessions and the other is answered that it had ended. An app
+// recorded after the end makes a list of its own, which no end will take: the
+// reason an answer reads the shared session again after recording its app.
+func TestASharedSessionEndsOnce(t *testing.T) {
+	bothSharedStores(t, func(t *testing.T, s sharedStore) {
+		ctx := context.Background()
+		sh := aShared("sub-anna")
+		qt.Assert(t, qt.IsNil(s.CreateShared(ctx, "one", sh)))
+		for _, app := range []string{"a", "b", "c"} {
+			_, err := s.PutSharedApp(ctx, "one", app, "sid-"+app, sh.ExpiresAt)
+			qt.Assert(t, qt.IsNil(err))
+		}
+
+		var mu sync.Mutex
+		var taken []map[string]string
+		gone := 0
+		var wg sync.WaitGroup
+		for range 2 {
+			wg.Go(func() {
+				apps, err := s.EndShared(ctx, "one")
+				mu.Lock()
+				defer mu.Unlock()
+				if errors.Is(err, session.ErrNotFound) {
+					gone++
+
+					return
+				}
+				qt.Check(t, qt.IsNil(err))
+				taken = append(taken, apps)
+			})
+		}
+		wg.Wait()
+		qt.Check(t, qt.Equals(gone, 1))
+		qt.Assert(t, qt.HasLen(taken, 1))
+		qt.Check(t, qt.DeepEquals(taken[0], map[string]string{"a": "sid-a", "b": "sid-b", "c": "sid-c"}))
+
+		_, err := s.PutSharedApp(ctx, "one", "late", "sid-late", sh.ExpiresAt)
+		qt.Check(t, qt.IsNil(err))
+		_, err = s.LoadShared(ctx, "one")
+		qt.Check(t, qt.ErrorIs(err, session.ErrNotFound))
+		_, err = s.EndShared(ctx, "one")
+		qt.Check(t, qt.ErrorIs(err, session.ErrNotFound))
 	})
 }
 

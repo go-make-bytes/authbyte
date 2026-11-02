@@ -98,19 +98,19 @@ func (byCode) EnsureMapping(_ context.Context, _ string, p store.Profile) (strin
 }
 
 // sharedApp is the deployment above, with the card read on the page, its
-// security events recorded, and the given register.
-func sharedApp(t *testing.T, resolver authbytecore.ScopeResolver) (*azugo.TestApp, *sessiontest.Memory, *eventLog) {
+// security events recorded, the given register and any further setup.
+func sharedApp(t *testing.T, resolver authbytecore.ScopeResolver, setup ...func(*authbytecore.App)) (*azugo.TestApp, *sessiontest.Memory, *eventLog) {
 	t.Helper()
 
 	t.Setenv("WEBEID_ENGINE_URL", "http://localhost:9998")
 	events := &eventLog{}
-	app, mem := registryApp(t, sharedRegistry, func(a *authbytecore.App) {
+	app, mem := registryApp(t, sharedRegistry, append([]func(*authbytecore.App){func(a *authbytecore.App) {
 		a.SetWebEID(whoseCard{})
 		a.SetIdentities(byCode{})
 		if resolver != nil {
 			a.SetScopeResolver(resolver)
 		}
-	}, recordingAudit(events))
+	}, recordingAudit(events)}, setup...)...)
 	t.Cleanup(func() { clock = time.Now })
 
 	return app, mem, events
@@ -671,56 +671,70 @@ func TestAnotherPersonEndsTheFirstPersonsApps(t *testing.T) {
 	qt.Check(t, qt.Equals(ended[0]["reason"], endedAnotherPerson))
 }
 
-// Cases 37, 38, 41, 42: an app's sign-out (its revoke) ends the shared session it
-// was signed in under, so nothing more is answered; the other apps' sessions
-// stay until single sign-out arrives; a revoke that is refused changes nothing.
-func TestASignOutEndsTheSharedSession(t *testing.T) {
-	app, mem, events := sharedApp(t, nil)
+// C7 cases 1, 5, 7, 15 (C6's 37, 41, 42): an app's sign-out (its revoke) ends
+// the shared session it was signed in under and, at once, every app session
+// signed in under it with its refresh grant, so nothing more is answered and no
+// app renews; one ended event counts the sessions. A revoke that is refused ends
+// nothing. An access token already issued lives to its own end.
+func TestASignOutEndsEveryAppOfTheSharedSession(t *testing.T) {
+	var core *authbytecore.App
+	app, mem, events := sharedApp(t, nil, func(a *authbytecore.App) { core = a })
 	tc := app.TestClient()
+	ctx := context.Background()
 
-	first, verifier := signInByCard(t, tc, "plain-card", plainReturn, annasCard)
-	firstEdge := newEdge(t, app)
-	status, body := firstEdge.exchange(signIn{code: codeAt(t, first, plainReturn), verifier: verifier}, "plain-card", plainReturn)
-	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%s", body["_raw"]))
-	firstRefresh := body["refresh_token"].(string)
-
-	v2, ch2 := pkce()
-	second := authorizeIn(t, tc, "second-app", secondReturn, url.Values{"code_challenge": {ch2}})
-	secondEdge := newEdge(t, app)
-	status, body = secondEdge.exchange(signIn{code: codeAt(t, second, secondReturn), verifier: v2}, "second-app", secondReturn)
-	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%s", body["_raw"]))
-	secondRefresh := body["refresh_token"].(string)
+	plain := cardSignedIn(t, app, mem, tc, "plain-card", plainReturn, annasCard)
+	second := answeredApp(t, app, mem, tc, "second-app", secondReturn)
+	third := answeredApp(t, app, mem, tc, "needs-code", codeReturn)
+	all := []appIn{plain, second, third}
 	id, _ := sharedOf(t, mem, tc)
 
-	// 41: another client's revoke is refused and ends nothing.
-	status, _ = secondEdge.revoke(firstRefresh, "second-app")
+	// 5 (41): another client's revoke, and the right client's without the
+	// session's key, are refused and end nothing.
+	status, _ := second.edge.revoke(plain.refresh, "second-app")
 	qt.Check(t, qt.Equals(status, fasthttp.StatusUnauthorized))
-	_, err := mem.LoadShared(context.Background(), id)
+	status, _ = newEdge(t, app).revoke(plain.refresh, "plain-card")
+	qt.Check(t, qt.Equals(status, fasthttp.StatusUnauthorized))
+	_, err := mem.LoadShared(ctx, id)
 	qt.Check(t, qt.IsNil(err))
+	for _, a := range all {
+		qt.Check(t, qt.Equals(a.renews(), fasthttp.StatusOK), qt.Commentf("%s before the sign-out", a.client))
+	}
 
-	// 37, 42: the app's own revoke, whatever made it revoke.
-	status, _ = firstEdge.revoke(firstRefresh, "plain-card")
-	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK))
-	_, err = mem.LoadShared(context.Background(), id)
+	// 1 (37, 42): the app's own revoke, whatever made it revoke.
+	qt.Assert(t, qt.Equals(plain.signsOut(), fasthttp.StatusOK))
+	_, err = mem.LoadShared(ctx, id)
 	qt.Check(t, qt.ErrorIs(err, session.ErrNotFound))
+	for _, a := range all {
+		a.ended(t, mem)
+	}
 	a := authorizeIn(t, tc, "second-app", secondReturn, nil)
 	qt.Check(t, qt.Equals(codeAt(t, a, secondReturn), ""))
 
-	// 38: the other app's session stays until single sign-out.
-	status, _ = secondEdge.refresh(secondRefresh, "second-app")
-	qt.Check(t, qt.Equals(status, fasthttp.StatusOK))
-
-	ended := events.sharedEvents("shared_session_ended")
+	// 15: one ended event, naming the person, the reason and the count.
+	ended := events.sharedEnded()
 	qt.Assert(t, qt.HasLen(ended, 1))
-	qt.Check(t, qt.Equals(ended[0]["reason"], endedSignOut))
+	qt.Check(t, qt.Equals(ended[0].Actor.ID, "sub-"+annasCode))
+	qt.Check(t, qt.Equals(ended[0].Attributes["reason"], endedSignOut))
+	qt.Check(t, qt.Equals(ended[0].Attributes["sessions"], 3))
+	qt.Check(t, qt.HasLen(events.sharedEvents("session_ended"), 1))
+
+	// 7: an access token already issued is still accepted where this authority
+	// accepts one (the token exchange's subject token), to its own end, at most a
+	// user token's lifetime after it was issued.
+	_, err = core.Issuer().ParseSubjectToken(second.access)
+	qt.Check(t, qt.IsNil(err))
+	claims := tokenClaims(t, second.access)
+	lifetime := time.Duration(claims["exp"].(float64)-claims["iat"].(float64)) * time.Second
+	qt.Check(t, qt.IsTrue(lifetime <= core.Config().UserTokenTTL), qt.Commentf("lifetime %s", lifetime))
 }
 
-// Case 39: the browser's sign-out leg ends the shared session it names and clears
-// the cookie.
-func TestTheBrowsersSignOutEndsTheSharedSession(t *testing.T) {
-	app, mem, _ := sharedApp(t, nil)
+// C7 case 2 (C6's 39): the browser's sign-out leg ends the shared session it
+// names and every app session under it, and clears the cookie.
+func TestTheBrowsersSignOutEndsEveryApp(t *testing.T) {
+	app, mem, events := sharedApp(t, nil)
 	tc := app.TestClient()
-	signInByCard(t, tc, "plain-card", plainReturn, annasCard)
+	plain := cardSignedIn(t, app, mem, tc, "plain-card", plainReturn, annasCard)
+	second := answeredApp(t, app, mem, tc, "second-app", secondReturn)
 	id, _ := sharedOf(t, mem, tc)
 
 	a := got(t)(tc.Get("/logout?client_id=plain-card&redirect_uri=" + url.QueryEscape("https://plain.example/")))
@@ -728,4 +742,12 @@ func TestTheBrowsersSignOutEndsTheSharedSession(t *testing.T) {
 	qt.Check(t, qt.Equals(tc.Cookies()[sharedCookie], ""))
 	_, err := mem.LoadShared(context.Background(), id)
 	qt.Check(t, qt.ErrorIs(err, session.ErrNotFound))
+	for _, a := range []appIn{plain, second} {
+		a.ended(t, mem)
+	}
+
+	ended := events.sharedEnded()
+	qt.Assert(t, qt.HasLen(ended, 1))
+	qt.Check(t, qt.Equals(ended[0].Attributes["reason"], endedSignOut))
+	qt.Check(t, qt.Equals(ended[0].Attributes["sessions"], 2))
 }

@@ -150,14 +150,14 @@ type SessionStore interface {
 	// CreateShared stores a browser's new shared session until its ExpiresAt;
 	// ReplaceShared writes over a live one only, session.ErrNotFound when it has
 	// ended. PutSharedApp records an app session signed in under it, answering
-	// the one the same client had there before; SharedApps lists them by client;
-	// EndShared removes the shared session and that list.
+	// the one the same client had there before; EndShared removes the shared
+	// session and answers its app sessions by client, once: session.ErrNotFound
+	// when it had already ended.
 	CreateShared(ctx context.Context, id string, sh *session.Shared) error
 	ReplaceShared(ctx context.Context, id string, sh *session.Shared) error
 	LoadShared(ctx context.Context, id string) (*session.Shared, error)
 	PutSharedApp(ctx context.Context, id, client, sid string, until time.Time) (string, error)
-	SharedApps(ctx context.Context, id string) (map[string]string, error)
-	EndShared(ctx context.Context, id string) error
+	EndShared(ctx context.Context, id string) (map[string]string, error)
 	Ping(ctx context.Context) error
 }
 

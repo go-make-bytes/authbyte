@@ -133,6 +133,32 @@ func TestServiceTokenIssuedRecordsTenant(t *testing.T) {
 	qt.Check(t, qt.Equals(ev.Actor.ID, "svc:acme-dms"))
 }
 
+// A shared session's end names the person by their platform subject, why it
+// ended and how many app sessions ended with it, and nothing else: never an
+// identity code or a name.
+func TestSharedSessionEndedCountsTheSessions(t *testing.T) {
+	sink := &captureSink{}
+	rec := audit.New(secevents.NewEmitter(sink), nil, zap.NewNop())
+
+	withCtx(t, func(ctx *azugo.Context) {
+		rec.SharedSessionEnded(ctx, "sub:01PERSON", "sign-out", 3)
+	})
+
+	ev := sink.latest()
+	qt.Assert(t, qt.IsNotNil(ev))
+	qt.Check(t, qt.Equals(ev.EventType, secevents.EventAuthentication))
+	qt.Check(t, qt.Equals(ev.Outcome, broker.OutcomeSuccess))
+	qt.Assert(t, qt.IsNotNil(ev.Actor))
+	qt.Check(t, qt.Equals(ev.Actor.ID, "sub:01PERSON"))
+	qt.Check(t, qt.Equals(ev.Actor.Type, "user"))
+	qt.Check(t, qt.DeepEquals(ev.Attributes, map[string]any{
+		secevents.AttrKind:     "shared_session_ended",
+		secevents.AttrReason:   "sign-out",
+		secevents.AttrSeverity: string(secevents.SeverityInfo),
+		"sessions":             3,
+	}))
+}
+
 // A refused delegation is an authorization denial, attributed to the client
 // that asked and naming the subject it asked for.
 func TestDelegationRefused(t *testing.T) {

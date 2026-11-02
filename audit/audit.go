@@ -127,11 +127,13 @@ func (r *Recorder) SharedSessionRefused(ctx *azugo.Context, clientID, reason str
 		})
 }
 
-// SharedSessionEnded records the browser's shared session ended, and why
-// (another person signed in, or a sign-out).
-func (r *Recorder) SharedSessionEnded(ctx *azugo.Context, actorID, reason string) {
+// SharedSessionEnded records the browser's shared session ended, why (another
+// person signed in, or a sign-out), and how many app sessions ended with it.
+func (r *Recorder) SharedSessionEnded(ctx *azugo.Context, actorID, reason string, sessions int) {
 	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeSuccess,
-		actorRef(actorID, "user", ""), map[string]any{secevents.AttrKind: "shared_session_ended", secevents.AttrReason: reason})
+		actorRef(actorID, "user", ""), map[string]any{
+			secevents.AttrKind: "shared_session_ended", secevents.AttrReason: reason, "sessions": sessions,
+		})
 }
 
 func (r *Recorder) auth(ctx *azugo.Context, actorID, loa, method string, outcome broker.Outcome, reason string) {

@@ -184,7 +184,15 @@ func (r *router) answerFromShared(ctx *azugo.Context, req *authorizeRequest) (an
 
 		return true
 	}
-	r.addSharedApp(ctx, id, sh.ExpiresAt, req.clientID, sid)
+	// The answer stands only once its session is recorded under the shared one
+	// and the shared one is still there: a sign-out that ended it meanwhile took
+	// its list of app sessions without this one, which no sign-out would reach.
+	// It is ended here and the request goes on as without a shared session.
+	if !r.addSharedApp(ctx, id, sh.ExpiresAt, req.clientID, sid) || !r.sharedLive(ctx, id) {
+		r.endAppSession(ctx, sid)
+
+		return false
+	}
 
 	appCode := randomToken(24)
 	if err := r.Session().SaveAppCode(ctx, appCode, &session.AppCode{
@@ -246,7 +254,7 @@ func (r *router) joinShared(ctx *azugo.Context, sess *session.Session) (string, 
 		}
 		// Ended while this sign-in completed: a new one below.
 	} else if sh != nil {
-		r.endShared(ctx, id, sh, endedAnotherPerson)
+		r.endShared(ctx, id, sh.Subject, endedAnotherPerson)
 	}
 
 	id = randomToken(sharedIDBytes)
@@ -277,34 +285,51 @@ func (r *router) keepPerson(sh *session.Shared, sess *session.Session) {
 // addSharedApp records sid as client's app session under the shared session id,
 // and ends the session that client had there before: the app replaced its own
 // cookie with this sign-in, so nothing in the browser names that one any more.
-func (r *router) addSharedApp(ctx *azugo.Context, id string, until time.Time, client, sid string) {
+// It answers whether sid was recorded, and so whether a sign-out reaches it.
+func (r *router) addSharedApp(ctx *azugo.Context, id string, until time.Time, client, sid string) bool {
 	previous, err := r.Session().PutSharedApp(ctx, id, client, sid, until)
 	if err != nil {
 		ctx.Log().Warn("an app session could not be recorded under its shared session", zap.Error(err))
 
-		return
+		return false
 	}
 	if previous != "" && previous != sid {
 		r.endAppSession(ctx, previous)
 	}
+
+	return true
 }
 
-// endShared ends a shared session and every app session signed in under it.
-func (r *router) endShared(ctx *azugo.Context, id string, sh *session.Shared, reason string) {
-	apps, err := r.Session().SharedApps(ctx, id)
+// sharedLive reports whether the shared session id is still there; a store that
+// cannot answer counts as no.
+func (r *router) sharedLive(ctx *azugo.Context, id string) bool {
+	_, err := r.Session().LoadShared(ctx, id)
+
+	return err == nil
+}
+
+// endShared ends the shared session id of subject and every app session signed
+// in under it, with their refresh grants, so no app renews from this moment. Of
+// two ends at once, the one that took the list ends the sessions and records the
+// end, with how many it ended; one already gone ends nothing.
+func (r *router) endShared(ctx *azugo.Context, id, subject, reason string) {
+	if id == "" {
+		return
+	}
+
+	apps, err := r.Session().EndShared(ctx, id)
 	if err != nil {
-		ctx.Log().Warn("the app sessions of a shared session could not be read", zap.Error(err))
+		if !errors.Is(err, session.ErrNotFound) {
+			ctx.Log().Warn("a shared session, or the app sessions under it, could not be ended", zap.Error(err))
+		}
+
+		return
 	}
 	for _, sid := range apps {
 		r.endAppSession(ctx, sid)
 	}
-	if err := r.Session().EndShared(ctx, id); err != nil {
-		ctx.Log().Warn("a shared session could not be ended", zap.Error(err))
 
-		return
-	}
-
-	r.Audit().SharedSessionEnded(ctx, sh.Subject, reason)
+	r.Audit().SharedSessionEnded(ctx, subject, reason, len(apps))
 }
 
 // endAppSession ends one app session and its refresh grant: the app's next
@@ -319,24 +344,4 @@ func (r *router) endAppSession(ctx *azugo.Context, sid string) {
 	if err := r.Session().DeleteSession(ctx, sid); err != nil {
 		ctx.Log().Warn("an app session could not be ended", zap.Error(err))
 	}
-}
-
-// signOutShared ends the shared session an app session was signed in under, so
-// nothing more is answered from it. Its other app sessions are not ended here.
-func (r *router) signOutShared(ctx *azugo.Context, id string) {
-	if id == "" {
-		return
-	}
-
-	sh, err := r.Session().LoadShared(ctx, id)
-	if err != nil {
-		return
-	}
-	if err := r.Session().EndShared(ctx, id); err != nil {
-		ctx.Log().Warn("a shared session could not be ended", zap.Error(err))
-
-		return
-	}
-
-	r.Audit().SharedSessionEnded(ctx, sh.Subject, endedSignOut)
 }

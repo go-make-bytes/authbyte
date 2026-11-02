@@ -185,9 +185,12 @@ func (r *router) revoke(ctx *azugo.Context) {
 
 		return
 	}
-	// Nothing more is answered from the browser's shared session it came from:
-	// signing out here never signs straight back in elsewhere.
-	r.signOutShared(ctx, sess.Shared)
+	// One sign-out signs the person out of every app: the browser's shared
+	// session it came from ends, and every app session signed in under it, so
+	// nothing is answered from it and no app renews. The revoke does not say why
+	// the app revoked, so a session discarded after a failed ID token check ends
+	// them too, the reading that fails closed.
+	r.endShared(ctx, sess.Shared, sess.Subject, endedSignOut)
 
 	r.Audit().SessionEnded(ctx, sess.Subject, sess.LoginMethod)
 	ctx.StatusCode(fasthttp.StatusOK)
