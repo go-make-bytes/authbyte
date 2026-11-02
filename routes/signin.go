@@ -292,6 +292,12 @@ func (r *router) choose(ctx *azugo.Context) {
 	if !ok {
 		return
 	}
+	// A request that may show no page was never shown one.
+	if req.signAsk.none {
+		r.refuseAtClient(ctx, req, "login_required", "the person must sign in")
+
+		return
+	}
 	// The page is shown only for a request that names no way, or names the card.
 	ways, page := pageWays(req, r.offered(req.client))
 	if !page {
@@ -365,6 +371,11 @@ func (r *router) cardAnswer(ctx *azugo.Context) {
 	if !ok {
 		return
 	}
+	if req.signAsk.none {
+		r.refuseAtClient(ctx, req, "login_required", "the person must sign in")
+
+		return
+	}
 	if ways, page := pageWays(req, r.offered(req.client)); !page || !slices.Contains(ways, identity.LoginWebEID) {
 		r.Audit().LoginFailure(ctx, "card answer for a request the card is not offered to")
 		r.cannotStart(ctx, fasthttp.StatusForbidden, corehttp.ForbiddenError{}, "")
@@ -388,9 +399,10 @@ func (r *router) cardAnswer(ctx *azugo.Context) {
 	}
 
 	flow, err := r.Session().ConsumeFlow(ctx, string(form.Peek("state")))
-	if err != nil || flow.WebEIDNonce == "" || flow.StepUp || flow.ClientID != req.clientID {
-		// Used, expired, or never this page's: the page again, with a fresh
-		// challenge.
+	if err != nil || flow.WebEIDNonce == "" || flow.Binding == "" || flow.ClientID != req.clientID {
+		// Used, expired, or never this page's (a flow bound to no browser is a
+		// step-up saved before the step-up was removed): the page again, with a
+		// fresh challenge.
 		r.showPage(ctx, req, bindBrowser(ctx), noticeExpired)
 
 		return

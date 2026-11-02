@@ -100,9 +100,9 @@ type Configuration struct {
 	EparakstsClientSecret string `mapstructure:"eparaksts_client_secret"`
 	EparakstsRedirectPath string `mapstructure:"eparaksts_redirect_path"`
 	EparakstsScopes       string `mapstructure:"eparaksts_scopes"`
-	// Step-up acr_values that force a specific login method at Entrust. These
-	// MUST differ per method so step-up can actually force eParaksts Mobile vs
-	// eID Scan (the login-method ↔ signing-identity binding). The concrete URNs
+	// The acr_values that force a specific login method at Entrust. These MUST
+	// differ per method so a sign-in can actually force eParaksts Mobile vs eID
+	// Scan (the login-method ↔ signing-identity binding). The concrete URNs
 	// depend on the Entrust policy configuration, so they are env-configurable.
 	// NB: there is deliberately NO eID-card (sc_plugin) acr here — eID-card login
 	// goes through Web eID only; the eParaksts/TrustedX sc_plugin flow is not
@@ -545,7 +545,7 @@ func (c *Configuration) ScopeList() []string {
 }
 
 // ACRForMethod returns the Entrust acr_values that force the given login method
-// during step-up. Distinct values per method are what make the login-method ↔
+// at a sign-in. Distinct values per method are what make the login-method ↔
 // signing-flow binding enforceable: Entrust can only force the requested method
 // if each maps to its own acr.
 func (c *Configuration) ACRForMethod(method string) string {
@@ -555,9 +555,8 @@ func (c *Configuration) ACRForMethod(method string) string {
 	case identity.LoginEIDScan:
 		return c.EparakstsACREIDScan
 	case identity.LoginWebEID:
-		// Web eID card login is not an Entrust method, so it has no acr_values.
-		// Step-up TO Web eID is initiated via the Web eID challenge route
-		// (/webeid/challenge), not the Entrust /authorize redirect.
+		// Web eID card login is not an Entrust method, so it has no acr_values:
+		// the card is read on this service's own sign-in page.
 		return ""
 	default:
 		// "eid" (sc_plugin) intentionally has no acr — eID-card login is Web eID only.

@@ -1,7 +1,6 @@
 package routes
 
 import (
-	"encoding/json"
 	"net/url"
 	"testing"
 
@@ -24,7 +23,6 @@ sign_in_clients:
     enabled: true
     redirect_uris: [https://mobile.example/cb]
     methods: [eparakstsMobile]
-    step_up_methods: [eparakstsMobile]
   - client_id: card-only
     type: public
     audience: card-api
@@ -37,7 +35,6 @@ sign_in_clients:
     enabled: true
     redirect_uris: [https://every.example/cb]
     methods: [eparakstsMobile, eidScan, webEid]
-    step_up_methods: [webEid]
 `
 
 const (
@@ -148,62 +145,4 @@ func TestTheCardIsOfferedOnlyToAClientAllowedIt(t *testing.T) {
 	card := showPage(t, app.TestClient(), pageQuery("card-only", cardReturn))
 	qt.Check(t, qt.DeepEquals(ways(card.body), []string{identity.LoginWebEID}))
 	qt.Check(t, qt.Equals(flowCount(mem), 1))
-}
-
-// stepUpAs exchanges a sign-in for clientID and asks to step its session up to
-// method, answering the step-up's status.
-func stepUpAs(t *testing.T, app *azugo.TestApp, mem *sessiontest.Memory, clientID, redirectURI string, methods ...string) []int {
-	t.Helper()
-
-	e := newEdge(t, app)
-	in := seedSignIn(t, mem, clientID, redirectURI)
-	status, body := e.exchange(in, clientID, redirectURI)
-	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%s", body["_raw"]))
-	refresh, _ := body["refresh_token"].(string)
-
-	statuses := make([]int, 0, len(methods))
-	for _, m := range methods {
-		raw, err := json.Marshal(map[string]string{
-			"refresh_token":  refresh,
-			"client_id":      clientID,
-			"method":         m,
-			"code_challenge": "a-challenge",
-			"redirect_uri":   redirectURI,
-		})
-		qt.Assert(t, qt.IsNil(err))
-
-		tc := app.TestClient()
-		resp, err := tc.Post("/step-up", raw, tc.WithHost(testHost), tc.WithHeader("Content-Type", "application/json"))
-		qt.Assert(t, qt.IsNil(err))
-		statuses = append(statuses, resp.StatusCode())
-		fasthttp.ReleaseResponse(resp)
-	}
-
-	return statuses
-}
-
-// Case 37: a step-up goes only to a method on its client's step-up list. The card
-// and eID Scan are offered here but are not on mobile-only's list; each is refused
-// as a method outside the fixed list always was, 422, and so are the legacy plugin
-// "eid" and a wrong-case spelling.
-func TestAStepUpGoesOnlyToAMethodOnTheClientsList(t *testing.T) {
-	app, mem := methodsApp(t)
-
-	got := stepUpAs(t, app, mem, "mobile-only", mobileReturn, identity.LoginWebEID, identity.LoginEIDScan, identity.LoginEID, "EPARAKSTSMOBILE")
-	refused := fasthttp.StatusUnprocessableEntity
-	qt.Check(t, qt.DeepEquals(got, []int{refused, refused, refused, refused}))
-	qt.Check(t, qt.Equals(flowCount(mem), 0))
-
-	got = stepUpAs(t, app, mem, "mobile-only", mobileReturn, identity.LoginEParakstsMobile)
-	qt.Check(t, qt.DeepEquals(got, []int{fasthttp.StatusOK}))
-	qt.Check(t, qt.Equals(flowCount(mem), 1))
-}
-
-// Case 38: a client with no step-up list cannot step up at all.
-func TestAClientWithNoStepUpListCannotStepUp(t *testing.T) {
-	app, mem := methodsApp(t)
-
-	got := stepUpAs(t, app, mem, "card-only", cardReturn, identity.LoginWebEID)
-	qt.Check(t, qt.DeepEquals(got, []int{fasthttp.StatusUnprocessableEntity}))
-	qt.Check(t, qt.Equals(flowCount(mem), 0))
 }

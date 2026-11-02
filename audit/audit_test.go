@@ -81,12 +81,12 @@ func TestLoginSuccessEmitsSecurityEvent(t *testing.T) {
 	qt.Check(t, qt.Equals(ev.Actor.Type, "user"))
 }
 
-func TestStepUpFailureIsWarning(t *testing.T) {
+func TestLoginFailureIsWarning(t *testing.T) {
 	sink := &captureSink{}
 	rec := audit.New(secevents.NewEmitter(sink), nil, zap.NewNop())
 
 	withCtx(t, func(ctx *azugo.Context) {
-		rec.StepUpFailure(ctx, "eid", "achieved method mismatch")
+		rec.LoginFailure(ctx, "web eid token validation failed")
 	})
 
 	ev := sink.latest()
@@ -94,7 +94,8 @@ func TestStepUpFailureIsWarning(t *testing.T) {
 	qt.Check(t, qt.Equals(ev.EventType, secevents.EventAuthentication))
 	qt.Check(t, qt.Equals(ev.Outcome, broker.OutcomeFailure))
 	qt.Check(t, qt.Equals(str(ev.Attributes[secevents.AttrSeverity]), string(secevents.SeverityWarning)))
-	qt.Check(t, qt.Equals(str(ev.Attributes[secevents.AttrKind]), "step_up"))
+	qt.Check(t, qt.Equals(str(ev.Attributes[secevents.AttrReason]), "web eid token validation failed"))
+	qt.Check(t, qt.Equals(str(ev.Attributes[secevents.AttrKind]), ""))
 }
 
 func TestServiceTokenIssued(t *testing.T) {
@@ -130,6 +131,32 @@ func TestServiceTokenIssuedRecordsTenant(t *testing.T) {
 	qt.Assert(t, qt.IsNotNil(ev))
 	qt.Check(t, qt.Equals(str(ev.Attributes["tenant"]), "01TENANTACME"))
 	qt.Check(t, qt.Equals(ev.Actor.ID, "svc:acme-dms"))
+}
+
+// A shared session's end names the person by their platform subject, why it
+// ended and how many app sessions ended with it, and nothing else: never an
+// identity code or a name.
+func TestSharedSessionEndedCountsTheSessions(t *testing.T) {
+	sink := &captureSink{}
+	rec := audit.New(secevents.NewEmitter(sink), nil, zap.NewNop())
+
+	withCtx(t, func(ctx *azugo.Context) {
+		rec.SharedSessionEnded(ctx, "sub:01PERSON", "sign-out", 3)
+	})
+
+	ev := sink.latest()
+	qt.Assert(t, qt.IsNotNil(ev))
+	qt.Check(t, qt.Equals(ev.EventType, secevents.EventAuthentication))
+	qt.Check(t, qt.Equals(ev.Outcome, broker.OutcomeSuccess))
+	qt.Assert(t, qt.IsNotNil(ev.Actor))
+	qt.Check(t, qt.Equals(ev.Actor.ID, "sub:01PERSON"))
+	qt.Check(t, qt.Equals(ev.Actor.Type, "user"))
+	qt.Check(t, qt.DeepEquals(ev.Attributes, map[string]any{
+		secevents.AttrKind:     "shared_session_ended",
+		secevents.AttrReason:   "sign-out",
+		secevents.AttrSeverity: string(secevents.SeverityInfo),
+		"sessions":             3,
+	}))
 }
 
 // A refused delegation is an authorization denial, attributed to the client

@@ -154,16 +154,14 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 | `GET /signin/language` | Keeps the language the person picked (`lang`) and shows the page again (`next`, this service's own `/authorize` only, rebuilt from its parsed query) | anonymous |
 | `GET /signin/{name}` | The page's stylesheet and typeface, and the operator's mark | anonymous |
 | `GET /callback` | Handle the identity-provider redirect: exchange the code, read claims, resolve the person, establish a session, mint a single-use app authorization code | state-verified (path configurable) |
-| `GET /logout` | The browser's leg of a sign-out (`client_id`, `redirect_uri`, optional `login_method`): send the browser to `redirect_uri`, which must be on the client's `post_logout_redirect_uris` (a sign-in return is not a sign-out landing). For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone. It ends no session and takes no value naming one: the client ends the session with `POST /revoke` first | anonymous (`redirect_uri` allowlisted) |
+| `GET /logout` | The browser's leg of a sign-out (`client_id`, `redirect_uri`, optional `login_method`): send the browser to `redirect_uri`, which must be on the client's `post_logout_redirect_uris` (a sign-in return is not a sign-out landing). For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone. It takes no value naming a session: the client ends its own with `POST /revoke` first. The browser's single sign-on cookie, when it holds one, ends that shared session and every session signed in under it, and is cleared | anonymous (`redirect_uri` allowlisted) |
 | `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` (with the `client_id` the token was issued to) \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof. A confidential client proves itself at every grant with its secret, by HTTP Basic (`client_secret_basic`) or in the form (`client_secret_post`), never both in one request, and at the code exchange before the code is spent; a public client sends none | PKCE / client secret / refresh token + client + session key / subject token — all + DPoP |
 | `POST /revoke` | End a session server to server ([RFC 7009]): `token` (the refresh token), `client_id`, optional `token_type_hint` (ignored). `200` when ended or when the token is unknown; `401` for another client's token, a proof of another key, or a confidential client without its secret; `503` when the store cannot be read | the session's own client (its secret, when confidential) + its DPoP key |
-| `POST /step-up` | Re-authenticate with a stronger or different login method to satisfy a signing-flow binding; the session is named by `refresh_token` and `client_id`, the client it was issued to, and a confidential client adds its `client_secret` to the body. The `method` must be on the client's `step_up_methods` (else `422`; a row with none cannot step up). Returns a redirect (federated methods) or a Web eID challenge | existing session |
 | `GET /identity` | The internal identity plus `loa`, `login_method` and, to a token of a client whose row says `signing: true`, the signing flows that method permits. A token for any enabled sign-in client's audience is accepted | valid user token (DPoP) |
 | `POST /identity/persons` | Register a person before their first login: the identity code (any spelling; stored canonical) and the name create the person row with a stable subject and **no credential** — the subject an administrator then invites them to a membership register under. Idempotent on the code: `201` created, `200` already known (names filled only where the row has none); a code naming no country or an unknown identity type is `422 err:identity:invalid` (never echoed) | valid token carrying `identity:admin` (DPoP) |
 | `POST /identity/persons/lines` | Read, for up to 500 people at once (`{"subjects": ["sub:<id>", …]}`), whether each can sign in and what is known about how: the email a directory sign-in left (only when one is kept) and, for a person holding a national identity code, its country and displayed length — **never the code**. A person the platform does not know is left out. More than 500, an empty or non-list body or a malformed subject is `422 err:identity:invalid` (the values sent are never repeated). Answered `Cache-Control: no-store` | a **service acting as itself** (its own token: subject `svc:…`, naming no organisation and no actor) carrying `identity:lines` — a person's token, a token exchanged to act for someone and a service account's token for an organisation never read it, even holding the scope (DPoP) |
 | `GET /identity/persons/{personSub}/code` | Read one person's national identity code the way a person is shown it, with its country: `{"code": "…", "country": "LV"}`. A person not known, or holding no code, is `404 err:identity:not_found`; a malformed id is `422 err:identity:invalid`. Each code answered is recorded with the access audit as a routine read of the person by the calling service (`identity.read`, marked `identityCode`, never the code); the caller records the disclosure it makes onward. Answered `Cache-Control: no-store` | a **service acting as itself** carrying `identity:code`, refused as the lines read refuses — a grant for `identity:lines` never reaches a code (DPoP) |
 | `POST /authorize/card` | The sign-in page's card answer: the card signed the challenge the page was shown with. Its address carries the client's request, checked again; it needs the browser's binding cookie, the page's token, an `Origin` equal to `BASE_URL`'s and a challenge that browser was given; the engine checks the token, and the browser goes back to the client with a code (303), or to the page | anonymous (the page's browser) — **only if `WEBEID_ENGINE_URL` set** |
-| `POST /webeid/login` | Complete a card **step-up** (a flow `/step-up` issued with `webEid`): validate the token via the engine, elevate the session, mint an app authorization code. A sign-in's card is read on the page; a sign-in flow is refused here (`401`) | anonymous — **only if `WEBEID_ENGINE_URL` set** |
 | `GET /.well-known/jwks.json` | Signing public keys (active + retired-within-window) | anonymous |
 | `GET /.well-known/openid-configuration` | Discovery metadata (endpoints, supported grants, `S256`, `ES256`) | anonymous |
 | `GET /healthz` | Liveness — 200 whenever the process is up | anonymous |
@@ -178,7 +176,7 @@ The `/metrics` VictoriaMetrics registry and standard tracing/logging are provide
 
 A request to `/authorize` that names no way in (`acr_values` absent) is shown this service's own page: *Sign in to {client}*, one button per method the client's registration lists (`methods`, in that order, the first the main one) that this deployment's provider can start, each with a one-line hint, in English or Latvian. A request that names a way skips it, and `prompt=none` never shows it. A client allowed no such method is told so on the page; the card joins the page when it is read there.
 
-- **Tied to the browser.** Every `/authorize` sets an http-only cookie, `__Host-authbyte_signin` (the plain name only on a development server over plain HTTP), holding a random value that lives ten minutes and is kept across sign-ins, so two tabs both finish. Each flow keeps its hash; the page's choice and the provider's return (code or error) are refused without it, before the provider's code is exchanged. A flow a client's server started (a step-up) carries none and is not checked.
+- **Tied to the browser.** Every `/authorize` sets an http-only cookie, `__Host-authbyte_signin` (the plain name only on a development server over plain HTTP), holding a random value that lives ten minutes and is kept across sign-ins, so two tabs both finish. Each flow keeps its hash; the page's choice and the provider's return (code or error) are refused without it, before the provider's code is exchanged. Every sign-in has one, so a flow with none completes nowhere.
 - **The choice** is a form post with a token derived from that cookie and an `Origin` that must be this service's own (`BASE_URL`); a method the page did not offer is refused. A choice whose cookie has run out shows the page again, saying the sign-in took too long.
 - **A cancel or a provider failure** of a sign-in begun on the page brings the person back to the page with what happened, once; a sign-in whose client named the way is answered at the client, as before.
 - **The card** is read on the page where the deployment reads cards (`WEBEID_ENGINE_URL`) and the client's row lists `webEid`, in the row's order, as **eID**; a request naming `webEid` in `acr_values` is shown the page with the ways it names. The page is shown with a challenge tied to the browser; the page's script (`/signin/card.js`) has the Web eID library (`/signin/web-eid.js`, 2.1.0) ask the card to sign it and posts the answer to `/authorize/card`. The engine's `WEBEID_ORIGIN` names this service's own origin. Missing card software, a card that does not complete, and a browser running no script each get their message on the page.
@@ -195,6 +193,45 @@ A request to `/authorize` that names no way in (`acr_values` absent) is shown th
 | `SIGN_IN_RATE_LIMIT` | `60` | Sign-in requests one client address may make per window; `0` turns the limit off |
 | `SIGN_IN_RATE_WINDOW` | `1m` | The window |
 
+## Single sign-on
+
+Every completed sign-in, by the card on the page or through the provider, makes the browser's **shared session**: an
+http-only cookie `__Host-authbyte_sso` (the plain name only in development over HTTP), Secure, `SameSite=Lax`, for the
+session's whole life, naming a record of the person and each way they signed in with. The cache keeps only the hash of
+the cookie's secret, and the secret is replaced at every sign-in.
+
+A client whose registration says `single_sign_on: true` is answered from it with no page: `/authorize` sends the
+browser straight back with a code when the shared session fits the request, and otherwise goes on as without one.
+
+| The request is answered from the shared session when | Source |
+|---|---|
+| it has no `prompt=login` or `prompt=select_account`, and no `max_age=0`; a `max_age` covers the way's `auth_time` | OIDC Core §3.1.2.1, §3.1.2.3 |
+| a way the person signed in with is one the client allows, and one `acr_values` names when it names any (the most recent such way) | this service's method names |
+| the client's tokens carry no identity code, or the person has one | the client's `claims` |
+| the client requires no membership, or the register already holds one for the person (read only; no admission) | the client's `membership_required` |
+
+The answer is a new session: its own refresh token and `sid`; its ID token states the way it rests on (`acr`, `amr`)
+and that sign-in's `auth_time`; it ends when that way ends, never later. No tenant is kept on the shared session: an
+organisation is chosen per session, at its token issue. `prompt=none` is answered the same way, or `login_required` at
+the client.
+
+- **One person per browser.** Another person signing in in the same browser ends the earlier shared session and every
+  session signed in under it; their refresh tokens are refused from then on. The same client signing in again in a
+  browser ends its own earlier session there.
+- **Signing out of one app signs out of every app.** `POST /revoke` of a session ends the shared session it was signed
+  in under and, at once, every session signed in under that, of every client, single sign-on or not; `GET /logout`
+  does the same for the shared session its cookie names and clears the cookie. Their refresh tokens are refused from
+  that moment, so an app open elsewhere ends at its next renewal, at the latest when its access token ends
+  (`USER_TOKEN_TTL`); until then the access token it holds still works. The revoke does not say why the app revoked,
+  so a session an app discards (go-authbyte does after a failed ID token check) ends the others too. An app answered
+  from the shared session while it is being ended is not answered: it gets the page. Nothing is sent to the apps
+  themselves yet (no back-channel sign-out).
+- **A signing client cannot be single sign-on** (the registry refuses both on one row): a signing session's identities
+  are read from the provider at a sign-in.
+- **Security events:** kind `shared_session_created`, `shared_session_reused` (with the client),
+  `shared_session_refused` (with the client and why) and `shared_session_ended` (with why, and `sessions`: how many
+  sessions ended with it).
+
 ## Architecture
 
 One application object (`App` in [`app.go`](app.go)) wires every dependency once at startup and **fails closed** on misconfiguration — a missing token-signing key without the explicit development opt-in stops the process from starting, as does an unparseable client registry (an unknown key included, so a misspelling cannot load as an absent setting) or an invalid audit configuration. Cross-cutting concerns (structured logging + redaction, tracing, correlation) are installed exactly once by the platform library before any route is registered; nothing re-registers them.
@@ -208,8 +245,8 @@ flowchart TB
 
     subgraph Routes["routes/ — HTTP handlers"]
         AZ["authorize · callback · logout"]
-        TK["token (4 grants) · step-up"]
-        WB["webeid challenge · login"]
+        TK["token (4 grants) · revoke"]
+        WB["sign-in page · the card's answer"]
         ID["identity · jwks · discovery · readyz"]
     end
 
@@ -267,7 +304,7 @@ sequenceDiagram
     alt method not permitted via IdP (sc_plugin → eid)
         AC-->>SPA: 403 (eID card must use Web eID)
     else permitted (mobileid / mobile-eid / upstream)
-        AC->>PG: identity.upsert (person keyed on the identity code; a codeless directory login by its credential)
+        AC->>PG: identity.upsert (person keyed on the identity code <br/> a codeless directory login by its credential)
         AC-->>AC: GDPR access record (routine, fail-open)
         AC->>RD: SET sessions:{sid} NX (session, lifetime from now, SESSION_TTL)
         AC->>RD: SET codes:{appCode} (bound to session + PKCE, TTL 60s)
@@ -302,9 +339,9 @@ and a signing service falls back to resolving identities itself when fields are
 missing. Certificates carry personal data: they are never logged and die with
 the session. A sign-in through any other client fetches and keeps none of it.
 
-**The refresh token is a value of its own.** The first code exchange of a session answers a new random `refresh_token`; the session's internal id never leaves the service, and the store keeps the token only as a hash, under which it records the session and the client it was issued to. A step-up's code exchange answers no new one (the client keeps the token it holds). A refresh (`grant_type=refresh_token`, `refresh_token`, `client_id`) re-issues a user token only for the client the token was issued to and only when the caller presents the **same DPoP key** the session was bound to at the code exchange, so a refresh token taken from its client is useless. Tokens are not rotated: two refreshes of one session at the same moment both succeed. A session lives `SESSION_TTL` (12h) from its sign-in and nothing saved on it later extends that; at its end every refresh is refused. A refresh token that is gone, another client's, or whose session has ended is refused `401`. A session store that cannot be read answers `503` `err:upstream:unavailable`, because it says nothing about the session: a caller that ends its own session on a refusal keeps it through an outage here.
+**The refresh token is a value of its own.** The first code exchange of a session answers a new random `refresh_token`; the session's internal id never leaves the service, and the store keeps the token only as a hash, under which it records the session and the client it was issued to. A refresh (`grant_type=refresh_token`, `refresh_token`, `client_id`) re-issues a user token only for the client the token was issued to and only when the caller presents the **same DPoP key** the session was bound to at the code exchange, so a refresh token taken from its client is useless. Tokens are not rotated: two refreshes of one session at the same moment both succeed. A session lives `SESSION_TTL` (12h) from its sign-in and nothing saved on it later extends that; at its end every refresh is refused. A refresh token that is gone, another client's, or whose session has ended is refused `401`. A session store that cannot be read answers `503` `err:upstream:unavailable`, because it says nothing about the session: a caller that ends its own session on a refusal keeps it through an outage here.
 
-**Sign-out runs in two legs.** The client first ends the session at this service, server to server: `POST /revoke` with `token` (the refresh token), `client_id` and a DPoP proof of the session's key ([RFC 7009]). The session and its refresh token are deleted and the ending is recorded as a security event naming the person. The right token from another client, or without the session's key, is refused `401` and the session goes on; a token this service does not hold is answered `200`, because there is nothing to end ([RFC 7009 §2.2]). Then the client sends the browser to `GET /logout?client_id=…&redirect_uri=…&login_method=…`, which carries no value naming the session: it only decides whether the browser passes through the identity provider's logout first.
+**Sign-out runs in two legs.** The client first ends the session at this service, server to server: `POST /revoke` with `token` (the refresh token), `client_id` and a DPoP proof of the session's key ([RFC 7009]). The session and its refresh token are deleted and the ending is recorded as a security event naming the person. The right token from another client, or without the session's key, is refused `401` and the session goes on; a token this service does not hold is answered `200`, because there is nothing to end ([RFC 7009 §2.2]). A session signed in under the browser's shared session ends that and every other session under it too (single sign-on, above). Then the client sends the browser to `GET /logout?client_id=…&redirect_uri=…&login_method=…`, which carries no value naming the session: it ends the shared session its cookie names, if any, and decides whether the browser passes through the identity provider's logout first.
 
 ---
 
@@ -321,7 +358,7 @@ The `identity` package is the anti-corruption layer between the identity provide
 
 A card login permits the CSC signing flow that reads the card the same way the login did — the card in a reader for Web eID, read by a phone for eID Scan — and never the other card route. The `login_method` value is one camelCase literal shared by name with the signing service, so a login and the signature it authorises correlate on a single token. The binding **fails closed**: an unknown or empty method — and the plugin `eid` path — permits nothing. Two independent guards enforce the "eID card is Web eID only" rule: the callback rejects a login that resolves to `eid` with 403 even if the identity provider's page offered it, and the built-in login-method policy never maps a bare `eid`. Assurance-level and method vocabularies can be overridden per environment (`LOA_POLICY`) once production's exact `acr` values are confirmed.
 
-**Step-up** re-authenticates in place: it elevates the *existing* session rather than creating a new one, and enforces that the method actually achieved matches the one requested — so a user cannot "step up" to a stronger method yet authenticate with the old one and keep the binding unchanged. The client names the session by its refresh token and its own `client_id`; a step-up completed after the session has ended does not bring it back.
+**No step-up.** A session's login method and assurance are fixed by its sign-in, and nothing raises them later. A client that needs another proof, such as a signing step that needs a certificate the session did not capture, starts a fresh sign-in naming the way it wants (`acr_values`); that makes a new session. `id_token_hint` stays refused.
 
 ---
 
@@ -329,9 +366,9 @@ A card login permits the CSC signing flow that reads the card the same way the l
 
 All tokens are ES256 JWTs (RFC 7519) minted in `issuer/`. Access tokens are typed `at+jwt` (RFC 9068), DPoP sender-constrained via the `cnf.jkt` confirmation claim (RFC 9449), and scoped to a single audience; a token exchange takes only an access token as its subject.
 
-**ID tokens (OpenID Connect Core 1.0).** A sign-in whose `/authorize` (or card challenge) asked `scope=openid` gets an ID token at its code exchange, typed `JWT` and unbound: `iss`, `sub`, `aud` (the client alone, as a string), `iat`, `exp`, the client's `nonce` when it sent one, `auth_time` when it is known (a card sign-in, a provider that states it, or a sign-in the provider was made to repeat by `prompt=login` or `max_age`), `acr` (the method met, in this server's method names), `amr` (registered RFC 8176 means only; a card's are `hwk`, `mfa`, `pin`, `sc`) and `sid`, a public session name that is neither the refresh token nor the session's key. Nothing personal beyond the subject, and no `azp`. Refresh, step-up exchanges, client credentials and token exchange answer none. **ES256 only:** the standard asks an OpenID provider to support RS256 too; this server holds one EC key, and every client it serves checks ES256. A sign-in client's `client_id` may not also be an audience a door accepts, or its ID tokens would be accepted there.
+**ID tokens (OpenID Connect Core 1.0).** A sign-in whose `/authorize` asked `scope=openid` gets an ID token at its code exchange, typed `JWT` and unbound: `iss`, `sub`, `aud` (the client alone, as a string), `iat`, `exp`, the client's `nonce` when it sent one, `auth_time` when it is known (a card sign-in, a provider that states it, or a sign-in the provider was made to repeat by `prompt=login` or `max_age`), `acr` (the method met, in this server's method names), `amr` (registered RFC 8176 means only; a card's are `hwk`, `mfa`, `pin`, `sc`) and `sid`, a public session name that is neither the refresh token nor the session's key. Nothing personal beyond the subject, and no `azp`. Refresh, client credentials and token exchange answer none. **ES256 only:** the standard asks an OpenID provider to support RS256 too; this server holds one EC key, and every client it serves checks ES256. A sign-in client's `client_id` may not also be an audience a door accepts, or its ID tokens would be accepted there.
 
-**What `/authorize` reads beyond OAuth.** `acr_values` names methods in this server's own names (a provider's code is refused) and the provider is sent its own code for each. `prompt=none` answers `login_required` (no browser session is held); `consent` answers `consent_required`; `login` and `select_account` reach the provider. `max_age` makes the provider sign the person in again and refuses a sign-in older than it; a provider time from before the request refuses a sign-in it was made to repeat. `request`, `request_uri` and `id_token_hint` are refused. Every return to the client through the browser, code or error, carries `iss` (RFC 9207); the issuer is `AUTH_ISSUER_URL` without a trailing slash, the same string everywhere. Token, identity and card-login answers carry `Cache-Control: no-store`.
+**What `/authorize` reads beyond OAuth.** `acr_values` names methods in this server's own names (a provider's code is refused) and the provider is sent its own code for each. `prompt=none` is answered from the browser's shared session when it fits (see Single sign-on), else `login_required`; `consent` answers `consent_required`; `login` and `select_account` are never answered from the shared session and reach the provider. A `max_age` the shared session cannot meet makes the provider sign the person in again and refuses a sign-in older than it; a provider time from before the request refuses a sign-in it was made to repeat. `request`, `request_uri` and `id_token_hint` are refused. Every return to the client through the browser, code or error, carries `iss` (RFC 9207); the issuer is `AUTH_ISSUER_URL` without a trailing slash, the same string everywhere. Token, identity and card-login answers carry `Cache-Control: no-store`.
 
 | Token | Grant | Subject | Carries |
 |---|---|---|---|
@@ -357,11 +394,13 @@ The shared cache (Valkey or Redis, `CACHE_*`) holds only short-lived auth-flow a
 
 | Instance | Value | TTL | Notes |
 |---|---|---|---|
-| `flows:{state}` | in-progress login (PKCE, client, redirect, step-up intent, Web eID nonce) | 10m | consumed with `GETDEL` (atomic single use) |
+| `flows:{state}` | in-progress login (PKCE, client, redirect, the browser's binding, Web eID nonce) | 10m | consumed with `GETDEL` (atomic single use) |
 | `codes:{appCode}` | app authorization code → session + PKCE | 60s | consumed with `GETDEL` (replay-safe) |
 | `sessions:{sid}` | user session (subject, loa, method, scopes, DPoP thumbprint, the end of its lifetime, signing capabilities) | `SESSION_TTL` from the sign-in | created with `SET … NX`; every later save is `SET … XX` for what is left of its lifetime, so a session ended meanwhile stays ended and nothing extends it. `sid` never leaves the service. Capabilities hold identity certificates (personal data) — session-bound by design, never logged |
 | `refresh:{hash}` | the session id and the client a refresh token was issued to | the session's remaining lifetime | keyed by the SHA-256 of the token; the token itself is never stored. Deleted at `/revoke` |
 | `dpop-proofs:{jti}` | seen DPoP proof ids | proof max-age + leeway | `SET … NX`: one-time-use across every instance |
+| `shared:{id}` | a browser's shared session: the person (subject, names, identity code, directory), each way they signed in with (method, level, `auth_time`, `amr`, its end), the hash of the cookie's secret | until its last way ends (`SESSION_TTL` after that way's sign-in) | created with `SET … NX`; a sign-in by the same person rewrites it with `SET … XX`; no tenant is kept on it |
+| `shared-apps:{id}` | the sessions signed in under a shared session, by client | the shared session's end | written by one script that answers the client's earlier session, which is then ended; deleted with the shared session |
 
 A cache span in a trace is named by its operation and instance (`GET sessions`) and never by its key, because every key here is a session id, a token hash, a code, a login state or a proof id. Sessions and flows held under the earlier key layout (`flow:`, `code:`, `sess:`) are not read: taking this version signs everyone out once.
 
@@ -464,8 +503,8 @@ can be stated alongside the country.
 | `EPARAKSTS_CLIENT_SECRET` (`_FILE`) | — | Client secret (secret store) |
 | `EPARAKSTS_REDIRECT_PATH` | `/callback` | Callback path (set to the registered value when it differs) |
 | `EPARAKSTS_SCOPES` | `urn:lvrtc:fpeil:aa urn:safelayer:eidas:sign:identity:profile` | Login scope(s): electronic identification + the sign-identity profile (the latter enables login-time capability capture; drop it to turn capture off) |
-| `EPARAKSTS_ACR_MOBILE` | `urn:eparaksts:authentication:flow:mobileid` | Method-forcing `acr_values` for eParaksts Mobile step-up |
-| `EPARAKSTS_ACR_EIDSCAN` | `urn:eparaksts:authentication:flow:mobile-eid` | Method-forcing `acr_values` for eID Scan step-up |
+| `EPARAKSTS_ACR_MOBILE` | `urn:eparaksts:authentication:flow:mobileid` | Method-forcing `acr_values` for an eParaksts Mobile sign-in |
+| `EPARAKSTS_ACR_EIDSCAN` | `urn:eparaksts:authentication:flow:mobile-eid` | Method-forcing `acr_values` for an eID Scan sign-in |
 | `EPARAKSTS_LOGOUT_IDP` | `lvrtc-eipsign-idp` | IdP id for the logout endpoint (differs from the OAuth AS id) |
 
 **Token signing + DPoP**
@@ -533,8 +572,8 @@ sign_in_clients:
     baseline_scopes: [envelopes:read, documents:read]   # only where no membership is asked
     claims: [name, given_name, family_name, serial_number]   # the personal claims its tokens carry
     methods: [eparakstsMobile, eidScan, webEid]               # the sign-in methods it allows
-    step_up_methods: [eparakstsMobile, eidScan, webEid]       # a subset of methods; none: no step-up
     signing: true                 # told the signing flows; its sign-ins capture signing identities
+    single_sign_on: false         # true: answered from the browser's shared session (never with signing: true)
     client_name: Example Portal   # kept for a hosted sign-in page; nothing shows it yet
     logo_uri: https://portal.example/logo.svg
     redirect_uris: [https://portal.example/callback]
@@ -543,9 +582,9 @@ sign_in_clients:
 ```
 
 The document is read once at the start, and anything wrong in it stops the start: an unknown key
-(the earlier `public_clients` and `allowed_redirect_uris` included), a row without an
-`audience`, a confidential row without a secret or a public row with one, a step-up method that
-is not among the row's methods, a claim other than the four listed above, one id in both
+(the earlier `public_clients`, `allowed_redirect_uris` and `step_up_methods` included), a row
+without an `audience`, a confidential row without a secret or a public row with one, a claim
+other than the four listed above, one id in both
 sections, a `logo_uri` that is not `https`, and an address that is not absolute or carries a
 fragment. A sign-out or back-channel address may use `http` only for a confidential client. A
 row none of whose methods this deployment offers is logged as a warning: one file can serve
@@ -558,7 +597,7 @@ for.
 
 The `audit` package is a small `Recorder` façade over the platform emitters; the call sites in the login and token handlers are stable.
 
-- **Security telemetry (NIS2), always on** — login success/failure, step-up, logout, and user/service/delegated token issuance are emitted via `go-sec-events` as structured `security_event` lines the log pipeline ships to the SIEM. No broker dependency.
+- **Security telemetry (NIS2), always on** — login success/failure, logout, and user/service/delegated token issuance are emitted via `go-sec-events` as structured `security_event` lines the log pipeline ships to the SIEM. No broker dependency.
 - **Personal-data access (GDPR), on when `ACCESS_AUDIT_URL` is set** — the identity-record write the login performs is recorded as *created* (first login by any method) or *updated* (returning person / new method linked), and so is an administrator's registration of a person (`POST /identity/persons`; the administrator is the actor, the registered person the subject), each POSTed to `access-audit` with a DPoP-bound service token minted through this service's own `/token`. Delivery is **routine / fail-open** (local outbox + background drain), so a brief access-audit outage never fails a login.
 
 Because this service is both the token issuer *and* a client of access-audit, `AUDIT_CLIENT_ID` must be a registered service client with a grant for the audit audience/scope, and minting the audit token is a self-call to its own `/token`.
@@ -575,14 +614,13 @@ authbyte/
 ├── signin/                            — the sign-in page's words, language choice, headers and files
 ├── routes/                             — HTTP handlers
 │   ├── router.go       — route registration (optional surfaces fail-closed by absence)
-│   ├── authorize.go    — /authorize · /callback · session establishment + step-up branch
+│   ├── authorize.go    — /authorize · /callback · session establishment
 │   ├── signin.go       — the sign-in page: its ways, the choice, the language, its files
 │   ├── cookies.go      — the browser's binding, the page's token, the one-shot notice
 │   ├── token.go        — /token: 4 grants (code, client-credentials, refresh, exchange)
 │   ├── refresh.go      — refresh grants (the token's hash → session + client) · /revoke
 │   ├── dpop.go         — inbound DPoP verify + server-nonce challenge + jti replay
-│   ├── stepup.go       — /step-up (redirect vs Web eID challenge)
-│   ├── webeid.go       — /webeid/login (card step-up) · the card's completion
+│   ├── webeid.go       — the card's completion · its identity
 │   ├── logout.go       — the browser's sign-out leg (through the provider for federated methods)
 │   ├── identity.go     — /identity (permitted signing flows) · person registration
 │   ├── persons.go      — service-only person reads: sign-in lines · identity code
@@ -631,7 +669,7 @@ The container build is a multi-stage image (`Dockerfile`): a static `CGO_ENABLED
 - **No session value in a browser address or the store** — the internal session id never leaves the service; the refresh token is answered only to the client's server and kept only as a hash; sign-out ends the session server to server, and the browser's sign-out address carries no value naming it.
 - **Single-use flow artifacts** — login flows and app authorization codes are consumed atomically (`GETDEL`), so a replay under a race cannot reuse them; PKCE `code_verifier` is compared in constant time.
 - **Least privilege to data** — the database role is `EXECUTE`-only on stored procedures; the service never touches tables and never sees a schema column name in code. Service tokens are scoped to one audience by the registry grant matrix; a service subject can never be impersonated via token exchange.
-- **Open-redirect protection** — every `redirect_uri` (login, step-up, logout) is validated against the client's registered allowlist *before* any state is saved or any redirect issued.
+- **Open-redirect protection** — every `redirect_uri` (login, logout) is validated against the client's registered allowlist *before* any state is saved or any redirect issued.
 - **No personal data in logs** — the raw identity-provider userinfo payload is emitted only at debug level and must never be enabled in production; audit actors carry ids and assurance, not free-form PII, and platform log redaction is installed before any handler runs.
 
 ---

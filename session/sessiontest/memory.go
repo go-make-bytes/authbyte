@@ -226,4 +226,114 @@ func (m *Memory) DeleteRefresh(_ context.Context, key string) error {
 	return nil
 }
 
+func (m *Memory) CreateShared(_ context.Context, id string, sh *session.Shared) error {
+	b, err := json.Marshal(sh)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if sh.Expired(m.now()) {
+		return session.ErrNotFound
+	}
+	if e, ok := m.entries["shared:"+id]; ok && m.live(e) {
+		return errors.New("session: a shared session with this id exists")
+	}
+	m.entries["shared:"+id] = entry{value: b, expires: sh.ExpiresAt}
+
+	return nil
+}
+
+func (m *Memory) ReplaceShared(_ context.Context, id string, sh *session.Shared) error {
+	b, err := json.Marshal(sh)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	e, ok := m.entries["shared:"+id]
+	if !ok || !m.live(e) || sh.Expired(m.now()) {
+		return session.ErrNotFound
+	}
+	m.entries["shared:"+id] = entry{value: b, expires: sh.ExpiresAt}
+
+	return nil
+}
+
+func (m *Memory) LoadShared(_ context.Context, id string) (*session.Shared, error) {
+	var sh session.Shared
+	if err := m.get("shared:"+id, &sh, false); err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	expired := sh.Expired(m.now())
+	m.mu.Unlock()
+	if expired {
+		return nil, session.ErrNotFound
+	}
+
+	return &sh, nil
+}
+
+func (m *Memory) PutSharedApp(_ context.Context, id, client, sid string, until time.Time) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.now().Before(until) {
+		return "", session.ErrNotFound
+	}
+
+	apps := map[string]string{}
+	if e, ok := m.entries["shared-apps:"+id]; ok && m.live(e) {
+		if err := json.Unmarshal(e.value, &apps); err != nil {
+			return "", err
+		}
+	}
+	previous := apps[client]
+	apps[client] = sid
+
+	b, err := json.Marshal(apps)
+	if err != nil {
+		return "", err
+	}
+	m.entries["shared-apps:"+id] = entry{value: b, expires: until}
+
+	return previous, nil
+}
+
+func (m *Memory) SharedApps(_ context.Context, id string) (map[string]string, error) {
+	apps := map[string]string{}
+	if err := m.get("shared-apps:"+id, &apps, false); err != nil && !errors.Is(err, session.ErrNotFound) {
+		return nil, err
+	}
+
+	return apps, nil
+}
+
+func (m *Memory) EndShared(_ context.Context, id string) (map[string]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	e, ok := m.entries["shared:"+id]
+	delete(m.entries, "shared:"+id)
+	if !ok || !m.live(e) {
+		return nil, session.ErrNotFound
+	}
+
+	apps := map[string]string{}
+	if e, ok := m.entries["shared-apps:"+id]; ok && m.live(e) {
+		if err := json.Unmarshal(e.value, &apps); err != nil {
+			return nil, err
+		}
+	}
+	delete(m.entries, "shared-apps:"+id)
+
+	return apps, nil
+}
+
 func (m *Memory) Ping(context.Context) error { return nil }

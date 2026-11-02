@@ -443,39 +443,3 @@ func TestTheBrowserSignOutTakesNoSessionValue(t *testing.T) {
 	status, body := e.refresh(refresh, "portal-spa")
 	qt.Check(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%s", body["_raw"]))
 }
-
-// A step-up names the session by its refresh token and its own client; the
-// internal session id names nothing outside the authority.
-func TestAStepUpNamesTheSessionByItsRefreshToken(t *testing.T) {
-	app, mem := signInApp(t)
-	e := newEdge(t, app)
-
-	in, refresh := signedIn(t, app, mem, e)
-
-	stepUp := func(token, clientID string) int {
-		body, err := json.Marshal(map[string]string{
-			"refresh_token":  token,
-			"client_id":      clientID,
-			"method":         "webEid",
-			"code_challenge": "a-challenge",
-			"redirect_uri":   portalRedirect,
-		})
-		qt.Assert(t, qt.IsNil(err))
-
-		tc := app.TestClient()
-		resp, err := tc.Post("/step-up", body, tc.WithHost(testHost), tc.WithHeader("Content-Type", "application/json"))
-		qt.Assert(t, qt.IsNil(err))
-		defer fasthttp.ReleaseResponse(resp)
-
-		return resp.StatusCode()
-	}
-
-	flows := func() int { return len(mem.Keys("flow:")) }
-
-	qt.Check(t, qt.Equals(stepUp(in.sid, "portal-spa"), fasthttp.StatusUnauthorized), qt.Commentf("the internal id"))
-	qt.Check(t, qt.Equals(stepUp(refresh, "product-spa"), fasthttp.StatusUnauthorized), qt.Commentf("another client"))
-	qt.Check(t, qt.Equals(flows(), 0))
-
-	qt.Check(t, qt.Equals(stepUp(refresh, "portal-spa"), fasthttp.StatusOK))
-	qt.Check(t, qt.Equals(flows(), 1))
-}

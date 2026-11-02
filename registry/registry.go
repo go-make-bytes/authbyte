@@ -94,13 +94,15 @@ type SignInClient struct {
 	// Methods are the sign-in methods it allows, by this service's method names;
 	// those the deployment does not offer are never offered to it.
 	Methods []string `yaml:"methods"`
-	// StepUpMethods are the methods a session of this client may step up to; a
-	// subset of Methods, and none means no step-up.
-	StepUpMethods []string `yaml:"step_up_methods"`
 	// Signing says the client signs: its identity answer carries the signing flows
 	// a login method permits, and a sign-in through it captures the person's
 	// signing identities.
 	Signing bool `yaml:"signing"`
+	// SingleSignOn lets the client be answered from the browser's shared session,
+	// with no page, when that session fits its request. Off unless set. Every
+	// sign-in joins the shared session whatever this says; it decides only the
+	// answering.
+	SingleSignOn bool `yaml:"single_sign_on"`
 	// ClientName and LogoURI name the client to the person on the sign-in page.
 	ClientName string `yaml:"client_name"`
 	LogoURI    string `yaml:"logo_uri"`
@@ -269,10 +271,10 @@ func validateSignInClient(c SignInClient) error {
 	if len(c.BaselineScopes) > 0 && c.MembershipRequired != nil && *c.MembershipRequired {
 		return bad("requires a membership, so its baseline_scopes could never apply")
 	}
-	for _, m := range c.StepUpMethods {
-		if !slices.Contains(c.Methods, m) {
-			return bad("lists step_up_methods %q, which is not among its methods", m)
-		}
+	// A signing session's identities are read from the provider at a sign-in; an
+	// answer from the shared session has no provider to read them from.
+	if c.Signing && c.SingleSignOn {
+		return bad("signs, so it cannot be single_sign_on: its signing identities are read at a sign-in")
 	}
 	for _, claim := range c.Claims {
 		if !slices.Contains(knownClaims, claim) {

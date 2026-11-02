@@ -1,7 +1,7 @@
 // Package audit records the Identity/Auth service's audit events through the
 // platform's reusable emitter libraries:
 //
-// - NIS2-audit (NIS2 security telemetry) via go-sec-events — login / step-up,
+// - NIS2-audit (NIS2 security telemetry) via go-sec-events — login and logout,
 // user- and service-token issuance, and authorization denials — emitted as
 // structured security events the log pipeline ships to the SIEM.
 // - GDPR-audit (GDPR personal-data access) via go-gdpr-audit — the identity-record
@@ -27,7 +27,7 @@ import (
 	"github.com/gmb-lib/go-sec-events/secevents"
 )
 
-// Security event types this service emits. Login/step-up share the canonical
+// Security event types this service emits. Login uses the canonical
 // go-sec-events type; token issuance uses these service-specific types
 // alongside the library's service-token type.
 const (
@@ -67,22 +67,12 @@ func (r *Recorder) logger(ctx *azugo.Context) *zap.Logger {
 
 // LoginSuccess records a successful interactive login.
 func (r *Recorder) LoginSuccess(ctx *azugo.Context, actorID, loa, method string) {
-	r.auth(ctx, actorID, loa, method, false, broker.OutcomeSuccess, "")
+	r.auth(ctx, actorID, loa, method, broker.OutcomeSuccess, "")
 }
 
 // LoginFailure records a failed login (no subject established).
 func (r *Recorder) LoginFailure(ctx *azugo.Context, reason string) {
-	r.auth(ctx, "", "", "", false, broker.OutcomeFailure, reason)
-}
-
-// StepUpSuccess records a successful step-up / re-auth.
-func (r *Recorder) StepUpSuccess(ctx *azugo.Context, actorID, loa, method string) {
-	r.auth(ctx, actorID, loa, method, true, broker.OutcomeSuccess, "")
-}
-
-// StepUpFailure records a failed step-up (e.g. achieved method mismatch).
-func (r *Recorder) StepUpFailure(ctx *azugo.Context, method, reason string) {
-	r.auth(ctx, "", "", method, true, broker.OutcomeFailure, reason)
+	r.auth(ctx, "", "", "", broker.OutcomeFailure, reason)
 }
 
 // SessionEnded records a session ended at its client's request, server to server:
@@ -111,7 +101,42 @@ func (r *Recorder) Logout(ctx *azugo.Context, actorID, method string, federated 
 		actorRef(actorID, "user", ""), attrs)
 }
 
-func (r *Recorder) auth(ctx *azugo.Context, actorID, loa, method string, stepUp bool, outcome broker.Outcome, reason string) {
+// SharedSessionCreated records a sign-in that made, or renewed, the browser's
+// shared session for the person.
+func (r *Recorder) SharedSessionCreated(ctx *azugo.Context, actorID, method string) {
+	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeSuccess,
+		actorRef(actorID, "user", ""), map[string]any{secevents.AttrKind: "shared_session_created", secevents.AttrMethod: method})
+}
+
+// SharedSessionReused records an app signed in from the browser's shared
+// session, with no page shown.
+func (r *Recorder) SharedSessionReused(ctx *azugo.Context, actorID, clientID, method string) {
+	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeSuccess,
+		actorRef(actorID, "user", ""), map[string]any{
+			secevents.AttrKind: "shared_session_reused", secevents.AttrMethod: method, "client": clientID,
+		})
+}
+
+// SharedSessionRefused records an app the browser's live shared session could
+// not answer, and why (way, age, identity, membership, register); the person is
+// asked to sign in instead. It names no person.
+func (r *Recorder) SharedSessionRefused(ctx *azugo.Context, clientID, reason string) {
+	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeFailure,
+		actorRef("", "user", ""), map[string]any{
+			secevents.AttrKind: "shared_session_refused", secevents.AttrReason: reason, "client": clientID,
+		})
+}
+
+// SharedSessionEnded records the browser's shared session ended, why (another
+// person signed in, or a sign-out), and how many app sessions ended with it.
+func (r *Recorder) SharedSessionEnded(ctx *azugo.Context, actorID, reason string, sessions int) {
+	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeSuccess,
+		actorRef(actorID, "user", ""), map[string]any{
+			secevents.AttrKind: "shared_session_ended", secevents.AttrReason: reason, "sessions": sessions,
+		})
+}
+
+func (r *Recorder) auth(ctx *azugo.Context, actorID, loa, method string, outcome broker.Outcome, reason string) {
 	sev := secevents.SeverityInfo
 	if outcome != broker.OutcomeSuccess {
 		sev = secevents.SeverityWarning
@@ -123,9 +148,6 @@ func (r *Recorder) auth(ctx *azugo.Context, actorID, loa, method string, stepUp 
 	}
 	if loa != "" {
 		attrs["loa"] = loa
-	}
-	if stepUp {
-		attrs[secevents.AttrKind] = "step_up"
 	}
 	if reason != "" {
 		attrs[secevents.AttrReason] = reason

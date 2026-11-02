@@ -1,6 +1,8 @@
 package authbytecore
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -41,6 +43,22 @@ func TestClientSecretResolver_Env(t *testing.T) {
 	}
 	if got != "from-env" {
 		t.Fatalf("env ref = %q, want %q", got, "from-env")
+	}
+}
+
+func TestClientSecretResolver_File(t *testing.T) {
+	// file:/path reads the secret from the file at that path, as the README's
+	// settings say, trimmed as a mounted secret file is.
+	path := filepath.Join(t.TempDir(), "client-secret")
+	if err := os.WriteFile(path, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := clientSecretResolver("svc:no-such-client-xyz", "file:"+path)
+	if err != nil {
+		t.Fatalf("file ref: unexpected error: %v", err)
+	}
+	if got != "from-file" {
+		t.Fatalf("file ref = %q, want %q", got, "from-file")
 	}
 }
 

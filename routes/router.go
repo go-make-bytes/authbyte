@@ -71,21 +71,12 @@ func Init(a *authbytecore.App) error {
 	// next user in as the previous one).
 	a.Get("/logout", r.logout)
 
-	// The card step-up's completion (validated by the web-eid engine); a card
-	// sign-in is read on the page. Off unless WEBEID_ENGINE_URL is configured.
-	if a.Config().WebEIDEnabled() {
-		a.Post("/webeid/login", r.webeidLogin)
-	}
-
 	// Token endpoint (authorization_code | client_credentials | refresh_token).
 	a.Post("/token", r.token)
 
 	// Revocation (server to server): a client ends its session at the authority
 	// before it sends the browser through /logout.
 	a.Post("/revoke", r.revoke)
-
-	// Step-up / re-auth (existing session).
-	a.Post("/step-up", r.stepUp)
 
 	// Internal identity (valid user token required).
 	identityGroup := a.Group("/identity")

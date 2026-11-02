@@ -43,7 +43,6 @@ sign_in_clients:
     redirect_uris: [https://edge.example/callback]
     baseline_scopes: [records:read]
     methods: [webEid]
-    step_up_methods: [webEid]
     post_logout_redirect_uris: [https://edge.example/]
   - client_id: portal-spa
     type: public
@@ -54,7 +53,6 @@ sign_in_clients:
     baseline_scopes: [envelopes:read, envelopes:write, documents:read]
     claims: [name, given_name, family_name, serial_number]
     methods: [eparakstsMobile, eidScan, webEid]
-    step_up_methods: [eparakstsMobile, eidScan, webEid]
     signing: true
     post_logout_redirect_uris: [https://portal.example/]
   - client_id: product-spa

@@ -307,8 +307,8 @@ func (p *Provider) FederatedMethod(method string) bool { return p.fedSet[method]
 type AuthorizeParams struct {
 	State       string
 	RedirectURI string
-	// ACRValues optionally requests a specific assurance/method (used for
-	// step-up, e.g. to force a particular method).
+	// ACRValues optionally requests a specific assurance/method (a sign-in that
+	// names its way).
 	ACRValues string
 	UILocales string
 	Prompt    string
