@@ -263,6 +263,16 @@ func (p *Provider) IDTokenVerified() bool { return p.keys != nil }
 // Issuer is the identity provider's issuer as discovered or configured.
 func (p *Provider) Issuer() string { return p.cfg.Issuer }
 
+// Identifier names the provider: its issuer, else its authority (a provider
+// with fixed paths and no discovery may know no issuer), else "".
+func (p *Provider) Identifier() string {
+	if p.cfg.Issuer != "" {
+		return p.cfg.Issuer
+	}
+
+	return p.cfg.AuthorityURL
+}
+
 // AuthorizationOrigin is the origin of the provider's authorization endpoint:
 // where a sign-in started from this service's own page is sent on to.
 func (p *Provider) AuthorizationOrigin() string {

@@ -153,7 +153,7 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 | `POST /authorize/choice` | The sign-in page's answer: the method the person picked. Its address carries the client's request, checked again as `/authorize` checks it; it needs the browser's binding cookie, the page's token and an `Origin` equal to `BASE_URL`'s (a default port written there is left out, as browsers leave it out), and a method the page offered; it then sends the browser to the provider (303) | anonymous (the page's browser) |
 | `GET /signin/language` | Keeps the language the person picked (`lang`) and shows the page again (`next`, this service's own `/authorize` only, rebuilt from its parsed query) | anonymous |
 | `GET /signin/{name}` | The page's stylesheet and typeface, and the operator's mark | anonymous |
-| `GET /callback` | Handle the identity-provider redirect: exchange the code, read claims, resolve the person, establish a session, mint a single-use app authorization code | state-verified (path configurable) |
+| `GET /callback` | Handle the identity-provider redirect: exchange the code, read claims, resolve the person, establish a session, mint a single-use app authorization code. A program passing several providers serves one such path per provider, each accepting only the answers to sign-ins sent to its own provider | state-verified (path configurable) |
 | `GET /logout` | The browser's leg of a sign-out (`client_id`, `redirect_uri`, optional `login_method`): send the browser to `redirect_uri`, which must be on the client's `post_logout_redirect_uris` (a sign-in return is not a sign-out landing). For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone. It takes no value naming a session: the client ends its own with `POST /revoke` first. The browser's single sign-on cookie, when it holds one, ends that shared session and every session signed in under it, and is cleared | anonymous (`redirect_uri` allowlisted) |
 | `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` (with the `client_id` the token was issued to) \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof. A confidential client proves itself at every grant with its secret, by HTTP Basic (`client_secret_basic`) or in the form (`client_secret_post`), never both in one request, and at the code exchange before the code is spent; a public client sends none | PKCE / client secret / refresh token + client + session key / subject token — all + DPoP |
 | `POST /revoke` | End a session server to server ([RFC 7009]): `token` (the refresh token), `client_id`, optional `token_type_hint` (ignored). `200` when ended or when the token is unknown; `401` for another client's token, a proof of another key, or a confidential client without its secret; `503` when the store cannot be read | the session's own client (its secret, when confidential) + its DPoP key |
@@ -388,7 +388,7 @@ Token exchange lets a confidential client obtain an on-behalf-of token toward an
 
 **The service never touches database tables.** PostgreSQL access in [`store/postgres.go`](store/postgres.go) goes exclusively through `SECURITY DEFINER` stored procedures called with a uniform JSONB envelope (`CALL proc($1::jsonb, NULL::jsonb)` → `po_data`); the service connects with an `EXECUTE`-only role (`authbyte_public`) that has no direct table grants. The schema and the procedure logic are owned by the platform's separate `database` migration repo (one authored home per schema, shipped as one migration image) — this package only knows procedure *names* (`identity.upsert`, `identity.register`, `identity.get`). A procedure that fails after a write re-raises a structured error (SQLSTATE `P0001`) whose message is the same envelope, so a validation failure and a post-write rollback surface identically.
 
-The person is keyed on the eIDAS national identity code (`serial_number`), in **one canonical spelling** — the identity type, the country, a hyphen, and the national code with its separators removed (`PNOLV-XXXXXXXXXXX`). Every spelling a card or a provider writes is reduced to it before it is stored or compared, so the same human across different auth methods — different upstream subjects, and different ways of writing the same code — resolves to one internal subject. The country is never guessed: a code that names one keeps it, otherwise it comes from the card certificate's own country attribute — the nearest fact about a person there is, since they are holding the card — and a code that names no country, from a source that supplies none, refuses the login. `identity.upsert` reports whether the person was *created* on this call (first-ever login) so the caller emits the correct GDPR event (created vs updated); linking a new method to a known person is an update. `identity.register` creates the same row for a person who has **not** logged in yet — canonical code and name, no credential — so an invitee or a record-only worker has a platform subject from the first act; their first login matches the same canonical code and lands on that row. A person who signs in through an organisation's directory carries **no code at all**: the identity store resolves them by their credential handle (the provider's durable identifier) and creates them without one; a codeless person and the same human's card login are two persons until linked by a deliberate act.
+The person is keyed on the eIDAS national identity code (`serial_number`), in **one canonical spelling** — the identity type, the country, a hyphen, and the national code with its separators removed (`PNOLV-XXXXXXXXXXX`). Every spelling a card or a provider writes is reduced to it before it is stored or compared, so the same human across different auth methods — different upstream subjects, and different ways of writing the same code — resolves to one internal subject. The country is never guessed: a code that names one keeps it, otherwise it comes from the card certificate's own country attribute — the nearest fact about a person there is, since they are holding the card — and a code that names no country, from a source that supplies none, refuses the login. `identity.upsert` reports whether the person was *created* on this call (first-ever login) so the caller emits the correct GDPR event (created vs updated); linking a new method to a known person is an update. `identity.register` creates the same row for a person who has **not** logged in yet — canonical code and name, no credential — so an invitee or a record-only worker has a platform subject from the first act; their first login matches the same canonical code and lands on that row. A person who signs in through an organisation's directory carries **no code at all**: the identity store resolves them by their credential handle (the provider's durable identifier) and creates them without one; a codeless person and the same human's card login are two persons until linked by a deliberate act. **A credential is keyed by its provider and its handle**, since a handle is unique only at the provider that issued it (OpenID Connect Core §5.7): the same handle from two providers is two credentials and, without a code, two people. The empty provider is the deployment's first: every credential stored before a deployment had several providers is kept under it, the one-provider server and the card write it, and with several providers the entry marked `HoldsStored` (and any entry of that same provider) does; every other entry writes its provider's issuer, or its authority where it has none. A name the provider does not send leaves the stored name as it is.
 
 The shared cache (Valkey or Redis, `CACHE_*`) holds only short-lived auth-flow and session state (`session/`), every key TTL-bounded. Keys are `<CACHE_KEY_PREFIX>:<instance>:<key>`; the cache serializes every value, so nothing stored shares memory with the request it came from:
 
@@ -442,6 +442,30 @@ the `EPARAKSTS_*` variables instead — a named profile of the same connector ca
 provider's fixed endpoint paths, bespoke logout endpoint, scope and method vocabularies.
 **Setting both refuses to start** — one upstream per deployment, never a silent pick; a deployment
 that needs several providers side by side is a different composition of this service.
+
+**Several providers side by side: a Go program composing the service.** This repository's server
+runs one provider from its settings and has no setting for more. A Go program that embeds the
+service can pass its own set to `authbytecore.New` instead, with
+`authbytecore.WithUpstreams(entries ...upstream.Entry)`; the `OIDC_UPSTREAM_*` and `EPARAKSTS_*`
+settings are then neither required nor read, and `routes.Init` serves each entry's answers on its
+own path. Each entry names:
+
+- a `Name`, unique, which the sign-in records;
+- its `Provider`, built with `upstream.New` (or from `upstream.EParakstsProfile`), whose allowed
+  methods are the entry's methods;
+- its `ReturnPath` on this service, unique, and not one of the service's own routes;
+- an optional `DisplayName` for the page's button and `ACR`, the provider's own words for each
+  method;
+- `HoldsStored`, true on exactly one entry: the one whose people's sign-ins were stored before the
+  deployment had several providers (see "State and data model").
+
+The start is refused, naming what is wrong, when two entries claim one name, return path or method,
+when an entry claims `webEid` (the card's own door), allows no method, has no issuer or authority
+to keep its people under, or returns on one of the service's own routes. A sign-in goes to the
+entry of the method it asks for, and its answer is accepted only on that entry's return path, from
+the browser that started it, and, when the answer carries `iss`, naming that entry's issuer;
+anything else is refused before a code is exchanged with any provider (RFC 9700 §4.4.2, RFC 9207).
+A request naming ways of more than one entry in `acr_values` is shown the page with those ways.
 
 **The id_token path.** When the provider publishes a key set — its discovery document names a
 `jwks_uri`, as every mainstream provider's does, or `OIDC_UPSTREAM_JWKS_URL` and
@@ -634,7 +658,7 @@ authbyte/
     ├── issuer/         — user / service / delegated token minting (cnf.jkt)
     ├── identity/       — acr/amr resolver + login-method ↔ signing-flow binding
     ├── registry/       — declarative client ↔ audience ↔ scope matrix
-    ├── upstream/       — the generic upstream-OIDC connector (a provider is configuration; carries the eParaksts profile)
+    ├── upstream/       — the generic upstream-OIDC connector (a provider is configuration; carries the eParaksts profile) and the set of providers a composing program may pass (set.go)
     ├── webeid/         — web-eid engine stateless-validate adapter
     ├── session/        — the cache-backed store: flows, app codes, sessions, refresh grants, DPoP replay
     ├── store/          — PostgreSQL person mapping (procedures only)

@@ -221,6 +221,11 @@ type Configuration struct {
 	// DemoDir, when set, serves the static demo SPA from that directory under
 	// /demo (same-origin, so the browser can read the DPoP-Nonce header).
 	DemoDir string `mapstructure:"demo_dir"`
+
+	// upstreamsGiven is set when the composing program passed its own upstream
+	// providers (WithUpstreams): the upstream settings are then not read, so
+	// their one-family rule does not apply.
+	upstreamsGiven bool
 }
 
 // SignInRate is the sign-in routes' limit, per client address, in azugo's terms.
@@ -393,6 +398,9 @@ func (c *Configuration) Validate(valid *validation.Validate) error {
 		return err
 	}
 	c.IssuerURL = issuerIdentifier(c.IssuerURL)
+	if c.upstreamsGiven {
+		return nil
+	}
 
 	return c.validateUpstream()
 }
@@ -534,9 +542,31 @@ func (c *Configuration) CallbackPath() string {
 	return p
 }
 
-// RedirectURI returns the absolute callback URI sent to eParaksts.
-func (c *Configuration) RedirectURI() string {
-	return strings.TrimSuffix(c.BaseURL, "/") + c.CallbackPath()
+// upstreamEntry is the one upstream the settings describe, as the set's only
+// entry: on the callback path, named on the page as the deployment names it,
+// asked for each method in the eParaksts words the settings give, and holding
+// every sign-in the deployment has stored.
+func (c *Configuration) upstreamEntry(p *upstream.Provider) upstream.Entry {
+	name := "eparaksts"
+	if c.OIDCUpstreamAuthorityURL != "" ||
+		(c.OIDCUpstreamAuthorizeURL != "" && c.OIDCUpstreamTokenURL != "" && c.OIDCUpstreamUserInfoURL != "") {
+		name = "oidc"
+	}
+	acr := map[string]string{}
+	for _, m := range p.Methods() {
+		if v := c.ACRForMethod(m); v != "" {
+			acr[m] = v
+		}
+	}
+
+	return upstream.Entry{
+		Name:        name,
+		Provider:    p,
+		ReturnPath:  c.CallbackPath(),
+		DisplayName: c.OIDCUpstreamDisplayName,
+		ACR:         acr,
+		HoldsStored: true,
+	}
 }
 
 // ScopeList returns the configured eParaksts scopes.

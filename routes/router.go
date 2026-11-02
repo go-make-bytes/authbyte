@@ -63,7 +63,14 @@ func Init(a *authbytecore.App) error {
 	}
 	a.Get("/signin/language", r.chooseLanguage)
 	a.Get("/signin/{name}", r.signinAsset)
-	a.Get(a.Config().CallbackPath(), r.callback)
+	// Each provider answers on its own path, so an answer can only be for a
+	// sign-in sent to that provider [RFC 9700 §4.4.2.2].
+	for _, e := range a.Upstreams().Entries() {
+		if coreRoute(e.ReturnPath) {
+			return fmt.Errorf("upstream %s: return path %s is one of this service's own routes", e.Name, e.ReturnPath)
+		}
+		a.Get(e.ReturnPath, r.callbackFor(e))
+	}
 
 	// Logout (front-channel): clears the server session and, for eParaksts-
 	// federated logins, bounces the browser through the eParaksts IdP logout so
@@ -97,6 +104,19 @@ func Init(a *authbytecore.App) error {
 // signInLimit limits a sign-in route per client address, under its own name so
 // its counts are its own. A refusal answers 429 with Retry-After [RFC 6585 §4];
 // the routes' own answers, which carry a flow's state, are kept by no cache.
+// coreRoute reports whether path is one of this service's own routes or lies
+// under one of its route families, where no provider's answer may arrive.
+func coreRoute(path string) bool {
+	for _, p := range []string{"/healthz", "/readyz", "/.well-known", "/authorize", "/signin", "/logout", "/token",
+		"/revoke", "/identity", "/demo"} {
+		if path == p || strings.HasPrefix(path, p+"/") {
+			return true
+		}
+	}
+
+	return false
+}
+
 func signInLimit(rate *azugoconfig.RateLimit) func(azugo.RequestHandler) azugo.RequestHandler {
 	limit := middleware.RateLimit(rate, middleware.RateLimitName("sign-in"))
 

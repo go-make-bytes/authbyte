@@ -74,9 +74,9 @@ var claimsSupported = []string{
 }
 
 // offeredMethods are the sign-in methods this deployment offers, the names
-// acr_values may use: its provider's, and the card's when it has a card door.
+// acr_values may use: its providers', and the card's when it has a card door.
 func (r *router) offeredMethods() []string {
-	methods := r.Upstream().Methods()
+	methods := r.Upstreams().Methods()
 	if r.Config().WebEIDEnabled() {
 		methods = append(methods, identity.LoginWebEID)
 	}

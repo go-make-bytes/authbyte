@@ -24,6 +24,10 @@ type Flow struct {
 	SPAState string `json:"spa_state"`
 	// Entrust leg.
 	EntrustRedirectURI string `json:"entrust_redirect_uri"`
+	// Upstream names the upstream provider the sign-in was sent to; its answer
+	// completes the sign-in only on that provider's own return path. Empty in a
+	// flow stored before providers were named.
+	Upstream string `json:"upstream,omitempty"`
 	// RequestedMethods are the login methods a sign-in's acr_values asked for, in
 	// order; empty when it asked for none. The sign-in completes only with one of
 	// them.
