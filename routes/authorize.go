@@ -459,7 +459,7 @@ func (r *router) callback(ctx *azugo.Context, entry *upstream.Entry) {
 
 // establishSession resolves the person a sign-in proved and makes their new
 // session. provider names where the sign-in's handle came from ("" for the
-// deployment's first provider and the card).
+// deployment's first provider, identity.ProviderWebEID for the card).
 func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id identity.Identity, provider string) (*session.Session, string, error) {
 	// A sign-in completes only with a method the request asked for. Checked before
 	// the identity store is touched, so a refused sign-in writes nothing.

@@ -130,6 +130,36 @@ func TestUpstreamConfigKeysBindToEnvironment(t *testing.T) {
 	}
 }
 
+// The generic upstream is trusted with identity codes only when
+// the deployment says so, the eParaksts profile always; and a generic upstream
+// with a code claim named but no trust is refused at the start, naming both
+// settings, so an upgrade never quietly stops matching people by the code.
+func TestTheGenericUpstreamIsTrustedWithCodesOnlyWhenSaid(t *testing.T) {
+	generic := Configuration{OIDCUpstreamAuthorityURL: "https://login.example/tenant/v2.0", OIDCUpstreamClientID: "cid"}
+	qt.Check(t, qt.IsFalse(generic.UpstreamConfig().TrustIdentityCodes))
+
+	trusted := generic
+	trusted.OIDCUpstreamTrustIdentityCodes = true
+	qt.Check(t, qt.IsTrue(trusted.UpstreamConfig().TrustIdentityCodes))
+
+	eparaksts := Configuration{EparakstsAuthorityURL: "https://eparaksts.example", EparakstsClientID: "e"}
+	qt.Check(t, qt.IsTrue(eparaksts.UpstreamConfig().TrustIdentityCodes))
+
+	named := generic
+	named.OIDCUpstreamClaimSerial = "serial_number"
+	err := named.validateUpstream()
+	qt.Assert(t, qt.IsNotNil(err))
+	qt.Check(t, qt.StringContains(err.Error(), "OIDC_UPSTREAM_CLAIM_SERIAL"))
+	qt.Check(t, qt.StringContains(err.Error(), "OIDC_UPSTREAM_TRUST_IDENTITY_CODES"))
+
+	named.OIDCUpstreamTrustIdentityCodes = true
+	qt.Check(t, qt.IsNil(named.validateUpstream()))
+
+	// A claim name changes nothing for the eParaksts profile, which is trusted.
+	eparaksts.OIDCUpstreamClaimSerial = "serial_number"
+	qt.Check(t, qt.IsNil(eparaksts.validateUpstream()))
+}
+
 // The email claim name reaches the connector under either profile, and an unset
 // name is left for the connector's own default.
 func TestUpstreamConfigCarriesTheEmailClaim(t *testing.T) {

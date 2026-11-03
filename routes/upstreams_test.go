@@ -677,13 +677,15 @@ func TestAnotherProviderWithoutACommonCodeIsAnotherPerson(t *testing.T) {
 	qt.Check(t, qt.Equals(sh.Subject, secondSess.Subject))
 }
 
-// The card's sign-in is keyed as it always was: by the empty provider.
-func TestTheCardKeysItsPeopleAsBefore(t *testing.T) {
+// The card's sign-in is kept under a provider of its own, so no other
+// provider's handle can name a card holder; the person is still found by the code.
+func TestTheCardKeepsItsSignInsUnderItsOwnProvider(t *testing.T) {
 	d := twoLaneApp(t)
 
 	a, _ := signInByCard(t, d.app.TestClient(), "card-sso", cardsReturn, annasCard)
 	qt.Assert(t, qt.Not(qt.Equals(codeAt(t, a, cardsReturn), "")), qt.Commentf("%d %s", a.status, a.body))
-	qt.Check(t, qt.Equals(d.people.last().profile.Provider, ""))
+	qt.Check(t, qt.Equals(d.people.last().profile.Provider, identity.ProviderWebEID))
+	qt.Check(t, qt.Equals(d.people.last().profile.SerialNumber, annasCode))
 }
 
 // Cases 21 and 23 (C6's rules, per way): a single sign-on client is answered from

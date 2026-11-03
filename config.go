@@ -54,6 +54,11 @@ type Configuration struct {
 	// OIDCUpstreamClaimSerial names the userinfo claim carrying the person's
 	// identity code (default serial_number).
 	OIDCUpstreamClaimSerial string `mapstructure:"oidc_upstream_claim_serial"`
+	// OIDCUpstreamTrustIdentityCodes says the generic OIDC upstream is trusted to
+	// name a person by the identity code it sends; off, its code claim is not
+	// read and its people are found by its issuer and their handle. The eParaksts
+	// profile is trusted always.
+	OIDCUpstreamTrustIdentityCodes bool `mapstructure:"oidc_upstream_trust_identity_codes"`
 	// The id_token path. OIDCUpstreamIssuer is the value the provider's id_token
 	// `iss` must carry and OIDCUpstreamJWKSURL where its signing keys are
 	// published — both discovered from the provider's document unless set here
@@ -309,6 +314,7 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("oidc_upstream_userinfo_url", "OIDC_UPSTREAM_USERINFO_URL")
 	_ = v.BindEnv("oidc_upstream_end_session_url", "OIDC_UPSTREAM_END_SESSION_URL")
 	_ = v.BindEnv("oidc_upstream_claim_serial", "OIDC_UPSTREAM_CLAIM_SERIAL")
+	_ = v.BindEnv("oidc_upstream_trust_identity_codes", "OIDC_UPSTREAM_TRUST_IDENTITY_CODES")
 	_ = v.BindEnv("oidc_upstream_issuer", "OIDC_UPSTREAM_ISSUER")
 	_ = v.BindEnv("oidc_upstream_jwks_url", "OIDC_UPSTREAM_JWKS_URL")
 	_ = v.BindEnv("oidc_upstream_claim_directory_id", "OIDC_UPSTREAM_CLAIM_DIRECTORY_ID")
@@ -427,6 +433,11 @@ func (c *Configuration) validateUpstream() error {
 		return fmt.Errorf("OIDC_UPSTREAM_CLIENT_ID is required with the generic OIDC upstream")
 	case !generic && eparaksts && c.EparakstsClientID == "":
 		return fmt.Errorf("EPARAKSTS_CLIENT_ID is required with the eParaksts upstream")
+	// A claim named for a provider whose codes are not read would be a setting
+	// someone believes is in force, and a deployment that matched people by it
+	// would quietly stop doing so.
+	case generic && c.OIDCUpstreamClaimSerial != "" && !c.OIDCUpstreamTrustIdentityCodes:
+		return fmt.Errorf("OIDC_UPSTREAM_CLAIM_SERIAL names an identity-code claim, but the generic OIDC upstream is not trusted with identity codes, so the claim is never read: set OIDC_UPSTREAM_TRUST_IDENTITY_CODES=true for a provider that verified the people it signs in, or unset the claim")
 	}
 
 	return nil
@@ -453,6 +464,8 @@ func (c *Configuration) UpstreamConfig() upstream.Config {
 			Issuer:        c.OIDCUpstreamIssuer,
 			JWKSURL:       c.OIDCUpstreamJWKSURL,
 			MethodDefault: "upstream",
+
+			TrustIdentityCodes: c.OIDCUpstreamTrustIdentityCodes,
 		}
 	} else {
 		cfg = upstream.EParakstsProfile(c.EparakstsAuthorityURL, c.EparakstsLogoutIDP)

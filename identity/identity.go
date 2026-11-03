@@ -29,6 +29,14 @@ const (
 	LoginWebEID          = "webEid"          // Web eID browser login (web-eid engine; NOT the eParaksts IdP)
 )
 
+// ProviderWebEID is the provider the card's sign-ins are kept under: a card
+// sign-in's handle is the holder's identity code, so in a namespace of its own no
+// other provider's handle can ever name a card holder. Named for the engine that
+// reads the card, since a card read some other way arrives through that way's
+// provider. No upstream's identifier can be it: an upstream's is its issuer, an
+// address.
+const ProviderWebEID = "webeid"
+
 // IsEParakstsLoginAllowed reports whether a login method resolved from an
 // eParaksts IdP (TrustedX) callback is permitted. Only eParaksts Mobile and eID
 // Scan are. The eID smart card via the TrustedX plugin (sc_plugin → LoginEID) is

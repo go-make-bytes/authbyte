@@ -92,6 +92,13 @@ type Config struct {
 	// ClaimSerial names the userinfo claim carrying the person's identity
 	// code (default "serial_number").
 	ClaimSerial string
+	// TrustIdentityCodes says this provider is trusted to name a person by their
+	// identity code. A person is found by their code across every way they sign
+	// in, so a code is taken only from a provider that verified it; from any other
+	// the claim is not read, and its people are found by the provider and their
+	// handle alone [OpenID Connect Core §5.7]. False, the zero value, is standard
+	// OpenID behaviour; the eParaksts profile sets it.
+	TrustIdentityCodes bool
 
 	// Issuer is the value the provider's id_token `iss` claim must carry, and
 	// the identity the platform records a login as having come through.
@@ -634,8 +641,13 @@ func (p *Provider) mapUserInfo(body []byte) (identity.UserInfo, error) {
 	// no identity code at all is a wiring fault the identity store and the
 	// token issue each name in their own terms, and moving that refusal here
 	// would only rename it.
+	//
+	// A provider not trusted with identity codes has its claim left unread, so
+	// whatever it says there neither names a person nor refuses the login.
 	info.Email = shownAddress(stringClaim(body, p.cfg.ClaimEmail))
-	info.SerialNumber = stringClaim(body, p.cfg.ClaimSerial)
+	if p.cfg.TrustIdentityCodes {
+		info.SerialNumber = stringClaim(body, p.cfg.ClaimSerial)
+	}
 	if info.SerialNumber != "" {
 		canonical, cerr := identitycode.Canonical(info.SerialNumber, p.cfg.Country)
 		if cerr != nil {

@@ -105,6 +105,17 @@ func TestASetRefusesWhatItCannotTellApart(t *testing.T) {
 			e[1].Provider = fixedProvider(t, "", "upstream")
 			return e
 		}, "entra"},
+		// The card's sign-ins are kept under a provider of their own, which no
+		// upstream may name as its issuer, holder or not.
+		{"an entry naming the card's provider as its issuer", func(e []Entry) []Entry {
+			e[1].Provider = fixedProvider(t, identity.ProviderWebEID, "upstream")
+			return e
+		}, identity.ProviderWebEID},
+		{"the holder naming the card's provider as its issuer", func(e []Entry) []Entry {
+			e[1].HoldsStored, e[0].HoldsStored = false, true
+			e[0].Provider = fixedProvider(t, identity.ProviderWebEID, identity.LoginEParakstsMobile, identity.LoginEIDScan)
+			return e
+		}, identity.ProviderWebEID},
 	} {
 		_, err := NewSet(c.edit(twoLanes(t))...)
 		if err == nil || !strings.Contains(err.Error(), c.names) {

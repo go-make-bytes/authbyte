@@ -65,8 +65,8 @@ type Profile struct {
 	Email string
 	// Provider names the provider the sign-in's handle came from: a handle is
 	// unique only there. "" is the deployment's first provider, under which
-	// every credential stored before providers were told apart is kept, and the
-	// card's.
+	// every credential stored before providers were told apart is kept; the
+	// card's are under identity.ProviderWebEID.
 	Provider string
 }
 
