@@ -205,7 +205,7 @@ func TestUserInfoCanonicalisesEverySpelling(t *testing.T) {
 
 		p, err := New(context.Background(), Config{
 			AuthorizeURL: srv.URL + "/a", TokenURL: srv.URL + "/t", UserInfoURL: srv.URL,
-			ClientID: "cid", Country: "LV", MethodDefault: "upstream",
+			ClientID: "cid", Country: "LV", MethodDefault: "upstream", TrustIdentityCodes: true,
 		}, nil)
 		qt.Assert(t, qt.IsNil(err))
 
@@ -233,7 +233,7 @@ func TestUserInfoCountryInTheValueWins(t *testing.T) {
 
 	p, err := New(context.Background(), Config{
 		AuthorizeURL: srv.URL + "/a", TokenURL: srv.URL + "/t", UserInfoURL: srv.URL,
-		ClientID: "cid", Country: "LV", MethodDefault: "upstream",
+		ClientID: "cid", Country: "LV", MethodDefault: "upstream", TrustIdentityCodes: true,
 	}, nil)
 	qt.Assert(t, qt.IsNil(err))
 
@@ -257,7 +257,7 @@ func TestUserInfoRefusesABareCodeWithNoCountry(t *testing.T) {
 
 	p, err := New(context.Background(), Config{
 		AuthorizeURL: srv.URL + "/a", TokenURL: srv.URL + "/t", UserInfoURL: srv.URL,
-		ClientID: "cid", MethodDefault: "upstream",
+		ClientID: "cid", MethodDefault: "upstream", TrustIdentityCodes: true,
 	}, nil)
 	qt.Assert(t, qt.IsNil(err))
 
@@ -289,6 +289,43 @@ func TestUserInfoLeavesAnAbsentCodeAlone(t *testing.T) {
 	qt.Check(t, qt.Equals(info.SerialNumber, ""))
 }
 
+// A provider not trusted with identity codes names nobody by one. Its
+// code claim is not read, so a well-formed code gives the sign-in no code, and
+// one that could not be canonicalised does not refuse it either: the claim is
+// not this provider's to make. The person is then found by the provider and their
+// handle, as anyone signing in with no code is.
+func TestUserInfoReadsNoCodeFromAProviderNotTrustedWithCodes(t *testing.T) {
+	for name, code := range map[string]string{
+		"a well-formed code": testIDCodeSpellings(3)[0],
+		"a bare code":        strings.Repeat("4", 11),
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"sub":"u1","serial_number":"` + code + `"}`))
+			}))
+			defer srv.Close()
+
+			p, err := New(context.Background(), Config{
+				AuthorizeURL: srv.URL + "/a", TokenURL: srv.URL + "/t", UserInfoURL: srv.URL,
+				ClientID: "cid", MethodDefault: "upstream",
+			}, nil)
+			qt.Assert(t, qt.IsNil(err))
+
+			info, err := p.UserInfo(t.Context(), "tok")
+			qt.Assert(t, qt.IsNil(err))
+			qt.Check(t, qt.Equals(info.SerialNumber, ""))
+			qt.Check(t, qt.Equals(info.Subject, "u1"))
+		})
+	}
+}
+
+// eParaksts verified the people it signs in, so its profile is trusted
+// with their codes.
+func TestEParakstsProfileIsTrustedWithCodes(t *testing.T) {
+	qt.Check(t, qt.IsTrue(EParakstsProfile("https://x", "").TrustIdentityCodes))
+}
+
 // The eParaksts profile carries its own country, so a bare code from that
 // provider resolves without any deployment configuration at all.
 func TestEParakstsProfileCarriesItsCountry(t *testing.T) {
@@ -311,7 +348,7 @@ func TestUserInfoSerialClaimConfigurable(t *testing.T) {
 
 	p, err := New(context.Background(), Config{
 		AuthorizeURL: srv.URL + "/a", TokenURL: srv.URL + "/t", UserInfoURL: srv.URL,
-		ClientID: "cid", ClaimSerial: "nationalId", MethodDefault: "upstream",
+		ClientID: "cid", ClaimSerial: "nationalId", MethodDefault: "upstream", TrustIdentityCodes: true,
 	}, nil)
 	qt.Assert(t, qt.IsNil(err))
 

@@ -61,6 +61,9 @@ func EParakstsProfile(authorityURL, logoutIDP string) Config {
 		// %s receives the url-encoded post-logout redirect.
 		LogoutTemplate: base + eparakstsLogoutPrefix + logoutIDP + eparakstsLogoutSuffix + "?redirect_uri=%s",
 		ClaimSerial:    "serial_number",
+		// A qualified trust service that verified the person, so its code names
+		// them across every way they sign in.
+		TrustIdentityCodes: true,
 		// eParaksts identifies people from the Latvian population register.
 		// The claim normally carries "PNOLV-" itself, and where it does that
 		// wins; this answers for the spellings that arrive bare, so a login

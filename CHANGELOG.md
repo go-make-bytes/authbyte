@@ -3,6 +3,33 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.7.0
+
+### Changed — who may name a person by identity code (security)
+
+- **Breaking change: a generic OIDC upstream names nobody by identity code unless it is trusted to.** A person is
+  found by their code across every way they sign in, so a provider that sent a code it never verified could sign its
+  user in as whoever holds that code. The generic upstream's code claim is now read only with
+  `OIDC_UPSTREAM_TRUST_IDENTITY_CODES=true` (new, off by default), for a provider that verified the people it signs
+  in; otherwise its people are found by its issuer and their handle, like a directory's. The eParaksts profile is
+  trusted, as before. A program composing several providers sets `upstream.Config.TrustIdentityCodes` per provider.
+  **A sign-in stored before this release is kept as it is:** where a provider that is now not trusted had its code
+  read and was linked to the person holding it, that sign-in still finds that person by the provider and its handle.
+  Review such links once after the upgrade: `SELECT c.provider, c.idp_sub, c.person_sub FROM identity.credential c
+  JOIN identity.person p ON p.person_sub = c.person_sub WHERE c.provider = '<the provider>' AND
+  p.national_id IS NOT NULL` (the provider is `''` for this server's one upstream and a list's holder, the issuer
+  for any other), and delete any that should not stand.
+- **The start is refused when `OIDC_UPSTREAM_CLAIM_SERIAL` is set and the generic upstream is not trusted with
+  codes,** naming both settings, so an upgrade never quietly stops matching people by the code. A deployment whose
+  generic provider verifies its people sets `OIDC_UPSTREAM_TRUST_IDENTITY_CODES=true`; one whose provider sends no
+  code unsets the claim.
+- **The card's sign-ins are kept under a provider of their own, `webeid`,** not the empty provider the deployment's
+  first upstream uses, so no provider's handle can name a card holder. The person is still found by the code. Take
+  this release with the platform database's identity `V6` (its 2026-11-03 entry), which moves the stored card
+  sign-ins and keeps any later card sign-in under `webeid` whichever server version makes it. In either order, the
+  card goes on signing its holders in.
+- **An upstream whose issuer is `webeid` is refused at the start.**
+
 ## v0.6.0
 
 ### Added — several upstream providers, for a Go program composing the service

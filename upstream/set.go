@@ -66,8 +66,9 @@ type Set struct {
 // apart or could never complete a sign-in: no entry; an entry with no name, no
 // provider, no method, or a return path that is not a path; a name, a return
 // path or a method two entries claim; the card's method, which the card's own
-// door completes; not exactly one entry holding the stored sign-ins; or an
-// entry with no identifier to keep its people under.
+// door completes; not exactly one entry holding the stored sign-ins; an entry
+// with no identifier to keep its people under; or one whose identifier is the
+// provider the card's sign-ins are kept under.
 func NewSet(entries ...Entry) (*Set, error) {
 	if len(entries) == 0 {
 		return nil, errors.New("no upstream identity provider in the set")
@@ -120,6 +121,8 @@ func NewSet(entries ...Entry) (*Set, error) {
 	for _, e := range s.entries {
 		id := e.Provider.Identifier()
 		switch {
+		case id == identity.ProviderWebEID:
+			return nil, fmt.Errorf("upstream %s names its issuer %s, the provider the card's sign-ins are kept under", e.Name, id)
 		case e == holder || (id != "" && id == holder.Provider.Identifier()):
 			e.key = ""
 		case id == "":
