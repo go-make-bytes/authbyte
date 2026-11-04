@@ -2,6 +2,9 @@ package registry
 
 import (
 	"errors"
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -328,6 +331,141 @@ func TestMayActFrom(t *testing.T) {
 	for _, c := range cases {
 		if got := r.MayActFrom(c.client, c.audiences); got != c.want {
 			t.Errorf("%s: MayActFrom(%q, %q) = %v, want %v", c.name, c.client, c.audiences, got, c.want)
+		}
+	}
+}
+
+// grantDoc is one client with one grant, its scopes and, when named is not
+// empty, the levels it names for an assistant's chain.
+func grantDoc(scopes, named string) string {
+	doc := `
+service_clients:
+  - client_id: svc:product-api
+    secret_ref: env:API
+    enabled: true
+    grants:
+      - audience: svc:register
+        scopes: ` + scopes + "\n"
+	if named != "" {
+		doc += "        assistant_levels: " + named + "\n"
+	}
+
+	return doc
+}
+
+// A grant names the levels that may ride a token made through an assistant;
+// with the field left out it names none.
+func TestAGrantNamesTheLevelsThatRideAnAssistantsChain(t *testing.T) {
+	r, err := Load([]byte(`
+service_clients:
+  - client_id: svc:product-api
+    secret_ref: env:API
+    enabled: true
+    grants:
+      - audience: svc:register
+        scopes: [membership:people, membership:admin]
+        assistant_levels: [membership:people]
+      - audience: svc:engine
+        scopes: [projects:read, projects/task:view]
+`), nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	cases := []struct {
+		name, client, audience string
+		want                   []string
+	}{
+		{"the grant naming one", "svc:product-api", "svc:register", []string{"membership:people"}},
+		{"a grant naming none", "svc:product-api", "svc:engine", nil},
+		{"an audience not granted", "svc:product-api", "svc:other", nil},
+		{"an unknown client", "svc:nobody", "svc:register", nil},
+	}
+	for _, c := range cases {
+		if got := r.AssistantLevels(c.client, c.audience); !slices.Equal(got, c.want) {
+			t.Errorf("%s: AssistantLevels(%q, %q) = %q, want %q", c.name, c.client, c.audience, got, c.want)
+		}
+	}
+}
+
+// Each level a grant names must be a level the grant holds: a box, anything of
+// no level's shape, and a level the grant lacks (a misspelling) stop the start,
+// named, rather than loading as a name that matches nothing.
+func TestLoadRefusesANamedLevelThatIsNoLevelOfTheGrant(t *testing.T) {
+	const scopes = "[membership:people, projects/task:view]"
+	if _, err := Load([]byte(grantDoc(scopes, "[membership:people]")), nil); err != nil {
+		t.Fatalf("a held level must load: %v", err)
+	}
+
+	for name, entry := range map[string]string{
+		"a box the grant holds": "projects/task:view",
+		"no colon":              "membership",
+		"no level":              "membership:",
+		"no group":              ":people",
+		"two in one string":     "membership:people projects:read",
+		"an empty entry":        "",
+		"a level not held":      "membership:peopel",
+	} {
+		_, err := Load([]byte(grantDoc(scopes, fmt.Sprintf("[%q]", entry))), nil)
+		if err == nil {
+			t.Errorf("%s: assistant_levels [%q] loaded", name, entry)
+
+			continue
+		}
+		for _, want := range []string{`"svc:product-api"`, `"svc:register"`, fmt.Sprintf("%q", entry)} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: the error %q does not name %s", name, err, want)
+			}
+		}
+	}
+}
+
+// Two grants toward one audience stop the start: only the first would ever be
+// read, so the second's scopes and named levels would be ignored unseen.
+func TestLoadRefusesTwoGrantsTowardOneAudience(t *testing.T) {
+	_, err := Load([]byte(`
+service_clients:
+  - client_id: svc:product-api
+    secret_ref: env:API
+    enabled: true
+    grants:
+      - audience: svc:register
+        scopes: [membership:people]
+      - audience: svc:register
+        scopes: [membership:people]
+        assistant_levels: [membership:people]
+`), nil)
+	if err == nil {
+		t.Fatal("two grants toward one audience loaded")
+	}
+	for _, want := range []string{`"svc:product-api"`, `"svc:register"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error %q does not name %s", err, want)
+		}
+	}
+}
+
+// A grant scope is a box (service/feature:act) or a level (group:level); any
+// other entry stops the start, named, rather than loading as written.
+func TestLoadRefusesAGrantScopeOfNoShape(t *testing.T) {
+	if _, err := Load([]byte(grantDoc("[membership:people, projects/task:view]", "")), nil); err != nil {
+		t.Fatalf("a box and a level must load: %v", err)
+	}
+
+	for _, scope := range []string{
+		"admin", "*", "openid", ":read", "projects:", "a:b c:d", "projects:read write", "a:b:c", "projects/task", "projects/task:",
+		"projects/task:view\nmembership:admin", "projects/task:view membership:admin",
+	} {
+		_, err := Load([]byte(grantDoc(fmt.Sprintf("[membership:people, %q]", scope), "")), nil)
+		if err == nil {
+			t.Errorf("the grant scope %q loaded", scope)
+
+			continue
+		}
+		for _, want := range []string{`"svc:product-api"`, fmt.Sprintf("%q", scope)} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%q: the error %q does not name %s", scope, err, want)
+			}
 		}
 	}
 }

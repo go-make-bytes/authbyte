@@ -600,20 +600,21 @@ func (r *router) revokeApp(ctx *azugo.Context, app registry.SignInClient, token 
 	}
 }
 
-// narrowToSubject keeps, of an exchange's scopes, the levels and those boxes the
-// subject token carries. A token made for an AI app's person through an assistant
-// carries what both may do, in boxes; a token exchanged from it carries no box
-// beyond them, whatever the exchanging client's grant allows, at every hop, so a
-// service along the chain never sees a box the assistant was not given. A level
-// (`group:level`, no slash) is the exchanging client's own grant, which gives a
-// person nothing and lets a service do its work for them, such as naming people,
-// so it passes as for every exchange. Any scope with a slash is held to the
-// subject token, a malformed one included.
-func narrowToSubject(scopes []string, subjectScope string) []string {
+// narrowForAssistant keeps, of an exchange's scopes, the boxes the subject token
+// carries and the levels named. A token made for an AI app's person through an
+// assistant carries what both may do, in boxes; a token exchanged from it carries
+// no box beyond them, whatever the exchanging client's grant allows, at every hop,
+// so a service along the chain never sees a box the assistant was not given. A
+// level (`group:level`) is the exchanging client's own grant, and passes only
+// where its grant toward the audience names it for an assistant's chain: a
+// service's working level, such as naming people, is named, while a level of
+// authority never reaches an assistant by default. A level the subject token
+// carries is not enough, since it was named toward another audience.
+func narrowForAssistant(scopes []string, subjectScope string, named []string) []string {
 	held := registry.ParseScopeString(subjectScope)
 	out := make([]string, 0, len(scopes))
 	for _, s := range scopes {
-		if !strings.Contains(s, "/") || slices.Contains(held, s) {
+		if registry.IsLevel(s) && slices.Contains(named, s) || registry.IsBox(s) && slices.Contains(held, s) {
 			out = append(out, s)
 		}
 	}

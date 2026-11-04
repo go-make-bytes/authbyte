@@ -3,6 +3,28 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.11.0
+
+### Changed
+
+- **A token exchanged from an AI app's token carries only the levels the exchanging client's grant names for it.** A
+  grant toward an audience now lists them under `assistant_levels`, empty by default; a level of the grant that is not
+  named is left out of such an exchange, as is a level the token being exchanged carries. Boxes are narrowed as
+  before. So a level of authority, such as administering the membership register, never reaches a person's assistant
+  unless a deployment names it. **A deployment running an MCP server through which a service names people must name
+  that level**, or the names fail again as under v0.9.0: for flowbyte, `assistant_levels: [membership:people]` on the
+  product API's grant toward the register.
+
+### Security
+
+- **A grant's scopes are checked at start.** Each must be a box (`service/feature:act`) or a level (`group:level`: one
+  colon, no slash, no whitespace, both halves set), and each named level one the grant holds; anything else stops the
+  start with the client, the audience and the entry named. Before, an entry such as `admin`, `*` or two scopes in one
+  string loaded as written. A box, an AI app's included, is refused with any whitespace in it, a line break or a
+  non-breaking space too, where only a space or a tab was.
+- **Two grants toward one audience in one client stop the start.** Only the first was ever read, so the second's
+  scopes were ignored unseen.
+
 ## v0.10.0
 
 ### Changed

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"unicode"
 
 	yaml "go.yaml.in/yaml/v3"
 )
@@ -58,6 +59,11 @@ var knownClaims = []string{ClaimName, ClaimGivenName, ClaimFamilyName, ClaimSeri
 type Grant struct {
 	Audience string   `yaml:"audience"`
 	Scopes   []string `yaml:"scopes"`
+	// AssistantLevels names the levels of Scopes that may ride a token made
+	// through a person's assistant: exchanging such a token, the client keeps a
+	// level toward this audience only when it is named here. Empty by default, so
+	// a level of authority never reaches an assistant unless a deployment names it.
+	AssistantLevels []string `yaml:"assistant_levels"`
 }
 
 // Client is one registered service client.
@@ -245,9 +251,29 @@ func validateClient(c Client) error {
 		return fmt.Errorf("registry: client %q has no secret_ref", c.ClientID)
 	}
 
-	for _, g := range c.Grants {
+	for i, g := range c.Grants {
 		if g.Audience == "" {
 			return fmt.Errorf("registry: client %q has a grant with empty audience", c.ClientID)
+		}
+		// Only the first grant toward an audience is ever read.
+		if slices.ContainsFunc(c.Grants[:i], func(o Grant) bool { return o.Audience == g.Audience }) {
+			return fmt.Errorf("registry: client %q has two grants to %q", c.ClientID, g.Audience)
+		}
+		for _, s := range g.Scopes {
+			if !IsBox(s) && !IsLevel(s) {
+				return fmt.Errorf("registry: client %q grant to %q: scope %q is neither a box (service/feature:act) nor a level (group:level)",
+					c.ClientID, g.Audience, s)
+			}
+		}
+		for _, s := range g.AssistantLevels {
+			if !IsLevel(s) {
+				return fmt.Errorf("registry: client %q grant to %q: assistant_levels %q is not a level (group:level)",
+					c.ClientID, g.Audience, s)
+			}
+			if !slices.Contains(g.Scopes, s) {
+				return fmt.Errorf("registry: client %q grant to %q: assistant_levels %q is not among the grant's scopes",
+					c.ClientID, g.Audience, s)
+			}
 		}
 	}
 
@@ -376,7 +402,16 @@ func IsBox(s string) bool {
 	group, act, ok := strings.Cut(s, ":")
 
 	return ok && act != "" && strings.Contains(group, "/") &&
-		!strings.HasPrefix(group, "/") && !strings.HasSuffix(group, "/") && !strings.ContainsAny(s, " \t")
+		!strings.HasPrefix(group, "/") && !strings.HasSuffix(group, "/") && !strings.ContainsFunc(s, unicode.IsSpace)
+}
+
+// IsLevel reports whether a scope is a level, `group:level`: one colon, no slash,
+// no whitespace, both halves non-empty.
+func IsLevel(s string) bool {
+	group, level, ok := strings.Cut(s, ":")
+
+	return ok && group != "" && level != "" && !strings.Contains(level, ":") &&
+		!strings.Contains(s, "/") && !strings.ContainsFunc(s, unicode.IsSpace)
 }
 
 // checkResource accepts a resource's canonical address: absolute, no fragment,
@@ -545,6 +580,24 @@ func (r *Registry) AllowedScopes(clientID, audience string, requested []string) 
 	}
 
 	return out, nil
+}
+
+// AssistantLevels returns the levels clientID's grant toward audience names for a
+// token made through a person's assistant. An unknown or disabled client, or an
+// audience it is not granted, names none.
+func (r *Registry) AssistantLevels(clientID, audience string) []string {
+	c, ok := r.clients[clientID]
+	if !ok || !c.Enabled {
+		return nil
+	}
+
+	for _, g := range c.Grants {
+		if g.Audience == audience {
+			return slices.Clone(g.AssistantLevels)
+		}
+	}
+
+	return nil
 }
 
 // MayActFrom reports whether clientID may exchange a subject token issued for
