@@ -99,8 +99,9 @@ func TestAPublicClientSendsNoSecret(t *testing.T) {
 	qt.Check(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%s", body["_raw"]))
 }
 
-// A confidential client's refresh and revocation need its secret too [RFC 7009
-// §2.1]; without it nothing changes, and the session goes on refreshing.
+// A confidential client's refresh and revocation need its secret too
+// [RFC 7009 §2.1]; without it nothing changes, and the session goes on
+// refreshing.
 func TestAConfidentialClientRefreshesAndRevokesOnlyWithItsSecret(t *testing.T) {
 	app, mem := signInApp(t)
 	e := newEdge(t, app)

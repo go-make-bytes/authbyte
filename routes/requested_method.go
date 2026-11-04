@@ -13,8 +13,8 @@ var errMethodNotRequested = errors.New("login method not among the requested one
 
 // requestedMethods reads the methods a request's acr_values ask for: a
 // space-separated list in order of preference ([OIDC Core §3.1.2.1]), each value
-// one of authbyte's own method names, exactly and case-sensitively ([OIDC Core
-// §2]: acr is case-sensitive). A provider's own code names no method: the
+// one of authbyte's own method names, exactly and case-sensitively
+// ([OIDC Core §2]: acr is case-sensitive). A provider's own code names no method: the
 // provider is sent its code by authbyte. It answers false when a value names no
 // method offered here: such a request can never be met. The methods returned are
 // the vocabulary's own strings, never the request's, so nothing read from the

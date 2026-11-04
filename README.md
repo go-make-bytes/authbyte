@@ -392,9 +392,11 @@ the assistant removed or given to another person, or the person gone from the wo
 connection; a box the assistant lost is gone from the next token. A connection is a session of its own,
 not the browser's shared one, lasting at most `SESSION_TTL`; the app ends it at `/revoke` with its
 refresh token and no key, which ends nothing else. **A token exchanged from an AI app's token** (its
-`login_method` is `assistant`) carries nothing the app token lacks, a level included, at every hop, whatever the exchanging
-client's grant allows; `login_method` and `loa` are carried forward, so nothing that asks for a real
-sign-in accepts it.
+`login_method` is `assistant`) carries no box (`service/feature:act`) the app token lacks, at every hop, whatever the
+exchanging client's grant allows. A level (`group:level`, a scope with no slash) of the exchanging client's own grant
+passes, as for every exchange, so a service can still do its own work for the person, such as naming people at the
+register; any other scope with a slash is held to the app token like a box. `login_method` and `loa` are carried
+forward, so nothing that asks for a real sign-in accepts it.
 
 **The register key.** With a register wired, the membership lookup at token issue asks by the person's typed platform subject — `sub:` + the token's own `sub` — and by the client id (`svc:…`) for a service account. No separate claim carries the key: every consumer derives it from `sub` the same way, so a token and an invitation written from the identity store's answer meet on the same bytes. The identity code (`serial_number`) stays on the token for the signing side and is no register key.
 

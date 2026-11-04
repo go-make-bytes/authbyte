@@ -76,11 +76,7 @@ func (r *router) personStore() personReader {
 // acting service and carries no client id of its own) and a service account's
 // token for an organisation.
 func requireServiceScope(ctx *azugo.Context, level string) bool {
-	u := ctx.User()
-	actsAsItself := strings.HasPrefix(u.ID(), servicePrefix) &&
-		u.ClaimValue(claims.ClaimClientID) == u.ID() &&
-		u.ClaimValue(claims.ClaimTenant) == ""
-	if actsAsItself && u.HasScopeLevel(scopeGroupIdentity, level) {
+	if holdsAsItself(ctx.User(), level) {
 		return true
 	}
 
@@ -89,6 +85,16 @@ func requireServiceScope(ctx *azugo.Context, level string) bool {
 		pkerrors.WithPublicDetail("this read requires a service holding the identity:"+level+" scope")))
 
 	return false
+}
+
+// holdsAsItself reports whether u is a service acting as itself (its subject is
+// its own client id and it names no organisation) and holds the given level of
+// the identity scope.
+func holdsAsItself(u azugo.User, level string) bool {
+	return strings.HasPrefix(u.ID(), servicePrefix) &&
+		u.ClaimValue(claims.ClaimClientID) == u.ID() &&
+		u.ClaimValue(claims.ClaimTenant) == "" &&
+		u.HasScopeLevel(scopeGroupIdentity, level)
 }
 
 // invalidPersons answers a refusal of the request's person ids; the detail

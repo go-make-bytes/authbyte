@@ -271,8 +271,8 @@ func (r *router) chooseAssistant(ctx *azugo.Context) {
 	ctx.RedirectUnsafe(appendCodeState(flow.AppRedirectURI, r.issuerID(), code, flow.SPAState))
 }
 
-// oauthError answers a token request with an error of RFC 6749 §5.2: the code
-// alone, no description, kept by no cache.
+// oauthError answers a token request with an OAuth error [RFC 6749 §5.2]: the
+// code alone, no description, kept by no cache.
 func oauthError(ctx *azugo.Context, status int, code string) {
 	noStore(ctx)
 	ctx.StatusCode(status)
@@ -600,17 +600,20 @@ func (r *router) revokeApp(ctx *azugo.Context, app registry.SignInClient, token 
 	}
 }
 
-// narrowToSubject keeps, of an exchange's scopes, only those the subject token
-// carries. A token made for an AI app's person through an assistant carries what
-// both may do, and boxes alone; a token exchanged from it carries nothing beyond
-// that, a level included, whatever the exchanging client's grant allows, at every
-// hop, so a service along the chain never sees a scope the assistant was not
-// given.
+// narrowToSubject keeps, of an exchange's scopes, the levels and those boxes the
+// subject token carries. A token made for an AI app's person through an assistant
+// carries what both may do, in boxes; a token exchanged from it carries no box
+// beyond them, whatever the exchanging client's grant allows, at every hop, so a
+// service along the chain never sees a box the assistant was not given. A level
+// (`group:level`, no slash) is the exchanging client's own grant, which gives a
+// person nothing and lets a service do its work for them, such as naming people,
+// so it passes as for every exchange. Any scope with a slash is held to the
+// subject token, a malformed one included.
 func narrowToSubject(scopes []string, subjectScope string) []string {
 	held := registry.ParseScopeString(subjectScope)
 	out := make([]string, 0, len(scopes))
 	for _, s := range scopes {
-		if slices.Contains(held, s) {
+		if !strings.Contains(s, "/") || slices.Contains(held, s) {
 			out = append(out, s)
 		}
 	}

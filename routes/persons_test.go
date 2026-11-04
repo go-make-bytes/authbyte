@@ -125,6 +125,10 @@ func peopleAppRecorded(t *testing.T, fake *fakePeople) (*azugo.TestApp, *fakeCod
 		asCaller(ctx)
 		r.personCode(ctx)
 	})
+	app.Post("/testonly/persons", func(ctx *azugo.Context) {
+		asCaller(ctx)
+		r.registerPerson(ctx)
+	})
 
 	ta := azugo.NewTestApp(app.App)
 	ta.Start(t)
@@ -196,6 +200,30 @@ func TestPersonLinesRefusesEveryoneButAServiceHoldingLines(t *testing.T) {
 		qt.Check(t, qt.StringContains(got, "err:identity:forbidden"), qt.Commentf("%s", name))
 	}
 	qt.Check(t, qt.Equals(fake.linesCall, 0), qt.Commentf("a refused caller never reaches the store"))
+}
+
+// Registering a person is for a service acting as itself that holds the admin
+// level, like the two reads: a person's token, a token another service obtained
+// by exchange and a service account's token are refused even with the scope, so a
+// token made for a person, however it was passed on, never creates one.
+func TestRegisterPersonRefusesEveryoneButAServiceHoldingAdmin(t *testing.T) {
+	app := peopleApp(t, &fakePeople{})
+
+	for name, c := range map[string]caller{
+		"a person holding the scope":            {"sub:" + testPersonSub(2), "identity:admin", ""},
+		"a person named as its own client":      {"sub:" + testPersonSub(2), "identity:admin", tokenOwn},
+		"a service without it":                  {"svc:console", "identity:lines", tokenOwn},
+		"a service account for an organisation": {"svc:console", "identity:admin", tokenAccount},
+		"another service acting for a person":   {"sub:" + testPersonSub(2), "identity:admin", tokenDelegated},
+		"a delegated token for no organisation": {"svc:console", "identity:admin", tokenDelegatedBare},
+	} {
+		status, got, _ := send(t, app, c, fasthttp.MethodPost, "/testonly/persons", `{}`)
+		qt.Check(t, qt.Equals(status, fasthttp.StatusForbidden), qt.Commentf("%s: %s", name, got))
+		qt.Check(t, qt.StringContains(got, "err:identity:forbidden"), qt.Commentf("%s", name))
+	}
+
+	status, got, _ := send(t, app, caller{"svc:console", "identity:admin", tokenOwn}, fasthttp.MethodPost, "/testonly/persons", `{}`)
+	qt.Check(t, qt.Equals(status, fasthttp.StatusUnprocessableEntity), qt.Commentf("past the door, the empty body refused: %s", got))
 }
 
 // Every bad body is one 422 with its own code, and the refusal never repeats
