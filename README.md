@@ -393,10 +393,11 @@ connection; a box the assistant lost is gone from the next token. A connection i
 not the browser's shared one, lasting at most `SESSION_TTL`; the app ends it at `/revoke` with its
 refresh token and no key, which ends nothing else. **A token exchanged from an AI app's token** (its
 `login_method` is `assistant`) carries no box (`service/feature:act`) the app token lacks, at every hop, whatever the
-exchanging client's grant allows. A level (`group:level`, a scope with no slash) of the exchanging client's own grant
-passes, as for every exchange, so a service can still do its own work for the person, such as naming people at the
-register; any other scope with a slash is held to the app token like a box. `login_method` and `loa` are carried
-forward, so nothing that asks for a real sign-in accepts it.
+exchanging client's grant allows. A level (`group:level`) of the exchanging client's own grant passes only where its
+grant toward that audience names it under `assistant_levels`, so a service can still do its own work for the person,
+such as naming people at the register, while a level of authority never reaches an assistant unless a deployment
+names it; a level the token being exchanged carries is not enough. `login_method` and `loa` are carried forward, so
+nothing that asks for a real sign-in accepts it.
 
 **The register key.** With a register wired, the membership lookup at token issue asks by the person's typed platform subject — `sub:` + the token's own `sub` — and by the client id (`svc:…`) for a service account. No separate claim carries the key: every consumer derives it from `sub` the same way, so a token and an invitation written from the identity store's answer meet on the same bytes. The identity code (`serial_number`) stays on the token for the signing side and is no register key.
 
@@ -613,7 +614,10 @@ Registry client secrets resolve per client via the `literal:`/`env:`/`file:` sch
 
 **The client registry.** One document names every client. `service_clients` are machines: each
 proves itself with its secret and is minted tokens for the audiences and scopes its `grants`
-allow (`act_from` names the user audiences whose tokens it may exchange). `sign_in_clients` sign
+allow (`act_from` names the user audiences whose tokens it may exchange). A grant's scope is a box
+(`service/feature:act`) or a level (`group:level`), and anything else stops the start; a grant's
+`assistant_levels` names those of its levels that may ride a token made through a person's assistant
+(empty by default, each one a level of the grant). `sign_in_clients` sign
 people in, and each row carries everything its product needs, so one deployment serves several
 products. The names follow the client metadata of [RFC 7591 §2] and the OpenID logout
 specifications where one exists:

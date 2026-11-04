@@ -730,9 +730,10 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 	// A token made through an AI app's assistant carries what the person and
-	// the assistant both may do; what is exchanged from it carries no box more.
+	// the assistant both may do; what is exchanged from it carries no box more,
+	// and of the client's levels only those its grant names for an assistant.
 	if subject.LoginMethod == identity.LoginAssistant {
-		scopes = narrowToSubject(scopes, subject.Scope)
+		scopes = narrowForAssistant(scopes, subject.Scope, r.Registry().AssistantLevels(clientID, audience))
 	}
 
 	tok, exp, err := r.Issuer().IssueDelegated(issuer.DelegatedTokenInput{

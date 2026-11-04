@@ -52,8 +52,9 @@ service_clients:
     act_from: [https://mcp.example/mcp]
     grants:
       - audience: svc:flowbyte-integration-api
-        scopes: [projects:read, projects/project:view, projects/task:view, projects/task:create, projects/task:edit,
-                 projects/task:changeStageOwn, projects/task/comment:add]
+        scopes: [projects:read, projects:write, projects/project:view, projects/task:view, projects/task:create,
+                 projects/task:edit, projects/task:changeStageOwn, projects/task/comment:add]
+        assistant_levels: [projects:read]
   - client_id: svc:another
     secret_ref: literal:another-secret
     enabled: true
@@ -65,9 +66,10 @@ service_clients:
     enabled: true
     grants:
       - audience: svc:rolebyte
-        scopes: [membership:people]
+        scopes: [membership:people, membership:admin]
+        assistant_levels: [membership:people]
       - audience: svc:flowbyte
-        scopes: [projects:read, projects/task:view, projects/task:edit, projects/task]
+        scopes: [projects:read, projects:write, membership:people, projects/task:view, projects/task:edit]
 sign_in_clients:
   - client_id: claude-code
     kind: ai_app
@@ -730,9 +732,9 @@ func (d *aiDeployment) exchangeAt(t *testing.T, client, secret, token, audience,
 
 // Cases 27, 28, 29, 30: the MCP server exchanges the app token for a pass that is
 // Anna's, through the assistant, presented by the server, at the lowest
-// assurance, bound to the server's key, carrying no box the app token lacks and
-// the levels of the server's own grant it asks for; another client may not; an
-// app token past its life is refused.
+// assurance, bound to the server's key, carrying no box the app token lacks and,
+// of the levels it asks for, those its grant names for an assistant's chain;
+// another client may not; an app token past its life is refused.
 func TestTheServerExchangesTheAppToken(t *testing.T) {
 	d := aiApp(t)
 	out := d.connected(t)
@@ -742,7 +744,7 @@ func TestTheServerExchangesTheAppToken(t *testing.T) {
 		return d.exchangeAt(t, client, secret, token, "svc:flowbyte-integration-api", scope)
 	}
 
-	status, pass := exchange("svc:flowbyte-mcp", "mcp-secret", appToken, "projects:read "+strings.Join(aiBoxes, " "))
+	status, pass := exchange("svc:flowbyte-mcp", "mcp-secret", appToken, "projects:read projects:write "+strings.Join(aiBoxes, " "))
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%v", pass))
 	c := readToken(t, pass["access_token"])
 	qt.Check(t, qt.Equals(c.Subject, "sub-of-anna"))
@@ -755,7 +757,7 @@ func TestTheServerExchangesTheAppToken(t *testing.T) {
 	qt.Check(t, qt.Equals(c.LoA, identity.LoALow))
 	qt.Assert(t, qt.Not(qt.IsNil(c.Confirmation)), qt.Commentf("bound to the server's key"))
 	qt.Check(t, qt.Equals(c.Scope, "projects:read "+strings.Join(annasFirst.Scopes, " ")),
-		qt.Commentf("the level asked for, and of the boxes only the app token's: not the two the overlap leaves out"))
+		qt.Commentf("the named level asked for, not the one the grant leaves unnamed, and of the boxes only the app token's"))
 
 	status, res := exchange("svc:flowbyte-mcp", "mcp-secret", appToken, "membership:people")
 	qt.Check(t, qt.Equals(status, fasthttp.StatusForbidden), qt.Commentf("a level outside the server's grant: %v", res))
@@ -764,28 +766,35 @@ func TestTheServerExchangesTheAppToken(t *testing.T) {
 	status, whole := exchange("svc:flowbyte-mcp", "mcp-secret", appToken, "")
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%v", whole))
 	qt.Check(t, qt.Equals(readToken(t, whole["access_token"]).Scope, "projects:read "+strings.Join(annasFirst.Scopes, " ")),
-		qt.Commentf("an empty ask is the server's whole grant, its boxes narrowed to the app token's"))
+		qt.Commentf("an empty ask is the server's whole grant: its named level, and its boxes narrowed to the app token's"))
+
+	status, boxes := exchange("svc:flowbyte-mcp", "mcp-secret", appToken, strings.Join(aiBoxes, " "))
+	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%v", boxes))
+	qt.Check(t, qt.Equals(readToken(t, boxes["access_token"]).Scope, strings.Join(annasFirst.Scopes, " ")),
+		qt.Commentf("a named level not asked for is not added"))
 
 	status, _ = exchange("svc:another", "another-secret", appToken, "projects/task:view")
 	qt.Check(t, qt.Equals(status, fasthttp.StatusForbidden), qt.Commentf("a client that does not act from the resource"))
 }
 
 // The product API, holding a pass made through an assistant, exchanges it again
-// for the services it calls: the levels of its own grant reach them, so it can
-// name people for the person; a box goes on only where the pass carries it, and a
-// scope is a level only when it has no slash.
-func TestTheNextHopCarriesItsOwnLevelsAndOnlyThePassesBoxes(t *testing.T) {
+// for the services it calls: of its grant's levels only those the grant toward
+// that service names reach it, so it can name people for the person while an
+// authority level stays behind; a box goes on only where the pass carries it.
+func TestTheNextHopCarriesOnlyTheLevelsItsGrantNames(t *testing.T) {
 	d := aiApp(t)
 	appToken := d.connected(t)["access_token"].(string)
 	status, pass := d.exchangeAt(t, "svc:flowbyte-mcp", "mcp-secret", appToken,
-		"svc:flowbyte-integration-api", strings.Join(aiBoxes, " "))
+		"svc:flowbyte-integration-api", "projects:read "+strings.Join(aiBoxes, " "))
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%v", pass))
 	passToken := pass["access_token"].(string)
+	qt.Assert(t, qt.Equals(readToken(t, passToken).Scope, "projects:read "+strings.Join(annasFirst.Scopes, " ")))
 
-	status, names := d.exchangeAt(t, "svc:flowbyte-integration-api", "api-secret", passToken, "svc:rolebyte", "membership:people")
+	status, names := d.exchangeAt(t, "svc:flowbyte-integration-api", "api-secret", passToken, "svc:rolebyte",
+		"membership:people membership:admin")
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%v", names))
 	c := readToken(t, names["access_token"])
-	qt.Check(t, qt.Equals(c.Scope, "membership:people"))
+	qt.Check(t, qt.Equals(c.Scope, "membership:people"), qt.Commentf("the named level, not the authority level beside it"))
 	qt.Check(t, qt.Equals(c.Subject, "sub-of-anna"))
 	qt.Check(t, qt.Equals(c.Tenant, annasFirst.TenantID))
 	qt.Check(t, qt.Equals(c.LoginMethod, identity.LoginAssistant))
@@ -798,14 +807,15 @@ func TestTheNextHopCarriesItsOwnLevelsAndOnlyThePassesBoxes(t *testing.T) {
 	qt.Check(t, qt.Equals(c.Act.Act.Act.Subject, annasFirst.Key))
 
 	status, engine := d.exchangeAt(t, "svc:flowbyte-integration-api", "api-secret", passToken, "svc:flowbyte",
-		"projects:read projects/task:view projects/task:edit projects/task")
+		"projects:read projects:write membership:people projects/task:view projects/task:edit")
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%v", engine))
-	qt.Check(t, qt.Equals(readToken(t, engine["access_token"]).Scope, "projects:read projects/task:view"),
-		qt.Commentf("a box the pass lacks stays out, and so does a slashed scope that is no box"))
+	qt.Check(t, qt.Equals(readToken(t, engine["access_token"]).Scope, "projects/task:view"),
+		qt.Commentf("a grant naming no level passes none, not one the pass carries nor one named toward another "+
+			"service; a box the pass lacks stays out"))
 }
 
 // A token not made through an assistant is not narrowed: the exchanging client's
-// grant decides, as for every exchange.
+// grant decides, as for every exchange, a level it does not name included.
 func TestAnOrdinaryTokenIsExchangedByTheGrantAlone(t *testing.T) {
 	d := aiApp(t)
 	tok, _, err := d.core.Issuer().IssueUser(issuer.UserTokenInput{
@@ -820,9 +830,10 @@ func TestAnOrdinaryTokenIsExchangedByTheGrantAlone(t *testing.T) {
 	})
 	qt.Assert(t, qt.IsNil(err))
 
-	status, pass := d.exchangeAt(t, "svc:flowbyte-mcp", "mcp-secret", tok, "svc:flowbyte-integration-api", "projects/task:edit")
+	status, pass := d.exchangeAt(t, "svc:flowbyte-mcp", "mcp-secret", tok, "svc:flowbyte-integration-api",
+		"projects:write projects/task:edit")
 	qt.Assert(t, qt.Equals(status, fasthttp.StatusOK), qt.Commentf("%v", pass))
-	qt.Check(t, qt.Equals(readToken(t, pass["access_token"]).Scope, "projects/task:edit"))
+	qt.Check(t, qt.Equals(readToken(t, pass["access_token"]).Scope, "projects:write projects/task:edit"))
 }
 
 // Case 30: an app token past its lifetime is exchanged for nothing.
