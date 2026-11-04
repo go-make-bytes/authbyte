@@ -39,6 +39,8 @@ type authorizeRequest struct {
 	named  []string
 	tenant string
 	client registry.SignInClient
+	// appScopes are, for an AI app, the boxes it asked for.
+	appScopes []string
 }
 
 // authorize begins a sign-in. A request that names a way (acr_values) is sent
@@ -166,6 +168,14 @@ func (r *router) readAuthorize(ctx *azugo.Context, p authParams) (*authorizeRequ
 	// names) must be ones this provider offers and the client is allowed. A
 	// request that can never be met is answered at the client's own address.
 	req.client, _ = r.Registry().SignInClient(clientID)
+	// An AI app names its one resource and asks only for boxes from its row; the
+	// workspace it acts in is the assistant's, chosen after the sign-in.
+	if req.client.Kind == registry.KindAIApp {
+		if req.appScopes, aerr = readAIAppAsk(req.client, p); aerr != nil {
+			return refuse(aerr.code, aerr.description)
+		}
+		req.tenant = ""
+	}
 	offered := r.offered(req.client)
 	if req.named, ok = requestedMethods(func(m string) bool { return slices.Contains(offered, m) }, p.get("acr_values")); !ok {
 		return refuse("unmet_authentication_requirements", "acr_values names no login method this client may use here")
@@ -193,6 +203,7 @@ func newFlow(req *authorizeRequest, methods []string, binding string, fromPage b
 		Started:             time.Now().Unix(),
 		Binding:             bindingHash(binding),
 		Picker:              fromPage,
+		AppScopes:           req.appScopes,
 	}
 	if fromPage {
 		flow.Request = req.params.encode()
@@ -289,7 +300,7 @@ func (r *router) callback(ctx *azugo.Context, entry *upstream.Entry) {
 		r.Audit().LoginFailure(ctx, "eParaksts IdP returned an error: "+*idpErr)
 
 		// Resolve the originating client so the error lands where login began.
-		if state := ctx.Query.StringOptional("state"); state != nil {
+		if state := ctx.Query.StringOptional("state"); state != nil && !isAssistantTicket(*state) {
 			if flow, ferr := r.Session().ConsumeFlow(ctx, *state); ferr == nil {
 				if !r.returnedHere(ctx, flow) || !r.answeredBy(ctx, flow, entry) {
 					return
@@ -332,6 +343,12 @@ func (r *router) callback(ctx *azugo.Context, entry *upstream.Entry) {
 		return
 	}
 
+	if isAssistantTicket(state) {
+		// An assistant page's ticket is no provider's state.
+		r.cannotStart(ctx, fasthttp.StatusUnauthorized, corehttp.UnauthorizedError{}, "")
+
+		return
+	}
 	flow, err := r.Session().ConsumeFlow(ctx, state)
 	if err != nil {
 		// Unknown/expired state — fail closed.
@@ -433,6 +450,15 @@ func (r *router) callback(ctx *azugo.Context, entry *upstream.Entry) {
 		return
 	}
 
+	r.Audit().LoginSuccess(ctx, sess.Subject, sess.LoA, sess.LoginMethod)
+
+	// An AI app's code waits for the person's choice of assistant.
+	if r.isAIApp(flow.ClientID) {
+		r.askAssistant(ctx, flow, sid, sess)
+
+		return
+	}
+
 	// Mint a single-use application authorization code bound to the session and
 	// the SPA's PKCE challenge.
 	appCode := randomToken(24)
@@ -450,8 +476,6 @@ func (r *router) callback(ctx *azugo.Context, entry *upstream.Entry) {
 
 		return
 	}
-
-	r.Audit().LoginSuccess(ctx, sess.Subject, sess.LoA, sess.LoginMethod)
 
 	// Client app redirect URI (cross-origin) — bypass same-origin sanitizing.
 	ctx.RedirectUnsafe(appendCodeState(flow.AppRedirectURI, r.issuerID(), appCode, flow.SPAState))
@@ -506,6 +530,18 @@ func (r *router) establishSession(ctx *azugo.Context, flow *session.Flow, id ide
 // its new app session for client, given its whole lifetime from now. ok is false
 // when the answer is already written.
 func (r *router) saveSignedIn(ctx *azugo.Context, client, sid string, sess *session.Session) bool {
+	// An AI app's connection is a session of its own: it joins no browser's shared
+	// session, so neither ends with the other.
+	if r.isAIApp(client) {
+		if err := r.Session().CreateSession(ctx, sid, sess, r.Config().SessionTTL); err != nil {
+			ctx.Error(err)
+
+			return false
+		}
+
+		return true
+	}
+
 	shared, until, err := r.joinShared(ctx, sess)
 	if err != nil {
 		ctx.Error(err)

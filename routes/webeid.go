@@ -70,6 +70,14 @@ func (r *router) completeCard(ctx *azugo.Context, flow *session.Flow, authToken 
 		return "", errCardAnswered
 	}
 
+	// An AI app's code waits for the person's choice of assistant.
+	if r.isAIApp(flow.ClientID) {
+		r.Audit().LoginSuccess(ctx, sess.Subject, sess.LoA, sess.LoginMethod)
+		r.askAssistant(ctx, flow, sid, sess)
+
+		return "", errCardAnswered
+	}
+
 	appCode := randomToken(24)
 	if err := r.Session().SaveAppCode(ctx, appCode, &session.AppCode{
 		SessionID:           sid,

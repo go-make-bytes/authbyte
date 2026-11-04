@@ -105,6 +105,10 @@ type ScopeResolver interface {
 	// directory to the register's admission door; true when a membership was
 	// created or activated by the call.
 	Admit(ctx *azugo.Context, subjectKey string, login rolebyte.DirectoryLogin) (bool, error)
+	// Assistants answers a person's own assistants, each in the tenant where it is
+	// theirs with the boxes the person and it both hold there: asked when the
+	// person connects an AI app, and at every refresh of that connection.
+	Assistants(ctx *azugo.Context, subjectKey string) ([]rolebyte.Assistant, error)
 }
 
 // IdentityMapper keeps the one internal subject each person has, keyed by the
@@ -145,6 +149,9 @@ type SessionStore interface {
 	// SaveRefresh keeps a refresh grant under key until expiresAt.
 	SaveRefresh(ctx context.Context, key string, g *session.RefreshGrant, expiresAt time.Time) error
 	LoadRefresh(ctx context.Context, key string) (*session.RefreshGrant, error)
+	// TakeRefresh loads and deletes a refresh grant in one step: of two callers
+	// presenting one refresh token at once, only one gets it.
+	TakeRefresh(ctx context.Context, key string) (*session.RefreshGrant, error)
 	DeleteRefresh(ctx context.Context, key string) error
 	// CreateShared stores a browser's new shared session until its ExpiresAt;
 	// ReplaceShared writes over a live one only, session.ErrNotFound when it has

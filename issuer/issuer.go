@@ -100,6 +100,42 @@ func (i *Issuer) IssueService(in ServiceTokenInput) (string, int64, error) {
 	return i.sign(c, i.serviceTTL)
 }
 
+// AppTokenInput describes the token an AI app is given: its person as the
+// subject, the assistant it works as in the actor chain, its one resource as the
+// audience.
+type AppTokenInput struct {
+	Subject     string   // the person, as in their user tokens
+	Audience    string   // the app's one resource, the MCP server's canonical address
+	ClientID    string   // the AI app's client id
+	Scopes      []string // the boxes the app asked for that the person and the assistant both hold
+	Tenant      string   // the tenant where the assistant is the person's
+	Assistant   string   // the assistant's key, svc:assistant-<ULID>
+	LoA         string   // always the lowest: the app holds no sign-in of its own
+	LoginMethod string   // always identity.LoginAssistant
+	TTL         time.Duration
+}
+
+// IssueApp mints an AI app's token: a plain bearer token, with no cnf, since an
+// AI app holds no proof-of-possession key [MCP 2026-07-28 basic/authorization];
+// the one kind of token this issuer mints unbound, kept to its one resource by
+// its audience and to minutes by its lifetime.
+func (i *Issuer) IssueApp(in AppTokenInput) (string, int64, error) {
+	if in.Assistant == "" || in.TTL <= 0 {
+		return "", 0, fmt.Errorf("issuer: an app token names its assistant and its lifetime")
+	}
+	c := claims.Claims{
+		RegisteredClaims: i.base(in.Subject, in.Audience, in.TTL),
+		Scope:            strings.Join(in.Scopes, " "),
+		LoA:              in.LoA,
+		LoginMethod:      in.LoginMethod,
+		Tenant:           in.Tenant,
+		ClientID:         in.ClientID,
+		Act:              &claims.Actor{Subject: in.Assistant},
+	}
+
+	return i.sign(c, in.TTL)
+}
+
 // DelegatedTokenInput describes an on-behalf-of token minted via token
 // exchange. The token names the end user as its subject while recording, in the
 // actor chain, the service acting on the user's behalf.

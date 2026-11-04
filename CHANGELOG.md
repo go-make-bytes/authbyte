@@ -3,6 +3,27 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.8.0
+
+### Added — AI apps, signed in as one of the person's assistants
+
+- **A sign-in client of `kind: ai_app`** connects a person's AI app to one MCP server, as the MCP specification's
+  authorization asks: a public client sent back to a loopback or `https` address, its `audience` the server's
+  canonical address, its `scopes` the boxes it may ask for. `/authorize` requires that one `resource` (RFC 8707,
+  `invalid_target` otherwise) and boxes from the row (`invalid_scope`).
+- **After the sign-in, the person chooses which of their own assistants the app is,** on a page listing them by name
+  and workspace (`POST /authorize/assistant`); none is a refusal in words and no code. Needs rolebyte v0.3.0's
+  `POST /api/v1/sign-in/assistants`, which `ScopeResolver` now asks (`Assistants`).
+- **The app's token** is the person's, with the assistant in `act`, the boxes the person and the assistant both hold,
+  `login_method` `assistant` and `loa` `low`, for the one resource, as a plain `Bearer` token for `APP_TOKEN_TTL`
+  (new, default `5m`): the one token this server issues unbound to a key. The app's code exchange and refreshes take
+  no DPoP proof; every other client's still needs one.
+- **The app's refresh token is good once,** a used one ending the connection; every refresh asks the register again
+  and ends the connection when the assistant is no longer the person's there. The app ends its connection at
+  `/revoke` with no key; a connection is never part of the browser's shared session.
+- **A token exchanged from an AI app's token carries nothing that token lacks,** a level included, at every hop, whatever the
+  exchanging client's grant allows.
+
 ## v0.7.0
 
 ### Changed — who may name a person by identity code (security)

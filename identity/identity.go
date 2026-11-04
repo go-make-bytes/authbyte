@@ -27,6 +27,12 @@ const (
 	LoginEParakstsMobile = "eparakstsMobile" // eParaksts Mobile / Cloud (mobileid)
 	LoginEIDScan         = "eidScan"         // eID Scan: phone reads the physical eID card (mobile-eid)
 	LoginWebEID          = "webEid"          // Web eID browser login (web-eid engine; NOT the eParaksts IdP)
+	// LoginAssistant is what an AI app's token states in place of the way its
+	// person signed in: the app works as one of the person's assistants, with no
+	// sign-in of its own behind each call. It matches no signing flow, so nothing
+	// that asks for a real sign-in, signing above all, accepts it; it always goes
+	// with LoALow.
+	LoginAssistant = "assistant"
 )
 
 // ProviderWebEID is the provider the card's sign-ins are kept under: a card

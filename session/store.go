@@ -239,6 +239,13 @@ func (s *Store) LoadRefresh(ctx context.Context, key string) (*RefreshGrant, err
 	return g, nil
 }
 
+// TakeRefresh loads and deletes the refresh grant kept under key in one step
+// (GETDEL), so of two callers presenting one refresh token at once only one
+// gets it.
+func (s *Store) TakeRefresh(ctx context.Context, key string) (*RefreshGrant, error) {
+	return take(ctx, s.refresh, key)
+}
+
 // DeleteRefresh removes the refresh grant kept under key.
 func (s *Store) DeleteRefresh(ctx context.Context, key string) error {
 	return s.refresh.Delete(ctx, key)

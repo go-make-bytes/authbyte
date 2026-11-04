@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"slices"
 	"strings"
@@ -32,6 +33,14 @@ const (
 	ClientConfidential = "confidential"
 	ClientPublic       = "public"
 )
+
+// KindAIApp is the kind of a sign-in client that is an AI app a person connects
+// to one resource (an MCP server) as one of their own assistants [MCP 2026-07-28
+// basic/authorization]: a public client sent back to a loopback or https address,
+// whose tokens are addressed to its one resource, carry the boxes it may ask for
+// that the person and the assistant both hold, and are plain bearer tokens. A
+// client with no kind is an application's own sign-in.
+const KindAIApp = "ai_app"
 
 // The personal claims a sign-in client's tokens may carry, each only when its row
 // lists it.
@@ -72,12 +81,21 @@ type Client struct {
 type SignInClient struct {
 	ClientID string `yaml:"client_id"`
 	Enabled  bool   `yaml:"enabled"`
+	// Kind is KindAIApp for an AI app a person connects as one of their
+	// assistants; empty for an application's own sign-in.
+	Kind string `yaml:"kind"`
 	// Type is confidential (an edge that holds SecretRef's secret and proves
 	// itself with it) or public (no secret; PKCE protects the flow).
 	Type      string `yaml:"type"`
 	SecretRef string `yaml:"secret_ref"`
-	// Audience is the audience of this client's user tokens.
+	// Audience is the audience of this client's user tokens. An AI app's is the
+	// one resource it may ask for, the MCP server's canonical address
+	// [RFC 8707 §2].
 	Audience string `yaml:"audience"`
+	// Scopes are, for an AI app alone, the boxes (`service/feature:act`) it may
+	// ask for; what its tokens carry is those the person and the assistant both
+	// hold.
+	Scopes []string `yaml:"scopes"`
 	// MembershipRequired says whether the people who log in through this client
 	// must hold a membership in the register: true for a product whose
 	// organisations decide who belongs (a person without a membership is refused
@@ -304,7 +322,143 @@ func validateSignInClient(c SignInClient) error {
 		}
 	}
 
+	switch c.Kind {
+	case "":
+		if len(c.Scopes) > 0 {
+			return bad("lists scopes, which only an %s takes", KindAIApp)
+		}
+	case KindAIApp:
+		return validateAIApp(c, bad)
+	default:
+		return bad("has kind %q; want none or %s", c.Kind, KindAIApp)
+	}
+
 	return nil
+}
+
+// validateAIApp checks what an AI app's row may hold: a public client with no
+// claims, no signing and no page-less answering, since every sign-in through it
+// asks which assistant it is; sent back only to a loopback or https address
+// [MCP 2026-07-28 basic/authorization/security-considerations#communication-security];
+// its audience one resource, an absolute https (or loopback) address with no
+// fragment [RFC 8707 §2]; and the boxes it may ask for.
+func validateAIApp(c SignInClient, bad func(string, ...any) error) error {
+	if c.Type != ClientPublic {
+		return bad("is an %s, which is a public client", KindAIApp)
+	}
+	if len(c.Claims) > 0 || c.Signing || c.SingleSignOn || len(c.BaselineScopes) > 0 ||
+		(c.MembershipRequired != nil && !*c.MembershipRequired) {
+		return bad("is an %s: it takes no claims, signing, single_sign_on, baseline_scopes or a sign-in without a membership", KindAIApp)
+	}
+	if err := checkResource(c.Audience); err != nil {
+		return bad("audience %q is not a resource: %w", c.Audience, err)
+	}
+	for _, u := range c.RedirectURIs {
+		if err := checkLoopbackOrHTTPS(u); err != nil {
+			return bad("redirect_uris %q: %w", u, err)
+		}
+	}
+	if len(c.Scopes) == 0 {
+		return bad("is an %s and lists no scopes", KindAIApp)
+	}
+	for _, s := range c.Scopes {
+		if !IsBox(s) {
+			return bad("scopes %q is not a box (service/feature:act)", s)
+		}
+	}
+
+	return nil
+}
+
+// IsBox reports whether a scope is a box, `service/feature:act`, rather than a
+// group:level.
+func IsBox(s string) bool {
+	group, act, ok := strings.Cut(s, ":")
+
+	return ok && act != "" && strings.Contains(group, "/") &&
+		!strings.HasPrefix(group, "/") && !strings.HasSuffix(group, "/") && !strings.ContainsAny(s, " \t")
+}
+
+// checkResource accepts a resource's canonical address: absolute, no fragment,
+// on https, or on http on a loopback host.
+func checkResource(raw string) error {
+	if err := checkLoopbackOrHTTPS(raw); err != nil {
+		return err
+	}
+	if u, _ := url.Parse(raw); u.RawQuery != "" {
+		return errors.New("carries a query")
+	}
+
+	return nil
+}
+
+// checkLoopbackOrHTTPS accepts an absolute address with no fragment on https, or
+// on http when its host is a loopback name or address.
+func checkLoopbackOrHTTPS(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if !u.IsAbs() || u.Host == "" {
+		return errors.New("not an absolute address")
+	}
+	if u.Fragment != "" || strings.Contains(raw, "#") {
+		return errors.New("carries a fragment")
+	}
+	if u.User != nil {
+		return errors.New("carries a user name")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isLoopback(u.Hostname()) {
+			return nil
+		}
+
+		return errors.New("http only on a loopback host")
+	default:
+		return fmt.Errorf("scheme %q not allowed here", u.Scheme)
+	}
+}
+
+// isLoopback reports whether host names this machine: localhost, or a loopback
+// address.
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+
+	return ip != nil && ip.IsLoopback()
+}
+
+// SameResource reports whether a resource a client named is the registered one:
+// equal once the scheme and the host are compared without regard to letter case
+// [MCP 2026-07-28 basic/authorization#canonical-server-uri]; the rest, the path
+// and the port alike, exactly.
+func SameResource(registered, named string) bool {
+	r, err := url.Parse(registered)
+	if err != nil {
+		return false
+	}
+	n, err := url.Parse(named)
+	if err != nil || n.RawQuery != "" || n.Fragment != "" || strings.Contains(named, "#") || n.User != nil {
+		return false
+	}
+
+	return strings.EqualFold(r.Scheme, n.Scheme) && strings.EqualFold(r.Host, n.Host) &&
+		r.EscapedPath() == n.EscapedPath() && r.User == nil
+}
+
+// AIApp is the enabled AI app registered as clientID.
+func (r *Registry) AIApp(clientID string) (SignInClient, bool) {
+	c, ok := r.signInClients[clientID]
+	if !ok || !c.Enabled || c.Kind != KindAIApp {
+		return SignInClient{}, false
+	}
+
+	return c, true
 }
 
 // checkAddress accepts an absolute address with no fragment [RFC 6749 §3.1.2],

@@ -375,6 +375,24 @@ All tokens are ES256 JWTs (RFC 7519) minted in `issuer/`. Access tokens are type
 | **User** | `authorization_code` / `refresh_token` | internal person subject | `aud` (the sign-in client's own `audience`), `client_id` (that client, [RFC 9068 §2.2]), `scope`, `loa`, `login_method`, the name parts and `serial_number` only as the client's row lists them in `claims`, `tenant` (membership deployments only), `cnf.jkt` |
 | **Service** | `client_credentials` | client id | `client_id`, `scope`, `cnf.jkt` — scoped to one audience by the registry; plus `tenant` when the client named the organisation it is a member of (a service account) |
 | **Delegated** | `token-exchange` (RFC 8693) | the end user named in the subject token | `scope`, `loa`, `login_method`, `serial_number`, `tenant` (carried forward), `act` (acting client), `cnf.jkt` |
+| **AI app** | `authorization_code` / `refresh_token` of a `kind: ai_app` client | the person | `aud` (the app's one resource), `client_id`, `scope` (the boxes it asked for that the person and the chosen assistant both hold), `tenant` (where the assistant is the person's), `act` (`{sub: svc:assistant-<ULID>}`), `login_method` `assistant`, `loa` `low`; **no `cnf`**, `token_type` `Bearer`, lifetime `APP_TOKEN_TTL` |
+
+**AI apps** ([MCP 2026-07-28 basic/authorization]). An AI app's `/authorize` names its one `resource`
+(RFC 8707), refused `invalid_target` otherwise, and asks only for boxes from its row (`invalid_scope`);
+it chooses no tenant. After the person's usual sign-in, a page lists **the person's own assistants**
+(the register's `/api/v1/sign-in/assistants`), each by its name and its workspace; one is still asked,
+none is a refusal in words and no code. The choice is posted once, from this page, in the browser the
+sign-in began in, with the page's token; the assistant must still be the person's as the register
+answers then. The app's code exchange and refreshes take no DPoP proof and answer RFC 6749 §5.2 errors
+(`invalid_grant`, `invalid_target`, `invalid_request`). **Its refresh token is good once:** each refresh
+answers a new one, and one used again ends that connection. **Every refresh asks the register again:**
+the assistant removed or given to another person, or the person gone from the workspace, ends the
+connection; a box the assistant lost is gone from the next token. A connection is a session of its own,
+not the browser's shared one, lasting at most `SESSION_TTL`; the app ends it at `/revoke` with its
+refresh token and no key, which ends nothing else. **A token exchanged from an AI app's token** (its
+`login_method` is `assistant`) carries nothing the app token lacks, a level included, at every hop, whatever the exchanging
+client's grant allows; `login_method` and `loa` are carried forward, so nothing that asks for a real
+sign-in accepts it.
 
 **The register key.** With a register wired, the membership lookup at token issue asks by the person's typed platform subject — `sub:` + the token's own `sub` — and by the client id (`svc:…`) for a service account. No separate claim carries the key: every consumer derives it from `sub` the same way, so a token and an invitation written from the identity store's answer meet on the same bytes. The identity code (`serial_number`) stays on the token for the signing side and is no register key.
 
@@ -550,6 +568,7 @@ can be stated alongside the country.
 | `SIGNING_KEY_RELOAD_INTERVAL` | `0` (disabled) | Poll cadence for no-redeploy overlapping key rotation |
 | `USER_TOKEN_TTL` | `15m` | User access-token lifetime |
 | `SERVICE_TOKEN_TTL` | `5m` | Service / delegated token lifetime |
+| `APP_TOKEN_TTL` | `5m` | An AI app's token lifetime: the one token bound to no key; its assistant is asked about again at every refresh |
 | `DPOP_PROOF_MAX_AGE` | `60s` | DPoP proof freshness window |
 | `TOKEN_CLOCK_SKEW_LEEWAY` | `30s` | Clock-skew leeway for proof and nonce checks |
 | `DPOP_NONCE_ENABLED` | `true` | Require a server DPoP-Nonce on issuance hops |
@@ -623,6 +642,28 @@ fragment. A sign-out or back-channel address may use `http` only for a confident
 row none of whose methods this deployment offers is logged as a warning: one file can serve
 deployments whose providers differ, and such a row's sign-ins are refused where they are asked
 for.
+
+**An AI app** (`kind: ai_app`) is a sign-in client a person connects to one MCP server as one of
+their own assistants: a public client, sent back only to a loopback or `https` address, whose
+`audience` is the MCP server's canonical address and whose `scopes` are the boxes it may ask for.
+It takes no `claims`, no `signing`, no `single_sign_on` and no `baseline_scopes`; anything else in
+such a row stops the start, and `scopes` on any other row does too:
+
+```yaml
+  - client_id: claude-code
+    kind: ai_app
+    type: public
+    client_name: Claude Code      # named on the assistant page
+    audience: https://flowbyte.example/mcp
+    enabled: true
+    redirect_uris: [http://localhost:33418/callback]
+    methods: [upstream]
+    scopes: [projects/project:view, projects/task:view, projects/task:create, projects/task:edit,
+             projects/task:changeStageOwn, projects/task/comment:add]
+```
+
+The MCP server's own service row lists that address under `act_from`, so it may exchange the app's
+token for the services it calls.
 
 ---
 

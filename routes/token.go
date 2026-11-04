@@ -6,6 +6,7 @@ import (
 
 	"github.com/gmb-lib/go-authbyte/claims"
 	pkerrors "github.com/gmb-lib/go-platform-kit/errors"
+	"github.com/go-make-bytes/authbyte/identity"
 	"github.com/go-make-bytes/authbyte/issuer"
 	"github.com/go-make-bytes/authbyte/registry"
 	"github.com/go-make-bytes/authbyte/rolebyte"
@@ -197,7 +198,19 @@ func (r *router) token(ctx *azugo.Context) {
 		return
 	}
 
-	// Every issuance hop is DPoP-bound; the proof carries no access token.
+	// An AI app holds no proof-of-possession key: its code exchange and its
+	// refreshes are answered without one, and its tokens are bound to none.
+	if grant == "authorization_code" || grant == "refresh_token" {
+		if id := ctx.Form.StringOptional("client_id"); id != nil {
+			if app, ok := r.Registry().AIApp(*id); ok {
+				r.grantForApp(ctx, grant, app)
+
+				return
+			}
+		}
+	}
+
+	// Every other issuance hop is DPoP-bound; the proof carries no access token.
 	thumbprint, ok := r.verifyEndpointDPoP(ctx, "")
 	if !ok {
 		return
@@ -715,6 +728,11 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 		ctx.Error(corehttp.UnauthorizedError{})
 
 		return
+	}
+	// A token made through an AI app's assistant carries what the person and
+	// the assistant both may do; what is exchanged from it carries no box more.
+	if subject.LoginMethod == identity.LoginAssistant {
+		scopes = narrowToSubject(scopes, subject.Scope)
 	}
 
 	tok, exp, err := r.Issuer().IssueDelegated(issuer.DelegatedTokenInput{
