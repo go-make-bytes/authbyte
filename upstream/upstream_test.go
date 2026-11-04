@@ -67,19 +67,22 @@ func TestEParakstsLogoutDefaultsIDP(t *testing.T) {
 }
 
 // TestEParakstsMethodGates pins the profile's allowed/federated method sets:
-// eParaksts Mobile and eID Scan log in; the legacy plugin eID is refused but
-// still counts as federated (its IdP SSO cookie must be cleared on logout);
-// Web eID is neither (it never touches this IdP).
+// eParaksts Mobile and eID Scan log in; the card through the provider's plugin is
+// refused by default but counts as federated (a deployment that names it signs
+// it out at the IdP too); the unrecognized sentinel is refused; Web eID is
+// neither (it never touches this IdP).
 func TestEParakstsMethodGates(t *testing.T) {
 	p := eparakstsProvider(t, "http://localhost:9999", "", nil)
 
 	qt.Check(t, qt.IsTrue(p.MethodAllowed(identity.LoginEParakstsMobile)))
 	qt.Check(t, qt.IsTrue(p.MethodAllowed(identity.LoginEIDScan)))
+	qt.Check(t, qt.IsFalse(p.MethodAllowed(identity.LoginLegacyEID)))
 	qt.Check(t, qt.IsFalse(p.MethodAllowed(identity.LoginEID)))
 	qt.Check(t, qt.IsFalse(p.MethodAllowed(identity.LoginWebEID)))
 
-	qt.Check(t, qt.IsTrue(p.FederatedMethod(identity.LoginEID)))
+	qt.Check(t, qt.IsTrue(p.FederatedMethod(identity.LoginLegacyEID)))
 	qt.Check(t, qt.IsTrue(p.FederatedMethod(identity.LoginEParakstsMobile)))
+	qt.Check(t, qt.IsFalse(p.FederatedMethod(identity.LoginEID)))
 	qt.Check(t, qt.IsFalse(p.FederatedMethod(identity.LoginWebEID)))
 }
 
@@ -382,6 +385,29 @@ func TestGenericResolverDefaults(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 	m2, _ := p2.Resolver().Interpret("urn:example:smartcard", nil)
 	qt.Check(t, qt.Equals(m2, "corpCard"))
+}
+
+// TestAGenericProviderReadsOnlyExplicitLevels proves a provider that names no
+// assurance vocabulary is not read with eParaksts' method words: an answer
+// carrying one keeps the provider's default level, while an explicit level still
+// counts. The eParaksts profile keeps its own words.
+func TestAGenericProviderReadsOnlyExplicitLevels(t *testing.T) {
+	p, err := New(context.Background(), Config{
+		AuthorizeURL: "https://x/a", TokenURL: "https://x/t", UserInfoURL: "https://x/u",
+		ClientID: "cid", MethodDefault: "upstream",
+	}, nil)
+	qt.Assert(t, qt.IsNil(err))
+
+	for _, amr := range []string{"urn:x:methods:smartcard", "urn:x:methods:sc_plugin", "urn:x:methods:mobileid", "urn:x:methods:mobile-eid"} {
+		_, loa := p.Resolver().Interpret("", []string{amr})
+		qt.Check(t, qt.Equals(loa, identity.LoALow), qt.Commentf("%s", amr))
+	}
+	_, loa := p.Resolver().Interpret("urn:x:level:substantial", nil)
+	qt.Check(t, qt.Equals(loa, identity.LoASubstantial))
+
+	ep := eparakstsProvider(t, "http://localhost:9999", "", nil)
+	_, loa = ep.Resolver().Interpret("", []string{"urn:x:methods:sc_plugin"})
+	qt.Check(t, qt.Equals(loa, identity.LoAHigh))
 }
 
 // TestUserInfoDebugLogsRawBody proves the raw userinfo JSON is logged at debug

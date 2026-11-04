@@ -109,11 +109,12 @@ type Configuration struct {
 	// differ per method so a sign-in can actually force eParaksts Mobile vs eID
 	// Scan (the login-method ↔ signing-identity binding). The concrete URNs
 	// depend on the Entrust policy configuration, so they are env-configurable.
-	// NB: there is deliberately NO eID-card (sc_plugin) acr here — eID-card login
-	// goes through Web eID only; the eParaksts/TrustedX sc_plugin flow is not
-	// permitted (a callback resolving to it is rejected).
-	EparakstsACRMobile  string `mapstructure:"eparaksts_acr_mobile"`
-	EparakstsACREIDScan string `mapstructure:"eparaksts_acr_eidscan"`
+	// The eID card through the provider's plugin (legacyEid) has its own; it is
+	// sent only where the deployment names legacyEid among the provider's methods
+	// (OIDC_UPSTREAM_METHODS_ALLOWED).
+	EparakstsACRMobile    string `mapstructure:"eparaksts_acr_mobile"`
+	EparakstsACREIDScan   string `mapstructure:"eparaksts_acr_eidscan"`
+	EparakstsACRLegacyEID string `mapstructure:"eparaksts_acr_legacy_eid"`
 	// EparakstsLogoutIDP is the IdP identifier used for the session-termination
 	// (logout) endpoint /trustedx-authserver/{idp}/logout. It differs from the
 	// OAuth AS id (lvrtc-eipsign-as); default lvrtc-eipsign-idp. Env-configurable
@@ -280,9 +281,9 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	// Distinct, method-forcing acr_values flow URNs (request side), per the
 	// eParaksts OAuth2 docs. These differ from the response-side `amr`
 	// (`...adaptive:methods:mobileid` / `...:mobile-eid`). Override per environment.
-	// No eid (sc_plugin) acr — eID-card login is Web eID only.
 	v.SetDefault("eparaksts_acr_mobile", "urn:eparaksts:authentication:flow:mobileid")
 	v.SetDefault("eparaksts_acr_eidscan", "urn:eparaksts:authentication:flow:mobile-eid")
+	v.SetDefault("eparaksts_acr_legacy_eid", "urn:eparaksts:authentication:flow:sc_plugin")
 	v.SetDefault("eparaksts_logout_idp", upstream.EParakstsDefaultLogoutIDP)
 	v.SetDefault("sign_in_rate_limit", 60)
 	v.SetDefault("sign_in_rate_window", time.Minute)
@@ -343,6 +344,7 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("eparaksts_scopes", "EPARAKSTS_SCOPES")
 	_ = v.BindEnv("eparaksts_acr_mobile", "EPARAKSTS_ACR_MOBILE")
 	_ = v.BindEnv("eparaksts_acr_eidscan", "EPARAKSTS_ACR_EIDSCAN")
+	_ = v.BindEnv("eparaksts_acr_legacy_eid", "EPARAKSTS_ACR_LEGACY_EID")
 	_ = v.BindEnv("eparaksts_logout_idp", "EPARAKSTS_LOGOUT_IDP")
 	_ = v.BindEnv("loa_policy", "LOA_POLICY")
 	_ = v.BindEnv("token_signing_key", "TOKEN_SIGNING_KEY")
@@ -602,12 +604,14 @@ func (c *Configuration) ACRForMethod(method string) string {
 		return c.EparakstsACRMobile
 	case identity.LoginEIDScan:
 		return c.EparakstsACREIDScan
+	case identity.LoginLegacyEID:
+		return c.EparakstsACRLegacyEID
 	case identity.LoginWebEID:
 		// Web eID card login is not an Entrust method, so it has no acr_values:
 		// the card is read on this service's own sign-in page.
 		return ""
 	default:
-		// "eid" (sc_plugin) intentionally has no acr — eID-card login is Web eID only.
+		// The "eid" sentinel and any other name has none: no provider allows it.
 		return ""
 	}
 }

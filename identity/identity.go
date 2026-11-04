@@ -19,14 +19,17 @@ const (
 // identical to the matching signing-flow token, so a login and the signing it
 // authorizes correlate across services on one literal.
 const (
-	// LoginEID is the eID smart card via the eParaksts/TrustedX browser plugin
-	// (sc_plugin). It is NO LONGER a permitted login method — eID-card login goes
-	// through Web eID (LoginWebEID) only. The constant is retained as the sentinel
-	// the eParaksts-callback guard rejects and to recognize the federated SSO case.
+	// LoginEID is the sentinel an unrecognized method resolves to. No provider
+	// allows it, so a callback resolving to it is refused (fail closed).
 	LoginEID             = "eid"
 	LoginEParakstsMobile = "eparakstsMobile" // eParaksts Mobile / Cloud (mobileid)
 	LoginEIDScan         = "eidScan"         // eID Scan: phone reads the physical eID card (mobile-eid)
 	LoginWebEID          = "webEid"          // Web eID browser login (web-eid engine; NOT the eParaksts IdP)
+	// LoginLegacyEID is the eID card in a reader, read on the eParaksts page by
+	// the provider's own browser plugin (sc_plugin). It is a method of the
+	// eParaksts provider that a deployment turns on by naming it among the
+	// provider's methods; the profile's default methods leave it out.
+	LoginLegacyEID = "legacyEid"
 	// LoginAssistant is what an AI app's token states in place of the way its
 	// person signed in: the app works as one of the person's assistants, with no
 	// sign-in of its own behind each call. It matches no signing flow, so nothing
@@ -44,11 +47,12 @@ const (
 const ProviderWebEID = "webeid"
 
 // IsEParakstsLoginAllowed reports whether a login method resolved from an
-// eParaksts IdP (TrustedX) callback is permitted. Only eParaksts Mobile and eID
-// Scan are. The eID smart card via the TrustedX plugin (sc_plugin → LoginEID) is
-// NOT — eID-card login must go through Web eID (LoginWebEID). Anything else
-// (incl. an unrecognized method, which ResolveLoginMethod maps to LoginEID) is
-// rejected, so the eParaksts login path fails closed.
+// eParaksts IdP (TrustedX) callback is permitted by default: eParaksts Mobile and
+// eID Scan. The card through the provider's plugin (LoginLegacyEID) is permitted
+// only where a deployment names it among the provider's methods, which the
+// provider's own allowed set decides. Anything else (incl. an unrecognized
+// method, which ResolveLoginMethod maps to LoginEID) is rejected, so the
+// eParaksts login path fails closed.
 func IsEParakstsLoginAllowed(method string) bool {
 	switch method {
 	case LoginEParakstsMobile, LoginEIDScan:
@@ -64,7 +68,7 @@ func IsEParakstsLoginAllowed(method string) bool {
 // eParaksts IdP, so it has no SSO cookie and is not federated here.
 func IsEParakstsFederated(method string) bool {
 	switch method {
-	case LoginEID, LoginEParakstsMobile, LoginEIDScan:
+	case LoginEParakstsMobile, LoginEIDScan, LoginLegacyEID:
 		return true
 	default:
 		return false
@@ -152,9 +156,9 @@ type Resolver struct {
 // (e.g. urn:eparaksts:authentication:flow:mobileid) and carry the method in
 // `amr`. We therefore map both: explicit `level:*` wins (longest match), and as
 // a fallback the QSCD-backed eParaksts methods (mobile, eID Scan) — all
-// qualified, SCAL2 — resolve to "high". Override per environment via LOA_POLICY
-// once production's exact `acr` values are confirmed. No sc_plugin entry: eID-card
-// login via the TrustedX plugin is not permitted (Web eID only).
+// qualified, SCAL2 — and the eID card through the provider's plugin resolve to
+// "high". Override per environment via LOA_POLICY once production's exact `acr`
+// values are confirmed.
 func DefaultLoAPolicy() map[string]string {
 	return map[string]string{
 		"level:high":        LoAHigh,
@@ -162,6 +166,19 @@ func DefaultLoAPolicy() map[string]string {
 		"level:low":         LoALow,
 		"mobileid":          LoAHigh,
 		"mobile-eid":        LoAHigh,
+		"sc_plugin":         LoAHigh,
+		"smartcard":         LoAHigh,
+	}
+}
+
+// LevelLoAPolicy is the assurance vocabulary of the explicit level words alone,
+// for a provider whose answers carry none of eParaksts' method words: a level it
+// names outright counts, and anything else falls to the provider's default.
+func LevelLoAPolicy() map[string]string {
+	return map[string]string{
+		"level:high":        LoAHigh,
+		"level:substantial": LoASubstantial,
+		"level:low":         LoALow,
 	}
 }
 
@@ -170,7 +187,7 @@ func DefaultLoAPolicy() map[string]string {
 //
 //	mobile-eid → eID Scan (phone reads the physical eID card)
 //	mobileid / smart_id / cloud / mobile → eParaksts Mobile (Cloud signing)
-//	sc_plugin / smartcard → eID (legacy smart-card-via-plugin; not a permitted login)
+//	sc_plugin / smartcard → legacyEid (the eID card through the provider's plugin)
 //
 // Matched longest token first (see matchPolicy), so "mobile-eid" wins over the bare
 // "mobile"/"mobileid" tokens it contains, and a bare "eid" is never matched.
@@ -184,8 +201,8 @@ func DefaultLoAPolicy() map[string]string {
 func DefaultMethodPolicy() map[string]string {
 	return map[string]string{
 		"mobile-eid": LoginEIDScan,
-		"sc_plugin":  LoginEID,
-		"smartcard":  LoginEID,
+		"sc_plugin":  LoginLegacyEID,
+		"smartcard":  LoginLegacyEID,
 		"mobileid":   LoginEParakstsMobile,
 		"smart_id":   LoginEParakstsMobile,
 		"cloud":      LoginEParakstsMobile,
@@ -237,7 +254,16 @@ func indexPolicy(policy map[string]string) (map[string]string, []string) {
 		lower[lk] = v
 		keys = append(keys, lk)
 	}
-	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
+	// Tokens of equal length are taken in alphabetical order, so an answer matching two
+	// of them resolves the same on every run; in the built-in assurance vocabulary
+	// that puts an explicit level (`level:low`) ahead of a method word as long.
+	sort.Slice(keys, func(i, j int) bool {
+		if len(keys[i]) != len(keys[j]) {
+			return len(keys[i]) > len(keys[j])
+		}
+
+		return keys[i] < keys[j]
+	})
 
 	return lower, keys
 }
@@ -342,6 +368,7 @@ func matchPolicy(keys []string, policy map[string]string, def, acr string, amr [
 // in the signing service, not here.
 const (
 	FlowWebEID               = "webEid"
+	FlowLegacyEID            = "legacyEid"
 	FlowEIDScan              = "eidScan"
 	FlowEParakstsMobile      = "eparakstsMobile"
 	FlowEParakstsMobileEseal = "eparakstsMobileEseal"
@@ -355,20 +382,24 @@ const (
 // method permits a specific set of signing flows. A card login permits two ways to
 // sign with the card, both reading it the way the login did: a Web eID login (the
 // card in a reader) permits Web eID and the CSC flow through the provider's browser
-// extension; an eID Scan login (the card read by a phone) permits eID Scan and the
-// CSC flow read by eID Scan. The two card logins do not cross over. eParaksts Mobile
+// extension; a login with the card through the eParaksts plugin (the card in a
+// reader, read on the provider's page) permits that plugin's own flow and the same
+// CSC flow, which reads the card through the provider's software too; an eID Scan
+// login (the card read by a phone) permits eID Scan and the CSC flow read by eID
+// Scan. The card logins do not cross over. eParaksts Mobile
 // permits its personal cloud signature and the mobile-bound organisation eSeal; the
 // CSC flows authenticate with the eID card only, so no eParaksts Mobile login
 // reaches them.
 type BindingResolver struct{}
 
 // PermittedFlows returns the signing flows a login method may drive. An unknown
-// or empty method — and the legacy plugin eID, which is not a permitted login —
-// permits nothing, so the binding fails closed.
+// or empty method permits nothing, so the binding fails closed.
 func (BindingResolver) PermittedFlows(loginMethod string) []string {
 	switch loginMethod {
 	case LoginWebEID:
 		return []string{FlowWebEID, FlowCSCEidPlugin}
+	case LoginLegacyEID:
+		return []string{FlowLegacyEID, FlowCSCEidPlugin}
 	case LoginEIDScan:
 		return []string{FlowEIDScan, FlowCSCEidScan}
 	case LoginEParakstsMobile:

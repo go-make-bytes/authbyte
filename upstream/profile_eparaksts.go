@@ -35,11 +35,12 @@ const (
 // EParakstsProfile returns the provider Config for the eParaksts/Entrust IdP:
 // fixed endpoint paths under the authority, the bespoke logout template, the
 // electronic-identification scope, and the acr/amr vocabularies for its
-// methods. Only eParaksts Mobile and eID Scan are permitted logins — the
-// legacy smart-card-via-plugin method resolves to the "eid" sentinel, which is
-// outside the allowed set, so that path fails closed (eID cards log in through
-// Web eID instead). The caller fills ClientID/ClientSecret and may override
-// Scopes and the vocabularies.
+// methods. eParaksts Mobile and eID Scan are its permitted logins by default;
+// the eID card through the provider's plugin (legacyEid) is known to it but
+// allowed only where a deployment names it among the methods, so by default a
+// callback resolving to it is refused, as is an unrecognized method (the "eid"
+// sentinel). The caller fills ClientID/ClientSecret and may override Scopes,
+// the methods and the vocabularies.
 func EParakstsProfile(authorityURL, logoutIDP string) Config {
 	if logoutIDP == "" {
 		logoutIDP = EParakstsDefaultLogoutIDP
@@ -74,9 +75,9 @@ func EParakstsProfile(authorityURL, logoutIDP string) Config {
 		LoAPolicy:      identity.DefaultLoAPolicy(),
 		LoADefault:     identity.LoALow,
 		MethodsAllowed: []string{identity.LoginEParakstsMobile, identity.LoginEIDScan},
-		// The legacy plugin method did authenticate at the IdP (SSO cookie set),
-		// so a logout for it still clears the IdP session front-channel.
-		MethodsFederated: []string{identity.LoginEParakstsMobile, identity.LoginEIDScan, identity.LoginEID},
+		// Every method of this provider sets its session cookie, so a logout for
+		// any of them clears the IdP session front-channel.
+		MethodsFederated: []string{identity.LoginEParakstsMobile, identity.LoginEIDScan, identity.LoginLegacyEID},
 	}
 }
 
