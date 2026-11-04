@@ -3,6 +3,24 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.10.0
+
+### Changed
+
+- **A token exchanged from an AI app's token lets the exchanging client's levels pass again.** It still carries no
+  box (`service/feature:act`) the app token lacks, at every hop. A level of the client's own grant (`group:level`, a
+  scope with no slash) now passes as for every other exchange, where v0.8.0 and v0.9.0 removed it. So a service
+  serving a person through an assistant can do its own work for them again, such as naming people at the
+  membership register with `membership:people`: under v0.9.0 that exchange was given no scope and the register
+  refused it. Any other scope with a slash, a malformed one included, is still held to the app token.
+
+### Security
+
+- **Registering a person (`POST /identity/persons`) takes only a service acting as itself**, as the person reads
+  already did: a person's token, a token another service obtained by exchange and a service account's token for an
+  organisation are refused `403` even when they carry `identity:admin`. The fleet's callers register people with
+  their own service token and see no difference.
+
 ## v0.9.0
 
 ### Added — the eID card through eParaksts' own plugin

@@ -77,17 +77,19 @@ type registerPersonResponse struct {
 // already logged in) answers their existing subject with `created: false`, and
 // the names on their row are kept.
 //
-// The caller must hold `identity:admin`. The identity code is never echoed —
-// it is personal data and a refusal's text is the least controlled place it
-// could end up.
+// The caller must be a service acting as itself and holding `identity:admin`,
+// as for the person reads: a person's token, one another service obtained by
+// exchange and a service account's token for an organisation are refused even
+// with the scope. The identity code is never echoed — it is personal data and a
+// refusal's text is the least controlled place it could end up.
 //
 // @route /identity/persons [post].
 func (r *router) registerPerson(ctx *azugo.Context) {
 	u := ctx.User()
-	if !u.HasScopeLevel(scopeGroupIdentity, scopeLevelAdmin) {
+	if !holdsAsItself(u, scopeLevelAdmin) {
 		ctx.Error(pkerrors.NewProblem("err:identity:forbidden",
 			pkerrors.WithStatus(fasthttp.StatusForbidden),
-			pkerrors.WithPublicDetail("registering a person requires the identity:admin scope")))
+			pkerrors.WithPublicDetail("registering a person requires a service holding the identity:admin scope")))
 
 		return
 	}
