@@ -70,6 +70,12 @@ type Flow struct {
 	// client.
 	Picker  bool   `json:"picker,omitempty"`
 	Request string `json:"request,omitempty"`
+	// AppScopes are, for an AI app's sign-in, the boxes it asked for.
+	AppScopes []string `json:"app_scopes,omitempty"`
+	// SessionID is, for an AI app's sign-in that is complete but for the person's
+	// choice of assistant, the session the sign-in made: the flow is then the
+	// assistant page's, kept under the page's own ticket.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // AppCode binds an issued application authorization code (Auth→SPA) to the
@@ -87,6 +93,11 @@ type AppCode struct {
 	// must carry, from the flow to the code exchange that answers it.
 	OpenID bool   `json:"openid,omitempty"`
 	Nonce  string `json:"nonce,omitempty"`
+	// Assistant is, for an AI app, the key of the assistant the person chose
+	// (Tenant then the tenant where it is theirs), and AppScopes the boxes the app
+	// asked for.
+	Assistant string   `json:"assistant,omitempty"`
+	AppScopes []string `json:"app_scopes,omitempty"`
 }
 
 // Session is the server-side user session.
@@ -140,6 +151,11 @@ type Session struct {
 	// Shared is the id of the browser's shared session this session was signed
 	// in under, so that ending this one ends that too.
 	Shared string `json:"shared,omitempty"`
+	// Assistant is, for an AI app's connection, the key of the person's assistant
+	// the app works as (Tenant is the tenant where it is theirs), and AppScopes
+	// the boxes the app asked for. Both are re-checked at every refresh.
+	Assistant string   `json:"assistant,omitempty"`
+	AppScopes []string `json:"app_scopes,omitempty"`
 }
 
 // Expired reports whether the session's lifetime has run out at now. A session
@@ -153,6 +169,10 @@ func (s *Session) Expired(now time.Time) bool {
 type RefreshGrant struct {
 	SessionID string `json:"session_id"`
 	ClientID  string `json:"client_id"`
+	// Rotated marks a refresh token already used, kept so that presenting it
+	// again is seen: for a public client a refresh token is good once, and one
+	// used twice ends its session [OAuth 2.1 §4.3.1].
+	Rotated bool `json:"rotated,omitempty"`
 }
 
 // DisplayName is the name a register shows for the person: the full name the

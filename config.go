@@ -138,8 +138,11 @@ type Configuration struct {
 	SigningKeyReloadInterval time.Duration `mapstructure:"signing_key_reload_interval" validate:"gte=0"`
 
 	// TTLs and leeway (env-configurable; spec decision A-5).
-	UserTokenTTL         time.Duration `mapstructure:"user_token_ttl" validate:"required,gt=0"`
-	ServiceTokenTTL      time.Duration `mapstructure:"service_token_ttl" validate:"required,gt=0"`
+	UserTokenTTL    time.Duration `mapstructure:"user_token_ttl" validate:"required,gt=0"`
+	ServiceTokenTTL time.Duration `mapstructure:"service_token_ttl" validate:"required,gt=0"`
+	// AppTokenTTL is an AI app's token's lifetime: short, as it is the one token
+	// not bound to a key, and an assistant removed is refused at the next refresh.
+	AppTokenTTL          time.Duration `mapstructure:"app_token_ttl" validate:"required,gt=0"`
 	DPoPProofMaxAge      time.Duration `mapstructure:"dpop_proof_max_age" validate:"required,gt=0"`
 	TokenClockSkewLeeway time.Duration `mapstructure:"token_clock_skew_leeway" validate:"gte=0"`
 
@@ -261,6 +264,7 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	v.SetDefault("token_signing_alg", "ES256")
 	v.SetDefault("user_token_ttl", 15*time.Minute)
 	v.SetDefault("service_token_ttl", 5*time.Minute)
+	v.SetDefault("app_token_ttl", 5*time.Minute)
 	v.SetDefault("session_ttl", 12*time.Hour)
 	v.SetDefault("dpop_proof_max_age", 60*time.Second)
 	v.SetDefault("token_clock_skew_leeway", 30*time.Second)
@@ -347,6 +351,7 @@ func (c *Configuration) Bind(_ string, v *viper.Viper) {
 	_ = v.BindEnv("signing_key_reload_interval", "SIGNING_KEY_RELOAD_INTERVAL")
 	_ = v.BindEnv("user_token_ttl", "USER_TOKEN_TTL")
 	_ = v.BindEnv("service_token_ttl", "SERVICE_TOKEN_TTL")
+	_ = v.BindEnv("app_token_ttl", "APP_TOKEN_TTL")
 	_ = v.BindEnv("session_ttl", "SESSION_TTL")
 	_ = v.BindEnv("dpop_proof_max_age", "DPOP_PROOF_MAX_AGE")
 	_ = v.BindEnv("token_clock_skew_leeway", "TOKEN_CLOCK_SKEW_LEEWAY")

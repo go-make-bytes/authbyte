@@ -46,6 +46,7 @@ const (
 	doorClaims      = "/api/v1/sign-in/claims"
 	doorMemberships = "/api/v1/sign-in/memberships"
 	doorAdmissions  = "/api/v1/sign-in/directory-admissions"
+	doorAssistants  = "/api/v1/sign-in/assistants"
 )
 
 // personKeyPrefix types the register's person key. The prefix is lower-case and
@@ -212,6 +213,46 @@ func answeredFor(asked string, res resolveResponse) ([]Membership, error) {
 	}
 
 	return out, nil
+}
+
+// Assistant is one of a person's own assistants, in the tenant where it is
+// theirs: its key (`svc:assistant-<ULID>`) and name, the tenant's id and name,
+// and the boxes the person and the assistant both hold there.
+type Assistant struct {
+	TenantID   string   `json:"tenantId"`
+	TenantName string   `json:"tenantName"`
+	Key        string   `json:"assistant"`
+	Name       string   `json:"name"`
+	Scopes     []string `json:"scopes"`
+}
+
+type assistantsResponse struct {
+	SubjectKey string      `json:"subjectKey"`
+	Assistants []Assistant `json:"assistants"`
+}
+
+// Assistants attaches any pending invitations for the person, then answers their
+// own assistants, each active in a tenant where the person is an active member,
+// with what both hold there. An empty answer means the person has none. Any
+// transport or service failure, and an answer about anybody else, surfaces as an
+// error: the caller fails closed.
+func (r *Resolver) Assistants(ctx *azugo.Context, subjectKey string) ([]Assistant, error) {
+	if !strings.HasPrefix(subjectKey, personKeyPrefix) || len(subjectKey) == len(personKeyPrefix) {
+		return nil, errors.New("rolebyte: only a person has assistants")
+	}
+	if err := r.call(ctx, subjectKey, scopeClaim, doorClaims, nil, nil); err != nil {
+		return nil, err
+	}
+
+	var res assistantsResponse
+	if err := r.call(ctx, subjectKey, scopeResolve, doorAssistants, nil, &res); err != nil {
+		return nil, err
+	}
+	if res.SubjectKey != subjectKey {
+		return nil, fmt.Errorf("%w: asked %q, answered %q", ErrAnswerForAnotherSubject, subjectKey, res.SubjectKey)
+	}
+
+	return res.Assistants, nil
 }
 
 // Memberships attaches any pending invitations for the subject, then answers

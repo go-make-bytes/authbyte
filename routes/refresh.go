@@ -128,6 +128,13 @@ func (r *router) revoke(ctx *azugo.Context) {
 		return
 	}
 
+	// An AI app ends its own connection, holding no key.
+	if app, ok := r.Registry().AIApp(clientID); ok {
+		r.revokeApp(ctx, app, token)
+
+		return
+	}
+
 	thumbprint, ok := r.verifyEndpointDPoP(ctx, "")
 	if !ok {
 		return

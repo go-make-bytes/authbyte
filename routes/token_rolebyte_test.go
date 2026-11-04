@@ -77,6 +77,19 @@ type fakeResolver struct {
 	admittedKey string                   // the subject key offered ("" = never offered)
 	admitted    *rolebyte.DirectoryLogin // the login offered (nil = never offered)
 	afterAdmit  []rolebyte.Membership
+
+	// The assistants door: what it answers per person key, and an error it fails
+	// with. Read only while requests run, so requests at once may ask it.
+	assistants    map[string][]rolebyte.Assistant
+	assistantsErr error
+}
+
+func (f *fakeResolver) Assistants(_ *azugo.Context, subjectKey string) ([]rolebyte.Assistant, error) {
+	if f.assistantsErr != nil {
+		return nil, f.assistantsErr
+	}
+
+	return f.assistants[subjectKey], nil
 }
 
 func (f *fakeResolver) Memberships(_ *azugo.Context, subjectKey string) ([]rolebyte.Membership, error) {

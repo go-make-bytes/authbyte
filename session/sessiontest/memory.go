@@ -218,6 +218,15 @@ func (m *Memory) LoadRefresh(_ context.Context, key string) (*session.RefreshGra
 	return &g, nil
 }
 
+func (m *Memory) TakeRefresh(_ context.Context, key string) (*session.RefreshGrant, error) {
+	var g session.RefreshGrant
+	if err := m.get("refresh:"+key, &g, true); err != nil {
+		return nil, err
+	}
+
+	return &g, nil
+}
+
 func (m *Memory) DeleteRefresh(_ context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -13,6 +13,9 @@ type Token struct {
 	// for one (openid), at its code exchange.
 	IDToken         string `json:"id_token,omitempty"`
 	IssuedTokenType string `json:"issued_token_type,omitempty"`
+	// Scope is, for an AI app, the boxes its token carries: what it asked for that
+	// the person and the assistant both hold, which may be fewer [RFC 6749 §5.1].
+	Scope string `json:"scope,omitempty"`
 	// Capabilities is the session's signing-capability set captured at login.
 	// Present only on the authorization-code grant, and only when the login
 	// captured one — a caller stores it with its own session and threads the

@@ -57,6 +57,9 @@ func Init(a *authbytecore.App) error {
 	a.Get("/authorize", limited(r.authorize))
 	a.Post("/authorize", limited(r.authorize))
 	a.Post("/authorize/choice", limited(r.choose))
+	// An AI app's sign-in ends with the person's choice of assistant, counted
+	// like the choice of way.
+	a.Post("/authorize/assistant", limited(r.chooseAssistant))
 	if a.Config().WebEIDEnabled() {
 		// The card read on the page: its answer, counted like the choice.
 		a.Post("/authorize/card", limited(r.cardAnswer))
