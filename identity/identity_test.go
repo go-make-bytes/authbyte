@@ -7,9 +7,9 @@ import (
 	"github.com/go-quicktest/qt"
 )
 
-// TestIsEParakstsLoginAllowed proves eID-card login via the TrustedX plugin
-// (sc_plugin → LoginEID) is rejected from the eParaksts callback (Web eID only),
-// while eParaksts Mobile and eID Scan are allowed. Unknown/empty fails closed.
+// TestIsEParakstsLoginAllowed proves the eParaksts callback's default set:
+// eParaksts Mobile and eID Scan are allowed; the card through the provider's plugin
+// is not unless a deployment names it, and unknown/empty fails closed.
 func TestIsEParakstsLoginAllowed(t *testing.T) {
 	cases := []struct {
 		method string
@@ -17,8 +17,9 @@ func TestIsEParakstsLoginAllowed(t *testing.T) {
 	}{
 		{LoginEParakstsMobile, true},
 		{LoginEIDScan, true},
-		{LoginEID, false},    // eID card via TrustedX plugin — forbidden
-		{LoginWebEID, false}, // Web eID never arrives via the eParaksts callback
+		{LoginLegacyEID, false}, // only where a deployment names it
+		{LoginEID, false},       // the unrecognized-method sentinel
+		{LoginWebEID, false},    // Web eID never arrives via the eParaksts callback
 		{"", false},
 		{"unknown", false},
 	}
@@ -37,9 +38,10 @@ func TestIsEParakstsFederated(t *testing.T) {
 		method string
 		want   bool
 	}{
-		{LoginEID, true},
+		{LoginLegacyEID, true},
 		{LoginEParakstsMobile, true},
 		{LoginEIDScan, true},
+		{LoginEID, false},
 		{LoginWebEID, false},
 		{"", false},
 		{"unknown", false},
@@ -69,7 +71,9 @@ func TestInterpretMethod(t *testing.T) {
 		want string
 	}{
 		{"eParaksts mobile (amr mobileid)", "", []string{adaptive + "mobileid"}, LoginEParakstsMobile},
-		{"smart card (amr sc_plugin)", "", []string{adaptive + "sc_plugin"}, LoginEID},
+		{"smart card (amr sc_plugin)", "", []string{adaptive + "sc_plugin"}, LoginLegacyEID},
+		{"smart card (acr flow:sc_plugin)", flow + "sc_plugin", nil, LoginLegacyEID},
+		{"smart card (amr smartcard)", "", []string{adaptive + "smartcard"}, LoginLegacyEID},
 		{"eID Scan (amr mobile-eid)", "", []string{adaptive + "mobile-eid"}, LoginEIDScan},
 		{"bare mobile fallback", "", []string{adaptive + "mobile"}, LoginEParakstsMobile},
 		{"empty → eid default", "", nil, LoginEID},
@@ -123,8 +127,8 @@ func TestEIDScanBinding(t *testing.T) {
 // TestWebEIDBinding proves the Web eID card login (set directly by the Web eID
 // adapter, not via the AMR resolver) binds to its own Web eID signing flow and the
 // CSC flow that reads the card in a reader too, and
-// that a login method that permits nothing (legacy plugin eID / unknown / empty)
-// fails closed.
+// that a login method that permits nothing (the unrecognized sentinel / unknown /
+// empty) fails closed.
 func TestWebEIDBinding(t *testing.T) {
 	qt.Check(t, qt.DeepEquals(BindingResolver{}.PermittedFlows(LoginWebEID), []string{FlowWebEID, FlowCSCEidPlugin}))
 	qt.Check(t, qt.IsNil(BindingResolver{}.PermittedFlows(LoginEID)))
@@ -138,10 +142,35 @@ func TestWebEIDBinding(t *testing.T) {
 func TestCardLoginsDoNotCrossOver(t *testing.T) {
 	web := BindingResolver{}.PermittedFlows(LoginWebEID)
 	scan := BindingResolver{}.PermittedFlows(LoginEIDScan)
+	legacy := BindingResolver{}.PermittedFlows(LoginLegacyEID)
 	qt.Check(t, qt.IsFalse(slices.Contains(web, FlowCSCEidScan)))
 	qt.Check(t, qt.IsFalse(slices.Contains(web, FlowEIDScan)))
+	qt.Check(t, qt.IsFalse(slices.Contains(web, FlowLegacyEID)))
 	qt.Check(t, qt.IsFalse(slices.Contains(scan, FlowCSCEidPlugin)))
 	qt.Check(t, qt.IsFalse(slices.Contains(scan, FlowWebEID)))
+	qt.Check(t, qt.IsFalse(slices.Contains(scan, FlowLegacyEID)))
+	qt.Check(t, qt.IsFalse(slices.Contains(legacy, FlowWebEID)))
+	qt.Check(t, qt.IsFalse(slices.Contains(legacy, FlowCSCEidScan)))
+}
+
+// TestLegacyEIDBinding proves the card through the eParaksts plugin signs with that
+// plugin's own flow or the CSC flow that reads the card in a reader, in the order
+// signing services mirror.
+func TestLegacyEIDBinding(t *testing.T) {
+	qt.Check(t, qt.DeepEquals(BindingResolver{}.PermittedFlows(LoginLegacyEID), []string{FlowLegacyEID, FlowCSCEidPlugin}))
+	qt.Check(t, qt.Equals(FlowLegacyEID, LoginLegacyEID))
+}
+
+// TestEqualLengthTokensResolveTheSameEveryTime proves a tie between tokens of one
+// length is not left to map order: an answer naming level:low and a card word as
+// long resolves low however the vocabulary's map is walked.
+func TestEqualLengthTokensResolveTheSameEveryTime(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		got := NewResolver(nil).ResolveLoA("urn:safelayer:tws:policies:authentication:level:low", "...:methods:sc_plugin", "...:methods:smartcard")
+		if got != LoALow {
+			t.Fatalf("run %d: level:low beside the card words resolved %q, want low", i, got)
+		}
+	}
 }
 
 // TestResolveLoA covers both acr shapes: the production Safelayer level URN and
@@ -158,7 +187,11 @@ func TestResolveLoA(t *testing.T) {
 		{"prod level:high", "urn:safelayer:tws:policies:authentication:level:high", nil, LoAHigh},
 		{"prod level:substantial", "urn:safelayer:tws:policies:authentication:level:substantial", nil, LoASubstantial},
 		{"demo flow:mobileid in acr", "urn:eparaksts:authentication:flow:mobileid", []string{"urn:safelayer:tws:policies:authentication:adaptive:methods:mobileid"}, LoAHigh},
-		{"demo flow:sc_plugin in acr → low (no longer permitted)", "urn:eparaksts:authentication:flow:sc_plugin", nil, LoALow},
+		{"demo flow:sc_plugin in acr → high (a card)", "urn:eparaksts:authentication:flow:sc_plugin", nil, LoAHigh},
+		{"amr smartcard → high (a card)", "", []string{"urn:safelayer:tws:policies:authentication:adaptive:methods:smartcard"}, LoAHigh},
+		// level:low is as long as both card words: the explicit level wins, on every run.
+		{"level:low beside sc_plugin → low", "urn:safelayer:tws:policies:authentication:level:low", []string{"...:methods:sc_plugin"}, LoALow},
+		{"level:low beside smartcard → low", "urn:safelayer:tws:policies:authentication:level:low", []string{"...:methods:smartcard"}, LoALow},
 		{"explicit level wins over method", "urn:safelayer:...:level:substantial", []string{"...:methods:mobileid"}, LoASubstantial},
 		{"unknown → low", "urn:something:opaque", nil, LoALow},
 	}

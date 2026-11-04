@@ -401,9 +401,10 @@ func (r *router) callback(ctx *azugo.Context, entry *upstream.Entry) {
 	// Enforce the provider's allowed-method set (fail closed) even if the IdP's
 	// hosted page offered something else, so removing the request-side
 	// acr/button is not the only protection. For the eParaksts profile this is
-	// what rejects the legacy plugin eID card (sc_plugin → "eid" — eID cards
-	// log in through Web eID); for a generic provider it pins the callback to
-	// the methods its configuration declares.
+	// what rejects the card through the provider's plugin (sc_plugin →
+	// legacyEid) where the deployment has not named it, and any unrecognized
+	// method (the "eid" sentinel); for a generic provider it pins the callback
+	// to the methods its configuration declares.
 	if !provider.MethodAllowed(id.LoginMethod) {
 		r.Audit().LoginFailure(ctx, "login method not permitted via the upstream IdP: "+id.LoginMethod)
 		ctx.Error(corehttp.ForbiddenError{})

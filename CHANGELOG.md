@@ -3,6 +3,38 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.9.0
+
+### Added — the eID card through eParaksts' own plugin
+
+- **A sign-in method `legacyEid`**: the eID card in a reader, read on eParaksts' page by eParaksts' own browser
+  plugin. It is a method of the eParaksts provider, off unless the deployment names it among the provider's methods
+  (`OIDC_UPSTREAM_METHODS_ALLOWED=eparakstsMobile,eidScan,legacyEid`; the setting replaces the profile's set whole).
+  A sign-in asking for it sends eParaksts `urn:eparaksts:authentication:flow:sc_plugin` (`EPARAKSTS_ACR_LEGACY_EID`);
+  an answer carrying `sc_plugin` or `smartcard` resolves to `legacyEid` at assurance `high`. Discovery's
+  `acr_values_supported` lists it where it is on, and the sign-in page names it **eParaksts eID**.
+- **Its signing flows**: a `legacyEid` sign-in permits the `legacyEid` and `cscEidPlugin` signing flows, never
+  `webEid`; a Web eID sign-in never permits `legacyEid`. A person signed in this way is found by their identity
+  code under the eParaksts provider, as with its other methods, and signing out also ends eParaksts' session.
+
+### Changed
+
+- An eParaksts answer naming the plugin card used to resolve to the never-allowed `eid` method and be refused
+  (403); it now resolves to `legacyEid`, which is still refused (403) wherever the deployment has not named it.
+  Only an unrecognized method resolves to `eid` now. A deployment that changes nothing sees no difference.
+- **The sign-in page names the card read on it Web eID** (was **eID**), so it is told apart from eParaksts eID where
+  both are offered.
+
+### Security
+
+- **A provider other than eParaksts is no longer read with eParaksts' method words for the assurance level.** With
+  no `LOA_POLICY`, the generic provider inherited them, so an answer that happened to carry `mobileid`,
+  `mobile-eid`, `smartcard` or `sc_plugin` was raised to `high`. It now counts only an explicit `level:*` word and
+  otherwise takes `OIDC_UPSTREAM_LOA_DEFAULT`. The eParaksts profile keeps its words; a deployment that relied on the
+  old reading sets `LOA_POLICY` (or `loa_policy` on an Enterprise list entry).
+- **Vocabulary tokens of equal length are matched in alphabetical order**, not in a map's random order, so an answer
+  carrying `level:low` beside a card word as long resolves `low` on every run.
+
 ## v0.8.0
 
 ### Added — AI apps, signed in as one of the person's assistants

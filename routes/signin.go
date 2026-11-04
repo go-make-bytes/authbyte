@@ -70,7 +70,9 @@ func (r *router) wayName(method string, w signin.Words) (name, hint string) {
 	case identity.LoginEIDScan:
 		return "eID Scan", w.HintScan
 	case identity.LoginWebEID:
-		return "eID", w.HintCard
+		return "Web eID", w.HintCard
+	case identity.LoginLegacyEID:
+		return "eParaksts eID", w.HintPlugin
 	default:
 		// A generic provider's way, named as the deployment names it.
 		if e := r.Upstreams().ByMethod(method); e != nil && e.DisplayName != "" {

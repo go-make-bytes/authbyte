@@ -179,7 +179,8 @@ A request to `/authorize` that names no way in (`acr_values` absent) is shown th
 - **Tied to the browser.** Every `/authorize` sets an http-only cookie, `__Host-authbyte_signin` (the plain name only on a development server over plain HTTP), holding a random value that lives ten minutes and is kept across sign-ins, so two tabs both finish. Each flow keeps its hash; the page's choice and the provider's return (code or error) are refused without it, before the provider's code is exchanged. Every sign-in has one, so a flow with none completes nowhere.
 - **The choice** is a form post with a token derived from that cookie and an `Origin` that must be this service's own (`BASE_URL`); a method the page did not offer is refused. A choice whose cookie has run out shows the page again, saying the sign-in took too long.
 - **A cancel or a provider failure** of a sign-in begun on the page brings the person back to the page with what happened, once; a sign-in whose client named the way is answered at the client, as before.
-- **The card** is read on the page where the deployment reads cards (`WEBEID_ENGINE_URL`) and the client's row lists `webEid`, in the row's order, as **eID**; a request naming `webEid` in `acr_values` is shown the page with the ways it names. The page is shown with a challenge tied to the browser; the page's script (`/signin/card.js`) has the Web eID library (`/signin/web-eid.js`, 2.1.0) ask the card to sign it and posts the answer to `/authorize/card`. The engine's `WEBEID_ORIGIN` names this service's own origin. Missing card software, a card that does not complete, and a browser running no script each get their message on the page.
+- **The card** is read on the page where the deployment reads cards (`WEBEID_ENGINE_URL`) and the client's row lists `webEid`, in the row's order, as **Web eID**; a request naming `webEid` in `acr_values` is shown the page with the ways it names. The page is shown with a challenge tied to the browser; the page's script (`/signin/card.js`) has the Web eID library (`/signin/web-eid.js`, 2.1.0) ask the card to sign it and posts the answer to `/authorize/card`. The engine's `WEBEID_ORIGIN` names this service's own origin. Missing card software, a card that does not complete, and a browser running no script each get their message on the page.
+- **The card through eParaksts' plugin** (`legacyEid`, where the deployment names it) is a provider method like the others: its button, **eParaksts eID**, sends the person to eParaksts' page, where eParaksts' own plugin reads the card. Nothing of it runs on this page.
 - **Headers:** `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; form-action 'self' <the provider's authorization origin>; frame-ancestors 'none'; base-uri 'none'`, `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin` (a window that opened the page cannot reach it, so it cannot post a forged answer to the card's library), `Cache-Control: no-store`, `Referrer-Policy: same-origin` (the page's address goes to no other host; `no-referrer` would make browsers send `Origin: null` on the page's own form, which the choice refuses), `X-Content-Type-Options: nosniff`. The page runs no script but this service's own files (the card's) and loads nothing from another host.
 - **Language:** the person's own pick (kept a year in `__Host-authbyte_lang`), then the client's `ui_locales`, then `Accept-Language`, then English; the provider is asked in the same language.
 - **Rate limit:** `/authorize`, the choice and the card's answer allow `SIGN_IN_RATE_LIMIT` requests per client address per `SIGN_IN_RATE_WINDOW` (60 a minute), counted in the application cache; the next answers `429` with `Retry-After`. The provider's return is not limited. An office behind one address that signs in more people than that in a window needs a higher number.
@@ -301,9 +302,9 @@ sequenceDiagram
     AC->>RD: GETDEL flows:{state} (single use)
     AC->>IDP: exchange code → tokens (id_token verified against the provider's keys when it publishes any) → userinfo
     AC->>AC: resolve acr+amr (+acrs) → login_method + loa
-    alt method not permitted via IdP (sc_plugin → eid)
-        AC-->>SPA: 403 (eID card must use Web eID)
-    else permitted (mobileid / mobile-eid / upstream)
+    alt method not permitted via IdP (unrecognized → eid, or sc_plugin → legacyEid where not named)
+        AC-->>SPA: 403
+    else permitted (mobileid / mobile-eid / sc_plugin where named / upstream)
         AC->>PG: identity.upsert (person keyed on the identity code <br/> a codeless directory login by its credential)
         AC-->>AC: GDPR access record (routine, fail-open)
         AC->>RD: SET sessions:{sid} NX (session, lifetime from now, SESSION_TTL)
@@ -354,9 +355,10 @@ The `identity` package is the anti-corruption layer between the identity provide
 | `webEid` | (validated by the web-eid engine) | `high` | `webEid`, `cscEidPlugin` | permitted (card login) |
 | `eidScan` | `mobile-eid` | `high` | `eidScan`, `cscEidScan` | permitted |
 | `eparakstsMobile` | `mobileid` \| `smart_id` \| `cloud` | `high` | `eparakstsMobile`, `eparakstsMobileEseal` | permitted |
-| `eid` | `sc_plugin` \| `smartcard` | — | none | **rejected** — eID card must use Web eID |
+| `legacyEid` | `sc_plugin` \| `smartcard` | `high` | `legacyEid`, `cscEidPlugin` | permitted only where the deployment names it among the eParaksts methods (the eID card read on eParaksts' page by eParaksts' own browser plugin) |
+| `eid` | anything unrecognized | — | none | **rejected** — the fail-closed sentinel |
 
-A card login permits the CSC signing flow that reads the card the same way the login did — the card in a reader for Web eID, read by a phone for eID Scan — and never the other card route. The `login_method` value is one camelCase literal shared by name with the signing service, so a login and the signature it authorises correlate on a single token. The binding **fails closed**: an unknown or empty method — and the plugin `eid` path — permits nothing. Two independent guards enforce the "eID card is Web eID only" rule: the callback rejects a login that resolves to `eid` with 403 even if the identity provider's page offered it, and the built-in login-method policy never maps a bare `eid`. Assurance-level and method vocabularies can be overridden per environment (`LOA_POLICY`) once production's exact `acr` values are confirmed.
+A card login permits the CSC signing flow that reads the card the same way the login did — the card in a reader for Web eID and for the eParaksts plugin, read by a phone for eID Scan — and never the other card route; a Web eID login never permits `legacyEid`, nor a `legacyEid` login `webEid`. The `login_method` value is one camelCase literal shared by name with the signing service, so a login and the signature it authorises correlate on a single token. The binding **fails closed**: an unknown or empty method permits nothing. The eParaksts profile allows `eparakstsMobile` and `eidScan`; `legacyEid` is on where `OIDC_UPSTREAM_METHODS_ALLOWED` names it (`eparakstsMobile,eidScan,legacyEid`), and the callback refuses with 403 any method the deployment did not name, even if the identity provider's page offered it. Assurance-level and method vocabularies can be overridden per environment (`LOA_POLICY`) once production's exact `acr` values are confirmed.
 
 **No step-up.** A session's login method and assurance are fixed by its sign-in, and nothing raises them later. A client that needs another proof, such as a signing step that needs a certificate the session did not capture, starts a fresh sign-in naming the way it wants (`acr_values`); that makes a new session. `id_token_hint` stays refused.
 
@@ -541,11 +543,11 @@ can be stated alongside the country.
 | `OIDC_UPSTREAM_ACCOUNT_STATUS_GUEST` | `1` | The account-status value that marks a guest |
 | `OIDC_UPSTREAM_METHOD_POLICY` | — (⇒ profile default) | `acr`/`amr` token → login-method vocabulary (`substr=method,…`, longest token wins) |
 | `OIDC_UPSTREAM_METHOD_DEFAULT` | `upstream` (generic) | Login method when no vocabulary token matches |
-| `OIDC_UPSTREAM_METHODS_ALLOWED` | — (⇒ the default method) | Comma-separated set a callback may resolve to; anything else is refused (fail closed) |
+| `OIDC_UPSTREAM_METHODS_ALLOWED` | — (⇒ the default method; the eParaksts profile's `eparakstsMobile,eidScan`) | Comma-separated set a callback may resolve to; anything else is refused (fail closed). It replaces the profile's set whole, so turning the eParaksts plugin card on is `eparakstsMobile,eidScan,legacyEid` |
 | `OIDC_UPSTREAM_METHODS_FEDERATED` | — (none) | Comma-separated methods whose sign-out also goes through the provider's end-session endpoint, ending the session it keeps in the browser. Unset, signing out ends this service's session and leaves the provider's alone — a directory provider's session is the person's whole estate. The eParaksts profile lists its own methods regardless |
 | `OIDC_UPSTREAM_LOA_DEFAULT` | `low` | Assurance level when no `LOA_POLICY` token matches — raise deliberately for an IdP that enforces MFA |
 | `OIDC_UPSTREAM_DISPLAY_NAME` | — (⇒ "Your organisation's sign-in", in the page's language) | The generic provider's name on the sign-in page's button, e.g. `Microsoft Entra` |
-| `LOA_POLICY` | — (⇒ built-in) | Override the `acr`/`amr` → assurance-level vocabulary (`substr=loa,…`) |
+| `LOA_POLICY` | — (⇒ built-in: the eParaksts profile's level and method words; another provider's explicit `level:*` words only, then `OIDC_UPSTREAM_LOA_DEFAULT`) | Override the `acr`/`amr` → assurance-level vocabulary (`substr=loa,…`; longest token wins, equal lengths in alphabetical order) |
 
 | Env (eParaksts profile) | Default | Meaning |
 |---|---|---|
@@ -556,6 +558,7 @@ can be stated alongside the country.
 | `EPARAKSTS_SCOPES` | `urn:lvrtc:fpeil:aa urn:safelayer:eidas:sign:identity:profile` | Login scope(s): electronic identification + the sign-identity profile (the latter enables login-time capability capture; drop it to turn capture off) |
 | `EPARAKSTS_ACR_MOBILE` | `urn:eparaksts:authentication:flow:mobileid` | Method-forcing `acr_values` for an eParaksts Mobile sign-in |
 | `EPARAKSTS_ACR_EIDSCAN` | `urn:eparaksts:authentication:flow:mobile-eid` | Method-forcing `acr_values` for an eID Scan sign-in |
+| `EPARAKSTS_ACR_LEGACY_EID` | `urn:eparaksts:authentication:flow:sc_plugin` | Method-forcing `acr_values` for a sign-in with the eID card through eParaksts' plugin (`legacyEid`, where it is named among the methods) |
 | `EPARAKSTS_LOGOUT_IDP` | `lvrtc-eipsign-idp` | IdP id for the logout endpoint (differs from the OAuth AS id) |
 
 **Token signing + DPoP**
@@ -738,7 +741,7 @@ The container build is a multi-stage image (`Dockerfile`): a static `CGO_ENABLED
 
 ## Security invariants
 
-- **Fail closed on trust primitives** — no signing key ⇒ refuses to start (unless the explicit dev opt-in); unknown/expired flow, app code, or session ⇒ 401; an identity-provider login that resolves to the disallowed `eid` (plugin) method ⇒ 403; a dead cache/PostgreSQL ⇒ `/readyz` 503 and the pod leaves rotation.
+- **Fail closed on trust primitives** — no signing key ⇒ refuses to start (unless the explicit dev opt-in); unknown/expired flow, app code, or session ⇒ 401; an identity-provider login that resolves to a method the deployment does not allow ⇒ 403; a dead cache/PostgreSQL ⇒ `/readyz` 503 and the pod leaves rotation.
 - **Every issued token is sender-constrained** — `cnf.jkt` binds the token to the caller's DPoP key; refresh and revocation require the *same* key the session was bound to and the client the refresh token was issued to. Issuance hops require a fresh DPoP proof with a server nonce, and each proof id is one-time-use across every instance (jti replay guard).
 - **No session value in a browser address or the store** — the internal session id never leaves the service; the refresh token is answered only to the client's server and kept only as a hash; sign-out ends the session server to server, and the browser's sign-out address carries no value naming it.
 - **Single-use flow artifacts** — login flows and app authorization codes are consumed atomically (`GETDEL`), so a replay under a race cannot reuse them; PKCE `code_verifier` is compared in constant time.
@@ -753,5 +756,5 @@ The container build is a multi-stage image (`Dockerfile`): a static `CGO_ENABLED
 - **Assurance vocabulary is provisional** — the built-in `acr`/`amr` → LoA mapping resolves the QSCD-backed eParaksts methods to `high` and reads a `level:*` URN when present; production's exact `acr` values must be confirmed and pinned via `LOA_POLICY`. The identity provider currently returns an identical `amr` for eParaksts Mobile and eID Scan, distinguished only in `acr` — the resolver scans both claims so this resolves correctly today and survives the upstream moving the signal.
 - **Refresh material lives in the shared cache** — a user session (and thus refresh) is only as durable as the Valkey or Redis behind `CACHE_*`; a flush logs everyone out. The store uses ordinary single-key commands (`GET`, `SET` with `NX`/`XX`/`PX`, `GETDEL`, `DEL`) and has been proven on a single, non-clustered Valkey and Redis; `redis-cluster` and `redis-sentinel` are accepted by the configuration but unproven here.
 - **Trusted-proxy assumption** — DPoP `htu` reconstruction honours `X-Forwarded-Proto`/`X-Forwarded-Host` and the client IP comes from `X-Forwarded-For`; the edge gateway MUST strip/overwrite these on inbound client traffic. They are never trusted from arbitrary origins.
-- **eID smart card is Web eID only** — the eParaksts/TrustedX plugin (`sc_plugin`) card path is intentionally not permitted; card login requires the Web eID surface and the `WEBEID_ENGINE_URL` engine to be configured.
+- **The eParaksts plugin card is off by default** — the card through eParaksts' own browser plugin (`legacyEid`) is permitted only where `OIDC_UPSTREAM_METHODS_ALLOWED` names it; card login on this service's own page requires the Web eID surface and the `WEBEID_ENGINE_URL` engine to be configured. Which `acr`/`amr` eParaksts answers for the plugin is read from its demo's flow name and is to be confirmed on a real card.
 - **GDPR access logging is best-effort** — when access-audit is unreachable, records buffer to the outbox (durable only when `ACCESS_AUDIT_OUTBOX_DIR` is set) and drain in the background; a login is never blocked on audit pressure, so a lost outbox on an in-memory deployment means lost access records rather than a failed login.

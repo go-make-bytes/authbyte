@@ -53,6 +53,8 @@ type Words struct {
 	BadTitle, BadLead                  string
 	Organisation                       string
 	HintRedirect, HintMobile, HintScan string
+	// The card read on the provider's page by the provider's own plugin.
+	HintPlugin string
 	// The card read on the page: its hint, the wait, the failure, the missing
 	// software (a title, a lead and the link's words), and the line for a
 	// browser that runs no script.
@@ -90,6 +92,7 @@ var words = map[string]Words{
 		HintRedirect:   "{name} opens your company’s own sign-in page.",
 		HintMobile:     "{name} asks you to approve in its app on your phone.",
 		HintScan:       "{name} has you scan your ID card with your phone.",
+		HintPlugin:     "{name} opens eParaksts, where you sign in with the ID card in your card reader; it asks for your PIN.",
 		HintCard:       "{name} is your ID card, read by the card software on this computer; it asks for your PIN.",
 		Waiting:        "Waiting for the card…",
 		CardFailed:     "That did not complete. Check the card is in the reader and try again.",
@@ -118,6 +121,7 @@ var words = map[string]Words{
 		HintRedirect:   "{name} atver jūsu uzņēmuma pieslēgšanās lapu.",
 		HintMobile:     "{name} lūgs apstiprināt pieslēgšanos lietotnē jūsu tālrunī.",
 		HintScan:       "Ar {name} jūs noskenējat savu ID karti ar tālruni.",
+		HintPlugin:     "{name} atver eParaksts lapu, kur pieslēdzaties ar ID karti kartes lasītājā; būs jāievada PIN.",
 		HintCard:       "{name} ir jūsu ID karte, ko nolasa šī datora ID programmatūra; tā prasīs PIN.",
 		Waiting:        "Gaida karti…",
 		CardFailed:     "Neizdevās pabeigt. Pārbaudiet, vai karte ir lasītājā, un mēģiniet vēlreiz.",

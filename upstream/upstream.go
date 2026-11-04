@@ -164,7 +164,8 @@ type Config struct {
 	// MethodPolicy maps acr/amr tokens (lower-cased substrings, longest
 	// match wins) to login methods; MethodDefault is the method when nothing
 	// matches (default: the legacy "eid" sentinel, which is never allowed —
-	// fail closed). LoAPolicy/LoADefault do the same for assurance levels.
+	// fail closed). LoAPolicy/LoADefault do the same for assurance levels
+	// (default: the explicit `level:*` words only, then LoADefault).
 	MethodPolicy  map[string]string
 	MethodDefault string
 	LoAPolicy     map[string]string
@@ -292,9 +293,16 @@ func (p *Provider) AuthorizationOrigin() string {
 }
 
 // Resolver builds the identity resolver carrying this provider's acr/amr
-// vocabularies and defaults.
+// vocabularies and defaults. A provider that names no assurance vocabulary is
+// read for explicit levels only: the eParaksts profile names its own, and its
+// method words mean nothing at another provider.
 func (p *Provider) Resolver() *identity.Resolver {
-	return identity.NewResolverPolicies(p.cfg.LoAPolicy, p.cfg.MethodPolicy, p.cfg.MethodDefault, p.cfg.LoADefault)
+	loa := p.cfg.LoAPolicy
+	if len(loa) == 0 {
+		loa = identity.LevelLoAPolicy()
+	}
+
+	return identity.NewResolverPolicies(loa, p.cfg.MethodPolicy, p.cfg.MethodDefault, p.cfg.LoADefault)
 }
 
 // MethodAllowed reports whether a login method resolved from this provider's
