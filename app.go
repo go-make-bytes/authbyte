@@ -164,6 +164,12 @@ type SessionStore interface {
 	LoadShared(ctx context.Context, id string) (*session.Shared, error)
 	PutSharedApp(ctx context.Context, id, client, sid string, until time.Time) (string, error)
 	EndShared(ctx context.Context, id string) (map[string]string, error)
+	// AddConnection keeps an AI app's connection in its assistant's index, by
+	// workspace and assistant, until until; Connections answers the index's live
+	// ones; RemoveConnection takes one out, and is no error when it is gone.
+	AddConnection(ctx context.Context, tenant, assistant string, c session.Connection, until time.Time) error
+	Connections(ctx context.Context, tenant, assistant string) ([]session.Connection, error)
+	RemoveConnection(ctx context.Context, tenant, assistant string, c session.Connection) error
 	Ping(ctx context.Context) error
 }
 

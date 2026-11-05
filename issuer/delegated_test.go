@@ -46,7 +46,7 @@ func TestIssueDelegatedActsForUser(t *testing.T) {
 		t.Fatalf("IssueUser: %v", err)
 	}
 
-	subject, err := iss.ParseSubjectToken(userTok)
+	subject, _, err := iss.ParseSubjectToken(userTok)
 	if err != nil {
 		t.Fatalf("ParseSubjectToken: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestExchangeActorChainNests(t *testing.T) {
 func TestParseSubjectTokenRejectsGarbage(t *testing.T) {
 	iss, _, _ := newStack(t)
 
-	if _, err := iss.ParseSubjectToken("not-a-jwt"); err == nil {
+	if _, _, err := iss.ParseSubjectToken("not-a-jwt"); err == nil {
 		t.Fatal("expected ParseSubjectToken to reject a non-token")
 	}
 }

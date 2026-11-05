@@ -87,6 +87,21 @@ func (r *Recorder) SessionEnded(ctx *azugo.Context, actorID, method string) {
 		actorRef(actorID, "user", ""), attrs)
 }
 
+// ConnectionSignedOut records an AI app's connection signed out by a person, its
+// own, or by an administrator of its workspace: actorID did it, personID's app
+// (clientID) stopped.
+func (r *Recorder) ConnectionSignedOut(ctx *azugo.Context, actorID, personID, clientID string, byAdministrator bool) {
+	by := "person"
+	if byAdministrator {
+		by = "administrator"
+	}
+
+	r.emit(ctx, secevents.EventAuthentication, secevents.SeverityInfo, broker.OutcomeSuccess,
+		actorRef(actorID, "user", ""), map[string]any{
+			secevents.AttrKind: "connection_signed_out", "person": personID, "client": clientID, "by": by,
+		})
+}
+
 // Logout records the browser's leg of a sign-out. It names no person: the
 // session is ended server to server (SessionEnded), and the browser's address
 // carries no value that names it. Federated indicates the browser was sent on to

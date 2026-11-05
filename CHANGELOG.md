@@ -3,6 +3,26 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.12.0
+
+### Added
+
+- **An AI app's connection is named, listed and signed out.** When the app redeems its code the connection gets a
+  public name, its time of connecting and a place in its assistant's index; its app tokens state the name as `sid`.
+  `GET /identity/connections` lists the apps connected as the caller's own assistants in their workspace, and
+  `DELETE /identity/connections/{id}` signs one out; `GET`, `DELETE /identity/assistants/{assistant}/connections[/{id}]`
+  do the same for an administrator of the workspace (`membership:admin`), any person's, and end them all. Each takes a
+  person's own token only. A sign-out is recorded as a security event (`connection_signed_out`) naming who did it.
+
+### Changed
+
+- **An AI app's token stops at once when its connection ends.** Its exchange is refused, `401 err:connection:ended`,
+  unless the connection its `sid` names is live and still its person's, app's and assistant's, though the token has
+  not expired; a live one is marked used, at most once a minute. An app token minted before this version names no
+  connection and is refused at its next exchange, so an app connected before it signs in again. An exchanging
+  client that keeps passes made from app tokens should ask for one at every call (go-authbyte's
+  `ExchangeDelegatedToken`), or a kept pass outlives the sign-out.
+
 ## v0.11.0
 
 ### Changed

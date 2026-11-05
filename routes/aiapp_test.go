@@ -102,17 +102,17 @@ func personKeyOf(oid string) string { return rolebyte.PersonKey("sub-of-" + oid)
 var (
 	annasFirst = rolebyte.Assistant{
 		TenantID: "01TENANTA0000000000000000A", TenantName: "Go Make Bytes",
-		Key: "svc:assistant-01ASS1STANT000000000000000A", Name: "Assistant 2",
+		Key: "svc:assistant-01ASS1STANT00000000000000A", Name: "Assistant 2",
 		Scopes: []string{"projects/project:view", "projects/task:view", "projects/task:create", "projects/task/comment:add"},
 	}
 	annasSecond = rolebyte.Assistant{
 		TenantID: "01TENANTB0000000000000000B", TenantName: "Kalēji",
-		Key: "svc:assistant-01ASS1STANT000000000000000B", Name: "Asistents",
+		Key: "svc:assistant-01ASS1STANT00000000000000B", Name: "Asistents",
 		Scopes: []string{"projects/task:view"},
 	}
 	janissOwn = rolebyte.Assistant{
 		TenantID: "01TENANTA0000000000000000A", TenantName: "Go Make Bytes",
-		Key: "svc:assistant-01ASS1STANT000000000000000J", Name: "Assistant 3",
+		Key: "svc:assistant-01ASS1STANT00000000000000J", Name: "Assistant 3",
 		Scopes: aiBoxes,
 	}
 )
@@ -135,7 +135,7 @@ type aiDeployment struct {
 	events   *eventLog
 }
 
-func aiApp(t *testing.T) *aiDeployment {
+func aiApp(t *testing.T, extra ...func(*authbytecore.App)) *aiDeployment {
 	t.Helper()
 
 	d := &aiDeployment{
@@ -158,6 +158,9 @@ func aiApp(t *testing.T) *aiDeployment {
 	app.SetScopeResolver(d.register)
 	recordingAudit(d.events)(app)
 	qt.Assert(t, qt.IsNil(Init(app)))
+	for _, f := range extra {
+		f(app)
+	}
 
 	d.core = app
 	d.app = azugo.NewTestApp(app.App)

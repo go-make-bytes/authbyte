@@ -95,6 +95,13 @@ func Init(a *authbytecore.App) error {
 	identityGroup.Post("/persons", r.registerPerson)
 	identityGroup.Post("/persons/lines", r.personLines)
 	identityGroup.Get("/persons/{personSub}/code", r.personCode)
+	// The AI apps connected as assistants: a person's own, and, for a workspace's
+	// administrator, an assistant's.
+	identityGroup.Get("/connections", r.ownConnections)
+	identityGroup.Delete("/connections/{id}", r.signOutOwnConnection)
+	identityGroup.Get("/assistants/{assistant}/connections", r.assistantConnections)
+	identityGroup.Delete("/assistants/{assistant}/connections/{id}", r.signOutAssistantConnection)
+	identityGroup.Delete("/assistants/{assistant}/connections", r.endAssistantConnections)
 
 	// Development conveniences (guarded by configuration; never on in prod).
 	if dir := a.Config().DemoDir; dir != "" {

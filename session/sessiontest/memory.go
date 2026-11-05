@@ -345,4 +345,76 @@ func (m *Memory) EndShared(_ context.Context, id string) (map[string]string, err
 	return apps, nil
 }
 
+// connections is an index as the real store keeps it: each connection by its
+// public name and session key, with its end in Unix milliseconds.
+func (m *Memory) connections(tenant, assistant string) (string, map[string]int64) {
+	key := "conn:" + tenant + "/" + assistant
+	index := map[string]int64{}
+	if e, ok := m.entries[key]; ok && m.live(e) {
+		_ = json.Unmarshal(e.value, &index)
+	}
+
+	return key, index
+}
+
+func (m *Memory) AddConnection(_ context.Context, tenant, assistant string, c session.Connection, until time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.now().Before(until) {
+		return session.ErrNotFound
+	}
+
+	key, index := m.connections(tenant, assistant)
+	index[c.ID+" "+c.SessionID] = until.UnixMilli()
+	b, err := json.Marshal(index)
+	if err != nil {
+		return err
+	}
+	e := entry{value: b, expires: until}
+	if old, ok := m.entries[key]; ok && m.live(old) && old.expires.After(until) {
+		e.expires = old.expires
+	}
+	m.entries[key] = e
+
+	return nil
+}
+
+func (m *Memory) Connections(_ context.Context, tenant, assistant string) ([]session.Connection, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	_, index := m.connections(tenant, assistant)
+	now := m.now().UnixMilli()
+	var out []session.Connection
+	for k, end := range index {
+		if end <= now {
+			continue
+		}
+		if id, sid, ok := strings.Cut(k, " "); ok {
+			out = append(out, session.Connection{ID: id, SessionID: sid})
+		}
+	}
+
+	return out, nil
+}
+
+func (m *Memory) RemoveConnection(_ context.Context, tenant, assistant string, c session.Connection) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key, index := m.connections(tenant, assistant)
+	if _, ok := index[c.ID+" "+c.SessionID]; !ok {
+		return nil
+	}
+	delete(index, c.ID+" "+c.SessionID)
+	b, err := json.Marshal(index)
+	if err != nil {
+		return err
+	}
+	m.entries[key] = entry{value: b, expires: m.entries[key].expires}
+
+	return nil
+}
+
 func (m *Memory) Ping(context.Context) error { return nil }

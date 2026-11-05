@@ -112,28 +112,48 @@ type AppTokenInput struct {
 	Assistant   string   // the assistant's key, svc:assistant-<ULID>
 	LoA         string   // always the lowest: the app holds no sign-in of its own
 	LoginMethod string   // always identity.LoginAssistant
-	TTL         time.Duration
+	// Connection is the connection's public name, stated as the token's sid, so
+	// an exchange can tell whether the connection the token was made for is
+	// still live; "" names none, and such a token is exchanged for nothing.
+	Connection string
+	TTL        time.Duration
+}
+
+// appClaims are an AI app's token's claims: an access token's, and the
+// connection it was made for [OIDC Front-Channel Logout 1.0 §3, the sid claim].
+type appClaims struct {
+	claims.Claims
+
+	SID string `json:"sid,omitempty"`
 }
 
 // IssueApp mints an AI app's token: a plain bearer token, with no cnf, since an
 // AI app holds no proof-of-possession key [MCP 2026-07-28 basic/authorization];
 // the one kind of token this issuer mints unbound, kept to its one resource by
-// its audience and to minutes by its lifetime.
+// its audience, to minutes by its lifetime, and to its connection by its sid.
 func (i *Issuer) IssueApp(in AppTokenInput) (string, int64, error) {
 	if in.Assistant == "" || in.TTL <= 0 {
 		return "", 0, fmt.Errorf("issuer: an app token names its assistant and its lifetime")
 	}
-	c := claims.Claims{
-		RegisteredClaims: i.base(in.Subject, in.Audience, in.TTL),
-		Scope:            strings.Join(in.Scopes, " "),
-		LoA:              in.LoA,
-		LoginMethod:      in.LoginMethod,
-		Tenant:           in.Tenant,
-		ClientID:         in.ClientID,
-		Act:              &claims.Actor{Subject: in.Assistant},
+	c := appClaims{
+		Claims: claims.Claims{
+			RegisteredClaims: i.base(in.Subject, in.Audience, in.TTL),
+			Scope:            strings.Join(in.Scopes, " "),
+			LoA:              in.LoA,
+			LoginMethod:      in.LoginMethod,
+			Tenant:           in.Tenant,
+			ClientID:         in.ClientID,
+			Act:              &claims.Actor{Subject: in.Assistant},
+		},
+		SID: in.Connection,
 	}
 
-	return i.sign(c, in.TTL)
+	tok, err := i.km.SignTyped(c, typeAccessToken)
+	if err != nil {
+		return "", 0, err
+	}
+
+	return tok, int64(in.TTL.Seconds()), nil
 }
 
 // DelegatedTokenInput describes an on-behalf-of token minted via token
@@ -184,14 +204,16 @@ func (i *Issuer) IssueDelegated(in DelegatedTokenInput) (string, int64, error) {
 // audience is not checked here: a subject token's audience is the previous hop
 // (e.g. the portal API), not this endpoint, and which hops a client may act from
 // is the registry's to say, so the exchange checks it (registry.MayActFrom).
-func (i *Issuer) ParseSubjectToken(raw string) (*claims.Claims, error) {
+// Beside the claims it answers the connection the token names: an AI app's
+// token's sid, "" for every other token.
+func (i *Issuer) ParseSubjectToken(raw string) (*claims.Claims, string, error) {
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{i.km.Alg()}),
 		jwt.WithIssuer(i.issuerURL),
 		jwt.WithExpirationRequired(),
 	)
 
-	var c claims.Claims
+	var c appClaims
 	if _, err := parser.ParseWithClaims(raw, &c, func(tok *jwt.Token) (any, error) {
 		// Only an access token is exchanged; an ID token signed with the same
 		// key is refused by its type [RFC 9068 §5].
@@ -206,10 +228,10 @@ func (i *Issuer) ParseSubjectToken(raw string) (*claims.Claims, error) {
 
 		return pk, nil
 	}); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	return &c, nil
+	return &c.Claims, c.SID, nil
 }
 
 func (i *Issuer) base(subject, audience string, ttl time.Duration) jwt.RegisteredClaims {

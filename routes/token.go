@@ -684,7 +684,7 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 
 	// The presented subject token must be one this issuer minted and still
 	// valid; its subject names the user being acted for.
-	subject, err := r.Issuer().ParseSubjectToken(subjectToken)
+	subject, connection, err := r.Issuer().ParseSubjectToken(subjectToken)
 	if err != nil {
 		ctx.Error(corehttp.UnauthorizedError{})
 
@@ -712,6 +712,16 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 		r.Audit().DelegationRefused(ctx, clientID, subject.Subject, "the subject token was issued for an audience this client does not act from")
 		ctx.Error(corehttp.ForbiddenError{})
 
+		return
+	}
+
+	// An AI app's token stops at once when its connection ends, though it has not
+	// expired: it is exchanged only while the connection it names is live. It is
+	// known by what it is (the assistant's way, and the app's own client id, which
+	// a token made by an exchange never names), not by the registry, so an app no
+	// longer enabled there is refused rather than exchanged unchecked.
+	if subject.LoginMethod == identity.LoginAssistant && subject.ClientID != "" &&
+		!r.appConnectionLive(ctx, clientID, subject, connection) {
 		return
 	}
 

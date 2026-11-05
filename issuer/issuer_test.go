@@ -218,10 +218,10 @@ func TestAnIDTokenIsNoSubjectTokenForAnExchange(t *testing.T) {
 	if typ := headerType(t, id); typ != "JWT" {
 		t.Errorf("the ID token is typed %q, want JWT", typ)
 	}
-	if _, err := iss.ParseSubjectToken(access); err != nil {
+	if _, _, err := iss.ParseSubjectToken(access); err != nil {
 		t.Errorf("the access token was refused as a subject: %v", err)
 	}
-	if _, err := iss.ParseSubjectToken(id); err == nil {
+	if _, _, err := iss.ParseSubjectToken(id); err == nil {
 		t.Error("the ID token was accepted as the subject of an exchange")
 	}
 }
