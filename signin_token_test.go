@@ -19,7 +19,7 @@ func TestTheSignInDoorTokenIsShortAndBound(t *testing.T) {
 	tok, err := app.mintSignInToken("01K9ANNA0000000000000000AA", "svc:rolebyte", "membership:resolve", "svc:authbyte-core", "the-outbound-key")
 	qt.Assert(t, qt.IsNil(err))
 
-	c, err := app.Issuer().ParseSubjectToken(tok)
+	c, _, err := app.Issuer().ParseSubjectToken(tok)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.IsTrue(c.ExpiresAt.Sub(c.IssuedAt.Time) <= signInTokenTTL))
 	qt.Check(t, qt.Equals(signInTokenTTL, time.Minute))

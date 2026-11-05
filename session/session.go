@@ -156,6 +156,20 @@ type Session struct {
 	// the boxes the app asked for. Both are re-checked at every refresh.
 	Assistant string   `json:"assistant,omitempty"`
 	AppScopes []string `json:"app_scopes,omitempty"`
+	// ConnectedAt is, for an AI app's connection, when the app redeemed its code
+	// and so first held its tokens; LastUsed when a call through it last reached
+	// this service (the exchange a tool call makes), zero until the first. Its SID
+	// is the connection's public name: the person and an administrator sign it out
+	// by it, and the app's tokens name it.
+	ConnectedAt time.Time `json:"connected_at,omitzero"`
+	LastUsed    time.Time `json:"last_used,omitzero"`
+}
+
+// Connection is one AI app's connection as an assistant's index keeps it: its
+// public name and the key of its session, which never leaves this service.
+type Connection struct {
+	ID        string
+	SessionID string
 }
 
 // Expired reports whether the session's lifetime has run out at now. A session

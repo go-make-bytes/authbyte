@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"azugo.io/core/cache"
@@ -23,7 +24,23 @@ const (
 	// the app sessions signed in under each: a hash of client id to session id.
 	sharedInstance     = "shared"
 	sharedAppsInstance = "shared-apps"
+	// connectionsInstance keeps each assistant's index of AI apps connected as it,
+	// per workspace: a sorted set of connections scored by their end.
+	connectionsInstance = "connections"
 )
+
+// addConnection adds a connection to an index, scored by its end, and keeps the
+// index at least that long, so an index outlives none of its live connections.
+const addConnection = `redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
+local t = redis.call('PTTL', KEYS[1])
+if t < tonumber(ARGV[3]) then redis.call('PEXPIRE', KEYS[1], ARGV[3]) end
+return 1`
+
+// liveConnections drops an index's connections whose end has come (now at their
+// end included, as a session ends when now is not before its end) and answers
+// the rest, in one step.
+const liveConnections = `redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+return redis.call('ZRANGE', KEYS[1], 0, -1)`
 
 // putSharedApp records an app session under a shared session in one step,
 // answering the session the same client had there before ("" when none), so two
@@ -366,6 +383,68 @@ func (s *Store) EndShared(ctx context.Context, id string) (map[string]string, er
 	cmd := con.B().Eval().Script(takeSharedApps).Numkeys(1).Key(s.key(sharedAppsInstance, id)).Build()
 
 	return con.Do(ctx, cmd).AsStrMap()
+}
+
+// connectionKey is the index key of an assistant's connections in a workspace.
+func (s *Store) connectionKey(tenant, assistant string) string {
+	return s.key(connectionsInstance, tenant+"/"+assistant)
+}
+
+// member is how the index names a connection: its public name and its session's
+// key, neither of which holds a space.
+func member(c Connection) string { return c.ID + " " + c.SessionID }
+
+// AddConnection keeps c in its assistant's index until until.
+func (s *Store) AddConnection(ctx context.Context, tenant, assistant string, c Connection, until time.Time) error {
+	left := until.Sub(s.now())
+	if left <= 0 {
+		return ErrNotFound
+	}
+
+	con := s.cache.Connection()
+	if con == nil {
+		return cache.ErrCacheUnavailable
+	}
+
+	cmd := con.B().Eval().Script(addConnection).Numkeys(1).Key(s.connectionKey(tenant, assistant)).
+		Arg(strconv.FormatInt(until.UnixMilli(), 10), member(c), strconv.FormatInt(left.Milliseconds(), 10)).Build()
+
+	return con.Do(ctx, cmd).Error()
+}
+
+// Connections answers the live connections in an assistant's index, dropping
+// those whose end has come.
+func (s *Store) Connections(ctx context.Context, tenant, assistant string) ([]Connection, error) {
+	con := s.cache.Connection()
+	if con == nil {
+		return nil, cache.ErrCacheUnavailable
+	}
+
+	cmd := con.B().Eval().Script(liveConnections).Numkeys(1).Key(s.connectionKey(tenant, assistant)).
+		Arg(strconv.FormatInt(s.now().UnixMilli(), 10)).Build()
+	members, err := con.Do(ctx, cmd).AsStrSlice()
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]Connection, 0, len(members))
+	for _, m := range members {
+		if id, sid, ok := strings.Cut(m, " "); ok {
+			out = append(out, Connection{ID: id, SessionID: sid})
+		}
+	}
+
+	return out, nil
+}
+
+// RemoveConnection takes c out of its assistant's index.
+func (s *Store) RemoveConnection(ctx context.Context, tenant, assistant string, c Connection) error {
+	con := s.cache.Connection()
+	if con == nil {
+		return cache.ErrCacheUnavailable
+	}
+
+	return con.Do(ctx, con.B().Zrem().Key(s.connectionKey(tenant, assistant)).Member(member(c)).Build()).Error()
 }
 
 // Ping verifies the cache can be reached.

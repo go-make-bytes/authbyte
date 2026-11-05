@@ -6,7 +6,10 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/gmb-lib/go-authbyte/claims"
+	pkerrors "github.com/gmb-lib/go-platform-kit/errors"
 	"github.com/go-make-bytes/authbyte/identity"
 	"github.com/go-make-bytes/authbyte/issuer"
 	"github.com/go-make-bytes/authbyte/registry"
@@ -346,6 +349,10 @@ func (r *router) appCodeExchange(ctx *azugo.Context, app registry.SignInClient) 
 
 	refresh := randomToken(refreshTokenBytes)
 	sess.RefreshKey = refreshKey(refresh)
+	// The connection is made now, when the app first holds its tokens: it gets
+	// its public name, and its assistant's index lists it until its end.
+	sess.SID = randomToken(24)
+	sess.ConnectedAt = clock().UTC().Truncate(time.Second)
 	if err := r.Session().SaveRefresh(ctx, sess.RefreshKey, &session.RefreshGrant{
 		SessionID: appCode.SessionID,
 		ClientID:  app.ClientID,
@@ -355,6 +362,12 @@ func (r *router) appCodeExchange(ctx *azugo.Context, app registry.SignInClient) 
 		return
 	}
 	if err := r.Session().ReplaceSession(ctx, appCode.SessionID, sess); err != nil {
+		storeRefusal(ctx, err)
+
+		return
+	}
+	if err := r.Session().AddConnection(ctx, sess.Tenant, sess.Assistant,
+		session.Connection{ID: sess.SID, SessionID: appCode.SessionID}, sess.ExpiresAt); err != nil {
 		storeRefusal(ctx, err)
 
 		return
@@ -530,9 +543,104 @@ func (r *router) endConnection(ctx *azugo.Context, sid string, sess *session.Ses
 			return false
 		}
 	}
+	// Out of its assistant's index too. The session is gone, so a failure here
+	// leaves only a name that leads nowhere: a list skips it and drops it.
+	if sess.SID != "" {
+		if err := r.Session().RemoveConnection(ctx, sess.Tenant, sess.Assistant,
+			session.Connection{ID: sess.SID, SessionID: sid}); err != nil {
+			ctx.Log().Warn("an ended connection stays in its assistant's index: " + err.Error())
+		}
+	}
 	r.Audit().SessionEnded(ctx, sess.Subject, identity.LoginAssistant)
 
 	return true
+}
+
+// appConnectionLive reports whether an AI app's token, presented at an exchange
+// by client, belongs to a connection still live: the one its sid names, in its
+// assistant's index, its session there and still the token's person's, app's
+// and assistant's. A connection signed out or ended is refused at once, though
+// the token has not expired. A live one is marked used, at most once a minute.
+// ok is false when the answer is already written.
+func (r *router) appConnectionLive(ctx *azugo.Context, client string, subject *claims.Claims, connection string) bool {
+	// Refused as an unusable subject token is, with its own code, so the app's
+	// server can tell the app to sign in again rather than to try again later.
+	refuse := func(reason string) bool {
+		r.Audit().DelegationRefused(ctx, client, subject.Subject, reason)
+		ctx.Error(pkerrors.NewProblem("err:connection:ended", pkerrors.WithStatus(fasthttp.StatusUnauthorized),
+			pkerrors.WithTitle("The AI app's connection has ended; it must sign in again")))
+
+		return false
+	}
+
+	if !r.isAIApp(subject.ClientID) {
+		return refuse("the AI app is no longer enabled")
+	}
+	assistant := ""
+	if subject.Act != nil {
+		assistant = subject.Act.Subject
+	}
+	if connection == "" || assistant == "" || subject.Tenant == "" {
+		return refuse("an AI app's token names no connection")
+	}
+
+	found, sess, ok := r.findConnection(ctx, subject.Tenant, assistant, connection)
+	if !ok {
+		return false
+	}
+	if found == "" || sess.Subject != subject.Subject || sess.ClientID != subject.ClientID {
+		return refuse("the AI app's connection has ended")
+	}
+
+	if now := clock().UTC(); now.Sub(sess.LastUsed) >= time.Minute {
+		sess.LastUsed = now.Truncate(time.Second)
+		if err := r.Session().ReplaceSession(ctx, found, sess); err != nil {
+			if errors.Is(err, session.ErrNotFound) {
+				return refuse("the AI app's connection has ended")
+			}
+			storeRefusal(ctx, err)
+
+			return false
+		}
+	}
+
+	return true
+}
+
+// findConnection answers the session key and session of the connection named
+// connection in an assistant's index in tenant: "" when there is none live. A
+// name whose session has ended is dropped from the index on the way. ok is false
+// when the store could not answer, and the answer, 503, is then written.
+func (r *router) findConnection(ctx *azugo.Context, tenant, assistant, connection string) (string, *session.Session, bool) {
+	conns, err := r.Session().Connections(ctx, tenant, assistant)
+	if err != nil {
+		storeRefusal(ctx, err)
+
+		return "", nil, false
+	}
+	for _, c := range conns {
+		if c.ID != connection {
+			continue
+		}
+		sess, err := r.Session().LoadSession(ctx, c.SessionID)
+		if errors.Is(err, session.ErrNotFound) {
+			_ = r.Session().RemoveConnection(ctx, tenant, assistant, c)
+
+			return "", nil, true
+		}
+		if err != nil {
+			storeRefusal(ctx, err)
+
+			return "", nil, false
+		}
+		if sess.Assistant != assistant || sess.Tenant != tenant || sess.SID != connection {
+			return "", nil, true
+		}
+
+		return c.SessionID, sess, true
+	}
+
+	return "", nil, true
 }
 
 // answerAppToken mints and answers an AI app's token: the person's, through the
@@ -547,6 +655,7 @@ func (r *router) answerAppToken(ctx *azugo.Context, app registry.SignInClient, s
 		Assistant:   sess.Assistant,
 		LoA:         identity.LoALow,
 		LoginMethod: identity.LoginAssistant,
+		Connection:  sess.SID,
 		TTL:         r.Config().AppTokenTTL,
 	})
 	if err != nil {

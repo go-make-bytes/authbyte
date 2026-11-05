@@ -721,7 +721,7 @@ func TestASignOutEndsEveryAppOfTheSharedSession(t *testing.T) {
 	// 7: an access token already issued is still accepted where this authority
 	// accepts one (the token exchange's subject token), to its own end, at most a
 	// user token's lifetime after it was issued.
-	_, err = core.Issuer().ParseSubjectToken(second.access)
+	_, _, err = core.Issuer().ParseSubjectToken(second.access)
 	qt.Check(t, qt.IsNil(err))
 	claims := tokenClaims(t, second.access)
 	lifetime := time.Duration(claims["exp"].(float64)-claims["iat"].(float64)) * time.Second
