@@ -42,6 +42,8 @@ supposed to prove:
 - forging, replaying or unbinding sender-constrained (DPoP) tokens or delegated (exchange) tokens;
 - influencing the token-signing key, the JWKS, or the client registry;
 - bypassing the login-method / level-of-assurance binding that signing flows rely on;
+- giving a person a scope that counts only on a high sign-in at a lower level, or through a client not set to carry it,
+  or handing out a scope of the reserved `deployment` group from the client registry;
 - weakening or bypassing the audit records that are meant to be evidence.
 
 Denial of service and findings that need an already-compromised host or an already-authenticated

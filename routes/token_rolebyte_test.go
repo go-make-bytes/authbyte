@@ -62,6 +62,14 @@ sign_in_clients:
     claims: [name, given_name, family_name]
     methods: [webEid]
     redirect_uris: [https://product.example/callback]
+  - client_id: admin-spa
+    type: public
+    audience: product-api
+    enabled: true
+    high_scopes: true
+    claims: [name, given_name, family_name]
+    methods: [webEid]
+    redirect_uris: [https://admin.example/callback]
 `
 
 // fakeResolver drives the membership seams without a live register.
@@ -151,6 +159,10 @@ func scopesApp(t *testing.T, resolver authbytecore.ScopeResolver, setup ...func(
 		}
 		if n := ctx.Query.StringOptional("name"); n != nil {
 			sess.Name = *n
+		}
+		// The assurance level the session holds at this moment.
+		if l := ctx.Query.StringOptional("loa"); l != nil {
+			sess.LoA = *l
 		}
 		client, tenant := "", ""
 		if c := ctx.Query.StringOptional("client"); c != nil {

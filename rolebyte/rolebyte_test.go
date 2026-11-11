@@ -253,3 +253,37 @@ func TestAdmitSendsOnlyWhatTheLoginKnows(t *testing.T) {
 	qt.Assert(t, qt.IsNil(json.Unmarshal([]byte(reg.calls[0].body), &body)))
 	qt.Check(t, qt.DeepEquals(body, map[string]string{"issuer": "https://login.example/t", "displayName": "Anna"}))
 }
+
+// The high-only list is read leniently: present, absent (an older register),
+// null and empty all decode, and only a present, non-empty list holds scopes.
+func TestMembershipsDecodeTheHighOnlyScopes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		member string
+		want   []string
+	}{
+		"present": {`"highScopes":["deployment:admin"],`, []string{"deployment:admin"}},
+		"absent":  {``, nil},
+		"null":    {`"highScopes":null,`, nil},
+		"empty":   {`"highScopes":[],`, []string{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reg := newSignInRegister(t, map[string]func(w http.ResponseWriter){
+				doorClaims: answerJSON(`{"claimed":[]}`),
+				doorMemberships: answerJSON(`{"subjectKey":"sub:` + annaSub + `","memberships":[{"tenantId":"t1",` +
+					tc.member + `"scopes":["a:b"]}]}`),
+			})
+			r, _ := reg.resolver()
+
+			inRequest(t, func(ctx *azugo.Context) {
+				got, err := r.Memberships(ctx, PersonKey(annaSub))
+				qt.Assert(t, qt.IsNil(err))
+				qt.Assert(t, qt.HasLen(got, 1))
+				qt.Check(t, qt.DeepEquals(got[0].Scopes, []string{"a:b"}))
+				qt.Check(t, qt.HasLen(got[0].HighScopes, len(tc.want)))
+				if len(tc.want) > 0 {
+					qt.Check(t, qt.DeepEquals(got[0].HighScopes, tc.want))
+				}
+			})
+		})
+	}
+}

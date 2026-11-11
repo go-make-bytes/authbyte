@@ -78,9 +78,14 @@ type Minter func(subject, audience, scope, actor, thumbprint string) (string, er
 
 // Membership is one organisation a subject may act under, with the
 // group:level scopes its roles grant there.
+//
+// HighScopes are scopes that count only when the person signed in at the highest
+// assurance level; the caller decides, from the session's level, whether they
+// are added. An older register sends none, and the list is then empty.
 type Membership struct {
-	TenantID string
-	Scopes   []string
+	TenantID   string
+	Scopes     []string
+	HighScopes []string
 }
 
 // Resolver answers membership questions from the register.
@@ -184,6 +189,10 @@ func (r *Resolver) Admit(ctx *azugo.Context, subjectKey string, login DirectoryL
 type membership struct {
 	TenantID string   `json:"tenantId"`
 	Scopes   []string `json:"scopes"`
+	// HighScopes are the scopes that count only on a high-assurance sign-in.
+	// Absent, null or empty all decode to no scopes: a register that does not
+	// send the member changes nothing.
+	HighScopes []string `json:"highScopes"`
 }
 
 type resolveResponse struct {
@@ -287,7 +296,7 @@ func (r *Resolver) Memberships(ctx *azugo.Context, subjectKey string) ([]Members
 	// after it.
 	tenants := make([]string, 0, len(res.Memberships))
 	for _, m := range res.Memberships {
-		tenants = append(tenants, m.TenantID+"="+strings.Join(m.Scopes, ","))
+		tenants = append(tenants, m.TenantID+"="+strings.Join(m.Scopes, ",")+" high-only="+strings.Join(m.HighScopes, ","))
 	}
 	ctx.Log().Info("membership resolved",
 		zap.String("asked", subjectKey), zap.String("answered_for", res.SubjectKey), zap.Strings("memberships", tenants))

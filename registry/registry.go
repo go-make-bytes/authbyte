@@ -54,6 +54,33 @@ const (
 
 var knownClaims = []string{ClaimName, ClaimGivenName, ClaimFamilyName, ClaimSerialNumber}
 
+// ReservedScopeGroup is the scope group the membership register alone gives out:
+// every `deployment:<level>` scope is answered by the register, as a scope that
+// counts only on a high sign-in. No registry entry may name one, so the document
+// can never hand it to a client, an assistant or a person's baseline.
+const ReservedScopeGroup = "deployment"
+
+// InReservedGroup reports whether a scope belongs to [ReservedScopeGroup]: its
+// group, the part before the first colon, is exactly that name.
+func InReservedGroup(s string) bool {
+	group, _, ok := strings.Cut(s, ":")
+
+	return ok && group == ReservedScopeGroup
+}
+
+// checkNotReserved refuses a registry scope list that holds a scope of the
+// reserved group; what names the list in the error ("grant to ...").
+func checkNotReserved(owner, what string, scopes []string) error {
+	for _, s := range scopes {
+		if InReservedGroup(s) {
+			return fmt.Errorf("registry: %s: %s %q is in the %q scope group, which only the membership register gives out",
+				owner, what, s, ReservedScopeGroup)
+		}
+	}
+
+	return nil
+}
+
 // Grant is a single audience the client may target and the scopes it may
 // request toward it.
 type Grant struct {
@@ -112,6 +139,11 @@ type SignInClient struct {
 	// BaselineScopes are what a person signing in through this client is minted
 	// when no membership is consulted.
 	BaselineScopes []string `yaml:"baseline_scopes"`
+	// HighScopes says whether the tokens of the people who sign in through this
+	// client may carry the scopes the register marks as counting only on a high
+	// sign-in. Off unless set; even then they are added only when the session's
+	// assurance level is high.
+	HighScopes bool `yaml:"high_scopes"`
 	// Claims are the personal claims its tokens carry, from the known four; the
 	// identity code (serial_number) only where it is listed.
 	Claims []string `yaml:"claims"`
@@ -259,11 +291,18 @@ func validateClient(c Client) error {
 		if slices.ContainsFunc(c.Grants[:i], func(o Grant) bool { return o.Audience == g.Audience }) {
 			return fmt.Errorf("registry: client %q has two grants to %q", c.ClientID, g.Audience)
 		}
+		owner := fmt.Sprintf("client %q grant to %q", c.ClientID, g.Audience)
 		for _, s := range g.Scopes {
 			if !IsBox(s) && !IsLevel(s) {
 				return fmt.Errorf("registry: client %q grant to %q: scope %q is neither a box (service/feature:act) nor a level (group:level)",
 					c.ClientID, g.Audience, s)
 			}
+		}
+		if err := checkNotReserved(owner, "scope", g.Scopes); err != nil {
+			return err
+		}
+		if err := checkNotReserved(owner, "assistant_levels", g.AssistantLevels); err != nil {
+			return err
 		}
 		for _, s := range g.AssistantLevels {
 			if !IsLevel(s) {
@@ -314,6 +353,21 @@ func validateSignInClient(c SignInClient) error {
 	// The baseline is minted only to people no membership is asked about.
 	if len(c.BaselineScopes) > 0 && c.MembershipRequired != nil && *c.MembershipRequired {
 		return bad("requires a membership, so its baseline_scopes could never apply")
+	}
+	// A baseline scope is a box or a level, as a grant's scope is, and never one
+	// of the reserved group: those come only from the register.
+	for _, s := range c.BaselineScopes {
+		if !IsBox(s) && !IsLevel(s) {
+			return bad("baseline_scopes %q is neither a box (service/feature:act) nor a level (group:level)", s)
+		}
+	}
+	if err := checkNotReserved(fmt.Sprintf("sign-in client %q", c.ClientID), "baseline_scopes", c.BaselineScopes); err != nil {
+		return err
+	}
+	// The scopes that count only on a high sign-in come from the register's
+	// answer, which a client with no membership asked never has.
+	if c.HighScopes && c.MembershipRequired != nil && !*c.MembershipRequired {
+		return bad("does not ask the register about its people, so high_scopes could never apply")
 	}
 	// A signing session's identities are read from the provider at a sign-in; an
 	// answer from the shared session has no provider to read them from.
@@ -372,9 +426,9 @@ func validateAIApp(c SignInClient, bad func(string, ...any) error) error {
 	if c.Type != ClientPublic {
 		return bad("is an %s, which is a public client", KindAIApp)
 	}
-	if len(c.Claims) > 0 || c.Signing || c.SingleSignOn || len(c.BaselineScopes) > 0 ||
+	if len(c.Claims) > 0 || c.Signing || c.SingleSignOn || len(c.BaselineScopes) > 0 || c.HighScopes ||
 		(c.MembershipRequired != nil && !*c.MembershipRequired) {
-		return bad("is an %s: it takes no claims, signing, single_sign_on, baseline_scopes or a sign-in without a membership", KindAIApp)
+		return bad("is an %s: it takes no claims, signing, single_sign_on, baseline_scopes, high_scopes or a sign-in without a membership", KindAIApp)
 	}
 	if err := checkResource(c.Audience); err != nil {
 		return bad("audience %q is not a resource: %w", c.Audience, err)

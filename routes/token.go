@@ -16,6 +16,7 @@ import (
 	"azugo.io/azugo"
 	corehttp "azugo.io/core/http"
 	"github.com/valyala/fasthttp"
+	"go.uber.org/zap"
 )
 
 // issueMoment is why a user token is being issued: a sign-in, where an
@@ -106,7 +107,69 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 		return membershipOutcome{choices: choices}, true
 	}
 
-	return membershipOutcome{scopes: chosen.Scopes, tenant: chosen.TenantID}, true
+	// The scopes that count only on a high sign-in go to a client that is set to
+	// carry them, never to one that is not.
+	client, _ := r.Registry().SignInClient(clientID)
+	scopes, dropped := withHighScopes(chosen, sess.LoA, client.HighScopes)
+	warnDroppedScopes(ctx, chosen.TenantID, dropped)
+
+	return membershipOutcome{scopes: scopes, tenant: chosen.TenantID}, true
+}
+
+// withHighScopes answers the scopes a person's token carries from the chosen
+// membership: its scopes, and — only when the session's assurance level is
+// exactly high and the client the token is issued to is set to carry them
+// (highAllowed) — its high-only scopes after them, skipping any already present.
+// Any other level, including an empty or unknown one, adds nothing. The level is
+// the one the session holds at this issue, so every refresh decides again from
+// the register's current answer. Each scope is held to a shape first; dropped
+// counts those left out.
+func withHighScopes(m *rolebyte.Membership, loa string, highAllowed bool) (scopes []string, dropped int) {
+	scopes, dropped = shapedScopes(m.Scopes)
+	if loa != identity.LoAHigh || !highAllowed || len(m.HighScopes) == 0 {
+		return scopes, dropped
+	}
+
+	high, n := shapedScopes(m.HighScopes)
+	for _, s := range high {
+		if !slices.Contains(scopes, s) {
+			scopes = append(scopes, s)
+		}
+	}
+
+	return scopes, dropped + n
+}
+
+// shapedScopes keeps the scopes that are a box or a level and counts the rest.
+// A token's scopes are one string split on white space where it is read, so a
+// scope that held white space — a no-break space as well as an ASCII one — would
+// be read as two; the register's answer is held to the same shape as a registry
+// document before anything is minted from it.
+func shapedScopes(in []string) (kept []string, dropped int) {
+	if in != nil {
+		kept = make([]string, 0, len(in)) // an empty list stays empty, not absent
+	}
+	for _, s := range in {
+		if !registry.IsBox(s) && !registry.IsLevel(s) {
+			dropped++
+
+			continue
+		}
+		kept = append(kept, s)
+	}
+
+	return kept, dropped
+}
+
+// warnDroppedScopes logs, once, that the register answered scopes of no valid
+// shape for a tenant. It names the tenant and the count, never the scopes.
+func warnDroppedScopes(ctx *azugo.Context, tenant string, dropped int) {
+	if dropped == 0 {
+		return
+	}
+
+	ctx.Log().Warn("the register answered scopes that are neither a box nor a level; left out of the token",
+		zap.String("tenant", tenant), zap.Int("dropped", dropped))
 }
 
 // registerUnavailable fails a token issue closed when the register is
@@ -535,7 +598,10 @@ func (r *router) serviceAccountScopes(ctx *azugo.Context, clientID, tenant strin
 		return nil, err
 	}
 
-	scopes := intersectScopes(allowed, chosen.Scopes)
+	granted, dropped := shapedScopes(chosen.Scopes)
+	warnDroppedScopes(ctx, chosen.TenantID, dropped)
+
+	scopes := intersectScopes(allowed, granted)
 	if len(scopes) == 0 {
 		// A member, but with no role toward this audience: nothing to mint.
 		err := corehttp.ForbiddenError{}

@@ -117,7 +117,15 @@ ship separately, so this boundary is a published contract:
   (`kind: sign-in`), which a healthy deployment never produces.
 - **Answer:** the subject's active memberships — each organisation with the `group:level`
   scopes the subject's roles grant there. The register attaches any pending invitation first,
-  so a subject's very first token already carries the invited roles.
+  so a subject's very first token already carries the invited roles. The register may also mark,
+  per membership, `highScopes`: scopes that are given only when the person signed in at the high
+  assurance level. They are added after the membership's own scopes, at the sign-in and re-read at
+  every refresh, only when the session's level is `high` **and** the client the token is issued to
+  says `high_scopes: true` (off by default); they never reach a service account's, an AI app's
+  or a baseline-scopes token, and a register that sends none changes nothing. Any scope the register
+  answers that is neither a box nor a level (one holding white space, say) is left out of the token
+  with one warning naming the tenant and the count, and the issue goes on; this holds a service
+  account's tenant token too.
 - **The admission door, for a login through an organisation's own directory.** Such a session
   carries the issuer it came through. When the person has just signed in and holds no membership,
   this service offers them to the register's admission door (`POST /api/v1/sign-in/directory-admissions`, the
@@ -562,7 +570,7 @@ can be stated alongside the country.
 | `OIDC_UPSTREAM_METHODS_FEDERATED` | — (none) | Comma-separated methods whose sign-out also goes through the provider's end-session endpoint, ending the session it keeps in the browser. Unset, signing out ends this service's session and leaves the provider's alone — a directory provider's session is the person's whole estate. The eParaksts profile lists its own methods regardless |
 | `OIDC_UPSTREAM_LOA_DEFAULT` | `low` | Assurance level when no `LOA_POLICY` token matches — raise deliberately for an IdP that enforces MFA |
 | `OIDC_UPSTREAM_DISPLAY_NAME` | — (⇒ "Your organisation's sign-in", in the page's language) | The generic provider's name on the sign-in page's button, e.g. `Microsoft Entra` |
-| `LOA_POLICY` | — (⇒ built-in: the eParaksts profile's level and method words; another provider's explicit `level:*` words only, then `OIDC_UPSTREAM_LOA_DEFAULT`) | Override the `acr`/`amr` → assurance-level vocabulary (`substr=loa,…`; longest token wins, equal lengths in alphabetical order) |
+| `LOA_POLICY` | — (⇒ built-in: the eParaksts profile's level and method words; another provider's explicit `level:*` words only, then `OIDC_UPSTREAM_LOA_DEFAULT`) | Override the `acr`/`amr` → assurance-level vocabulary (`substr=loa,…`; longest token wins, equal lengths in alphabetical order). A deployment that makes a sign-in way count as `high` here or through `OIDC_UPSTREAM_LOA_DEFAULT` also gives the people who sign in that way the scopes that count only on a high sign-in, where their client says `high_scopes: true` |
 
 | Env (eParaksts profile) | Default | Meaning |
 |---|---|---|
@@ -629,7 +637,11 @@ proves itself with its secret and is minted tokens for the audiences and scopes 
 allow (`act_from` names the user audiences whose tokens it may exchange). A grant's scope is a box
 (`service/feature:act`) or a level (`group:level`), and anything else stops the start; a grant's
 `assistant_levels` names those of its levels that may ride a token made through a person's assistant
-(empty by default, each one a level of the grant). `sign_in_clients` sign
+(empty by default, each one a level of the grant). **The scope group `deployment` is reserved:** every
+`deployment:<level>` scope is given only by the membership register, as a scope that counts only on a high sign-in,
+so a grant's `scopes`, a grant's `assistant_levels` and a sign-in client's `baseline_scopes` that name one stop the
+start, the client and the scope named; a baseline scope, like a grant's, must also be a box or a level.
+`sign_in_clients` sign
 people in, and each row carries everything its product needs, so one deployment serves several
 products. The names follow the client metadata of [RFC 7591 §2] and the OpenID logout
 specifications where one exists:
@@ -643,6 +655,7 @@ sign_in_clients:
     audience: portal-api          # the aud of this client's user tokens
     membership_required: false    # see "Supported configurations"
     baseline_scopes: [envelopes:read, documents:read]   # only where no membership is asked
+    high_scopes: false            # true: its people's tokens may carry the register's high-only scopes (off by default; only where a membership is asked)
     claims: [name, given_name, family_name, serial_number]   # the personal claims its tokens carry
     methods: [eparakstsMobile, eidScan, webEid]               # the sign-in methods it allows
     signing: true                 # told the signing flows; its sign-ins capture signing identities
