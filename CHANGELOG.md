@@ -7,6 +7,15 @@ runs the service or integrates against it.
 
 ### Added
 
+- **The token answer of a person in several organisations lists them by name.** When the membership register
+  answers more than one membership for a person, the answer of the code exchange and of every refresh carries
+  `memberships`: one entry for each organisation, in the register's order, with `tenant` (its id) and `name`, whether
+  or not one was chosen. An organisation the register gives no name is listed with an empty `name`. This is additive:
+  a client that ignores unknown keys is unaffected, `tenants` is unchanged, and a person in one organisation gets the
+  answer they got before. A refused answer, a service account's token, an AI app's token and a client that needs no
+  membership never carry the list. The names come from the membership register, which must be on the release that
+  answers `tenantName`; with an older register every name is empty. Nothing about choosing an organisation changed,
+  and no log line, audit event or error gains a name.
 - **A person's token can carry scopes that count only on a high sign-in.** Each membership the register answers may now
   list `highScopes` beside `scopes`. A person's token carries them, after the membership's own scopes and without
   repeating one, only when the session's assurance level is `high` **and** the sign-in client the token is issued to

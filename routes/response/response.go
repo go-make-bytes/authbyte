@@ -27,6 +27,19 @@ type Token struct {
 	// carries no tenant and no scopes until the login is repeated with the chosen
 	// `tenant=<id>`. Absent whenever the token carries a tenant, or needs none.
 	Tenants []string `json:"tenants,omitempty"`
+	// Memberships lists, with each one's name, every organisation the person may
+	// act under, whenever the register answered more than one for them at this
+	// issue, whether or not one was chosen. Absent for a person in one
+	// organisation, and never in a refused answer or a service's token.
+	Memberships []Membership `json:"memberships,omitempty"`
+}
+
+// Membership is one organisation a person may act under: its id and its name.
+// The name is empty for an organisation the register holds none for; the key is
+// always present.
+type Membership struct {
+	Tenant string `json:"tenant"`
+	Name   string `json:"name"`
 }
 
 // Capabilities is the signing-capability set of a logged-in session: the

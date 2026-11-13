@@ -37,6 +37,24 @@ type membershipOutcome struct {
 	scopes  []string
 	tenant  string
 	choices []string
+	// listed is every membership the register answered, in its order, when it
+	// answered more than one; empty otherwise.
+	listed []rolebyte.Membership
+}
+
+// membershipList is the answer's `memberships`: the organisations of a person
+// in several, each with its name. Nil for anyone else.
+func (o membershipOutcome) membershipList() []response.Membership {
+	if len(o.listed) == 0 {
+		return nil
+	}
+
+	out := make([]response.Membership, 0, len(o.listed))
+	for _, m := range o.listed {
+		out = append(out, response.Membership{Tenant: m.TenantID, Name: m.TenantName})
+	}
+
+	return out
 }
 
 // userScopes answers what a user token should carry. The public client the
@@ -91,6 +109,11 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 		}
 	}
 
+	var listed []rolebyte.Membership
+	if len(memberships) > 1 {
+		listed = memberships
+	}
+
 	chosen, choices := chooseMembership(memberships, tenantHint)
 	switch {
 	case len(memberships) == 0, chosen == nil && tenantHint != "":
@@ -104,7 +127,7 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 	case chosen == nil:
 		// Several organisations and none named: the choice is the person's.
 		// The token carries no tenant and no scopes until they make it.
-		return membershipOutcome{choices: choices}, true
+		return membershipOutcome{choices: choices, listed: listed}, true
 	}
 
 	// The scopes that count only on a high sign-in go to a client that is set to
@@ -113,7 +136,7 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 	scopes, dropped := withHighScopes(chosen, sess.LoA, client.HighScopes)
 	warnDroppedScopes(ctx, chosen.TenantID, dropped)
 
-	return membershipOutcome{scopes: scopes, tenant: chosen.TenantID}, true
+	return membershipOutcome{scopes: scopes, tenant: chosen.TenantID, listed: listed}, true
 }
 
 // withHighScopes answers the scopes a person's token carries from the chosen
@@ -441,6 +464,7 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		RefreshToken: refresh,
 		IDToken:      idToken,
 		Tenants:      outcome.choices,
+		Memberships:  outcome.membershipList(),
 		// The login-captured signing capabilities ride the code exchange (and
 		// only the code exchange — a refresh re-issues a token, it is not a
 		// new identification), so the caller can hold them for the session.
@@ -677,6 +701,7 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 		ExpiresIn:    exp,
 		RefreshToken: refresh,
 		Tenants:      outcome.choices,
+		Memberships:  outcome.membershipList(),
 	})
 }
 

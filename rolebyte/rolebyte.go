@@ -82,8 +82,12 @@ type Minter func(subject, audience, scope, actor, thumbprint string) (string, er
 // HighScopes are scopes that count only when the person signed in at the highest
 // assurance level; the caller decides, from the session's level, whether they
 // are added. An older register sends none, and the list is then empty.
+//
+// TenantName is the organisation's name as the register holds it. It is empty
+// when the register sends none, which an older register does not.
 type Membership struct {
 	TenantID   string
+	TenantName string
 	Scopes     []string
 	HighScopes []string
 }
@@ -187,8 +191,11 @@ func (r *Resolver) Admit(ctx *azugo.Context, subjectKey string, login DirectoryL
 }
 
 type membership struct {
-	TenantID string   `json:"tenantId"`
-	Scopes   []string `json:"scopes"`
+	TenantID string `json:"tenantId"`
+	// TenantName is the organisation's name. Absent or empty decodes to an
+	// empty name: a register that does not send it changes nothing.
+	TenantName string   `json:"tenantName"`
+	Scopes     []string `json:"scopes"`
 	// HighScopes are the scopes that count only on a high-assurance sign-in.
 	// Absent, null or empty all decode to no scopes: a register that does not
 	// send the member changes nothing.
