@@ -361,6 +361,15 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
+	// The code is spent. A redeem refused from here on ends the session made for
+	// it, and leaves the app's earlier session recorded and working.
+	redeemedOK := false
+	defer func() {
+		if !redeemedOK {
+			r.endAppSession(ctx, appCode.SessionID)
+		}
+	}()
+
 	// Echo-check: client_id and redirect_uri must match what was registered at
 	// authorization time ([RFC 6749 §4.1.3]).
 	if appCode.ClientID != clientID || appCode.RedirectURI != redirectURI {
@@ -454,6 +463,16 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 			return
 		}
 	}
+
+	// The session replaces the app's earlier one under the browser's shared
+	// session only now that its code is redeemed. A shared session a sign-out
+	// ended meanwhile, or one that cannot be written, refuses the redeem.
+	if sess.Shared != "" && !r.recordRedeemed(ctx, sess.Shared, clientID, appCode.SessionID) {
+		ctx.Error(corehttp.UnauthorizedError{})
+
+		return
+	}
+	redeemedOK = true
 
 	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, signIn.Audience, outcome.scopes)
 

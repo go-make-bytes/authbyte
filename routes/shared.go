@@ -184,11 +184,12 @@ func (r *router) answerFromShared(ctx *azugo.Context, req *authorizeRequest) (an
 
 		return true
 	}
-	// The answer stands only once its session is recorded under the shared one
-	// and the shared one is still there: a sign-out that ended it meanwhile took
-	// its list of app sessions without this one, which no sign-out would reach.
-	// It is ended here and the request goes on as without a shared session.
-	if !r.addSharedApp(ctx, id, sh.ExpiresAt, req.clientID, sid) || !r.sharedLive(ctx, id) {
+	// The session is recorded under the shared one only when its code is
+	// redeemed, so the app's earlier session goes on until then. The answer
+	// stands only while the shared session is still there; one a sign-out ended
+	// is not answered, and the session made for it is ended here, the request
+	// going on as without a shared session.
+	if !r.sharedLive(ctx, id) {
 		r.endAppSession(ctx, sid)
 
 		return false
@@ -284,8 +285,10 @@ func (r *router) keepPerson(sh *session.Shared, sess *session.Session) {
 
 // addSharedApp records sid as client's app session under the shared session id,
 // and ends the session that client had there before: the app replaced its own
-// cookie with this sign-in, so nothing in the browser names that one any more.
-// It answers whether sid was recorded, and so whether a sign-out reaches it.
+// session with this one. It is called when the app redeems the code of sid, never
+// at the code's issue, so a sign-in the app is refused leaves its earlier session
+// working. It answers whether sid was recorded, and so whether a sign-out reaches
+// it.
 func (r *router) addSharedApp(ctx *azugo.Context, id string, until time.Time, client, sid string) bool {
 	previous, err := r.Session().PutSharedApp(ctx, id, client, sid, until)
 	if err != nil {
@@ -298,6 +301,20 @@ func (r *router) addSharedApp(ctx *azugo.Context, id string, until time.Time, cl
 	}
 
 	return true
+}
+
+// recordRedeemed records the app session sid, whose code was just redeemed,
+// under the shared session it belongs to, and ends the app's earlier session
+// there. It answers false when the shared session is gone or the record cannot be
+// written, and the redeem is then refused: a session no sign-out reaches must not
+// stay live.
+func (r *router) recordRedeemed(ctx *azugo.Context, shared, client, sid string) bool {
+	sh, err := r.Session().LoadShared(ctx, shared)
+	if err != nil {
+		return false
+	}
+
+	return r.addSharedApp(ctx, shared, sh.ExpiresAt, client, sid) && r.sharedLive(ctx, shared)
 }
 
 // sharedLive reports whether the shared session id is still there; a store that

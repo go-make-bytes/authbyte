@@ -238,7 +238,9 @@ the client.
 
 - **One person per browser.** Another person signing in in the same browser ends the earlier shared session and every
   session signed in under it; their refresh tokens are refused from then on. The same client signing in again in a
-  browser ends its own earlier session there.
+  browser replaces its own earlier session there when the new sign-in's code is redeemed; a sign-in refused at that
+  point (for example the person is not in the organisation it named) leaves the earlier session working, and a code
+  never redeemed changes nothing. A redeem that finds the shared session ended is refused.
 - **Signing out of one app signs out of every app.** `POST /revoke` of a session ends the shared session it was signed
   in under and, at once, every session signed in under that, of every client, single sign-on or not; `GET /logout`
   does the same for the shared session its cookie names and clears the cookie. Their refresh tokens are refused from
@@ -450,7 +452,7 @@ The shared cache (Valkey or Redis, `CACHE_*`) holds only short-lived auth-flow a
 | `refresh:{hash}` | the session id and the client a refresh token was issued to | the session's remaining lifetime | keyed by the SHA-256 of the token; the token itself is never stored. Deleted at `/revoke` |
 | `dpop-proofs:{jti}` | seen DPoP proof ids | proof max-age + leeway | `SET … NX`: one-time-use across every instance |
 | `shared:{id}` | a browser's shared session: the person (subject, names, identity code, directory), each way they signed in with (method, level, `auth_time`, `amr`, its end), the hash of the cookie's secret | until its last way ends (`SESSION_TTL` after that way's sign-in) | created with `SET … NX`; a sign-in by the same person rewrites it with `SET … XX`; no tenant is kept on it |
-| `shared-apps:{id}` | the sessions signed in under a shared session, by client | the shared session's end | written by one script that answers the client's earlier session, which is then ended; deleted with the shared session |
+| `shared-apps:{id}` | the sessions signed in under a shared session, by client | the shared session's end | written when a code is redeemed, by one script that answers the client's earlier session, which is then ended; deleted with the shared session |
 
 A cache span in a trace is named by its operation and instance (`GET sessions`) and never by its key, because every key here is a session id, a token hash, a code, a login state or a proof id. Sessions and flows held under the earlier key layout (`flow:`, `code:`, `sess:`) are not read: taking this version signs everyone out once.
 

@@ -43,6 +43,15 @@ does not. A registry that names a `deployment:` scope, or a baseline scope of no
 
 - **Built and run on Go 1.27.4.**
 
+### Fixed
+
+- **An app's earlier session now ends when its new sign-in's code is redeemed, not when the code is issued.** Before,
+  a sign-in refused at the code exchange (for example `err:membership:notMember`, the person not being in the
+  organisation the sign-in named) had already ended the app's earlier session, so its next refresh was refused and
+  the person was signed out. Now the earlier session stays recorded under the browser's shared session and keeps
+  working, refresh included; the new session is ended on any refused redeem, and a redeem that finds the shared
+  session ended is refused.
+
 ## v0.12.0
 
 ### Added
