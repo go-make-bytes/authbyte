@@ -164,7 +164,7 @@ func TestMembershipsAsksEachDoorWithATokenForThePerson(t *testing.T) {
 	r, ac := reg.resolver()
 
 	inRequest(t, func(ctx *azugo.Context) {
-		got, err := r.Memberships(ctx, PersonKey(annaSub))
+		got, err := r.Memberships(ctx, PersonKey(annaSub), "")
 		qt.Assert(t, qt.IsNil(err))
 		qt.Check(t, qt.DeepEquals(got, []Membership{{TenantID: "t1", Scopes: []string{"projects:read"}}}))
 	})
@@ -184,6 +184,33 @@ func TestMembershipsAsksEachDoorWithATokenForThePerson(t *testing.T) {
 	}
 }
 
+// The lookup sends the organisation the token will be issued for as its body,
+// and exactly the request it always sent when none is named: no body at all.
+func TestMembershipsSendsTheOrganisationOnlyWhenOneIsNamed(t *testing.T) {
+	for name, tc := range map[string]struct{ tenant, wantBody string }{
+		"named": {"01TENANTA", `{"tenant":"01TENANTA"}`},
+		"none":  {"", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reg := newSignInRegister(t, map[string]func(w http.ResponseWriter){
+				doorClaims:      answerJSON(`{"claimed":[]}`),
+				doorMemberships: answerJSON(`{"subjectKey":"sub:` + annaSub + `","memberships":[]}`),
+			})
+			r, _ := reg.resolver()
+
+			inRequest(t, func(ctx *azugo.Context) {
+				_, err := r.Memberships(ctx, PersonKey(annaSub), tc.tenant)
+				qt.Assert(t, qt.IsNil(err))
+			})
+
+			qt.Assert(t, qt.HasLen(reg.calls, 2))
+			qt.Check(t, qt.Equals(reg.calls[0].body, ""), qt.Commentf("the claim never carries the organisation"))
+			qt.Check(t, qt.Equals(reg.calls[1].path, doorMemberships))
+			qt.Check(t, qt.Equals(reg.calls[1].body, tc.wantBody))
+		})
+	}
+}
+
 // A machine member is asked about by its client id, which is its token subject.
 func TestAMachineMembersTokenNamesItsClientID(t *testing.T) {
 	reg := newSignInRegister(t, map[string]func(w http.ResponseWriter){
@@ -193,7 +220,7 @@ func TestAMachineMembersTokenNamesItsClientID(t *testing.T) {
 	r, _ := reg.resolver()
 
 	inRequest(t, func(ctx *azugo.Context) {
-		_, err := r.Memberships(ctx, "svc:a-machine")
+		_, err := r.Memberships(ctx, "svc:a-machine", "")
 		qt.Assert(t, qt.IsNil(err))
 	})
 
@@ -212,7 +239,7 @@ func TestAnAnswerAboutAnotherPersonIsRefused(t *testing.T) {
 	r, _ := reg.resolver()
 
 	inRequest(t, func(ctx *azugo.Context) {
-		got, err := r.Memberships(ctx, PersonKey(annaSub))
+		got, err := r.Memberships(ctx, PersonKey(annaSub), "")
 		qt.Check(t, qt.ErrorIs(err, ErrAnswerForAnotherSubject))
 		qt.Check(t, qt.IsNil(got))
 	})
@@ -227,7 +254,7 @@ func TestARefusalAtADoorFailsTheLookup(t *testing.T) {
 	r, _ := reg.resolver()
 
 	inRequest(t, func(ctx *azugo.Context) {
-		_, err := r.Memberships(ctx, PersonKey(annaSub))
+		_, err := r.Memberships(ctx, PersonKey(annaSub), "")
 		qt.Check(t, qt.ErrorMatches(err, `rolebyte: /api/v1/sign-in/claims answered 403`))
 	})
 	qt.Check(t, qt.HasLen(reg.calls, 1), qt.Commentf("the lookup is never asked after a refused claim"))
@@ -274,7 +301,7 @@ func TestMembershipsDecodeTheOrganisationsName(t *testing.T) {
 			r, _ := reg.resolver()
 
 			inRequest(t, func(ctx *azugo.Context) {
-				got, err := r.Memberships(ctx, PersonKey(annaSub))
+				got, err := r.Memberships(ctx, PersonKey(annaSub), "")
 				qt.Assert(t, qt.IsNil(err))
 				qt.Assert(t, qt.HasLen(got, 1))
 				qt.Check(t, qt.Equals(got[0].TenantID, "t1"))
@@ -305,7 +332,7 @@ func TestMembershipsDecodeTheHighOnlyScopes(t *testing.T) {
 			r, _ := reg.resolver()
 
 			inRequest(t, func(ctx *azugo.Context) {
-				got, err := r.Memberships(ctx, PersonKey(annaSub))
+				got, err := r.Memberships(ctx, PersonKey(annaSub), "")
 				qt.Assert(t, qt.IsNil(err))
 				qt.Assert(t, qt.HasLen(got, 1))
 				qt.Check(t, qt.DeepEquals(got[0].Scopes, []string{"a:b"}))

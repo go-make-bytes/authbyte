@@ -77,6 +77,7 @@ type fakeResolver struct {
 	memberships []rolebyte.Membership
 	err         error
 	asked       string // the subject key the seam passed down ("" = never asked)
+	askedTenant string // the organisation the seam passed down ("" = none named)
 
 	// The admission door: what it answers, what it was asked, and what the
 	// register answers AFTER a successful admission.
@@ -100,8 +101,9 @@ func (f *fakeResolver) Assistants(_ *azugo.Context, subjectKey string) ([]roleby
 	return f.assistants[subjectKey], nil
 }
 
-func (f *fakeResolver) Memberships(_ *azugo.Context, subjectKey string) ([]rolebyte.Membership, error) {
+func (f *fakeResolver) Memberships(_ *azugo.Context, subjectKey, tenant string) ([]rolebyte.Membership, error) {
 	f.asked = subjectKey
+	f.askedTenant = tenant
 	if f.err != nil {
 		return nil, f.err
 	}

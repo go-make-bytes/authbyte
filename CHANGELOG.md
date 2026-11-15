@@ -41,6 +41,12 @@ does not. A registry that names a `deployment:` scope, or a baseline scope of no
 
 ### Changed
 
+- **The register is told which organisation a token is being issued for.** The lookup of a person's memberships
+  carries `{"tenant": "<id>"}` when the sign-in names an organisation, when a refresh continues a session in one, and
+  when a service account asks for one, so the register can date the sign-in in that organisation alone. A name that is
+  not an organisation's id is not sent, and is answered as a name no membership matches. When none is named the
+  request is exactly as before. A register that ignores the body answers as it always did, and the tokens' scopes and
+  tenant are unchanged.
 - **Built and run on Go 1.27.4.**
 
 ### Fixed

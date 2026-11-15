@@ -100,7 +100,9 @@ type App struct {
 // contract (answers, refusals, unreachability, compatibility) is in the
 // README's "Supported configurations" section.
 type ScopeResolver interface {
-	Memberships(ctx *azugo.Context, subjectKey string) ([]rolebyte.Membership, error)
+	// Tenant is the organisation the token will be issued for, empty when none is
+	// named; the register dates the sign-in in that organisation alone.
+	Memberships(ctx *azugo.Context, subjectKey, tenant string) ([]rolebyte.Membership, error)
 	// Admit offers a person who authenticated through an organisation's own
 	// directory to the register's admission door; true when a membership was
 	// created or activated by the call.

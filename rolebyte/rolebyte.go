@@ -202,6 +202,12 @@ type membership struct {
 	HighScopes []string `json:"highScopes"`
 }
 
+// membershipsRequest is the body of the lookup when the organisation the token
+// will be issued for is known.
+type membershipsRequest struct {
+	Tenant string `json:"tenant"`
+}
+
 type resolveResponse struct {
 	// SubjectKey is the key the register says this answer is about.
 	SubjectKey  string       `json:"subjectKey"`
@@ -275,9 +281,12 @@ func (r *Resolver) Assistants(ctx *azugo.Context, subjectKey string) ([]Assistan
 // its active memberships — the organisations it may act under, each with the
 // scopes its roles grant there. An empty answer means the subject holds no
 // membership; which one to mint, when there are several, is the caller's
-// question. Any transport or service failure surfaces as an error — the caller
+// question. Tenant is the organisation the token will be issued for, when the
+// caller knows it: the register is told, so it dates the person's sign-in in
+// that organisation alone. Empty names none and sends the request exactly as
+// before. Any transport or service failure surfaces as an error — the caller
 // fails the token issue closed.
-func (r *Resolver) Memberships(ctx *azugo.Context, subjectKey string) ([]Membership, error) {
+func (r *Resolver) Memberships(ctx *azugo.Context, subjectKey, tenant string) ([]Membership, error) {
 	if strings.TrimSpace(subjectKey) == "" {
 		// Without a key there is nothing to look up — and every caller has one
 		// (a platform subject or a client id), so this is a wiring fault, not a
@@ -292,8 +301,13 @@ func (r *Resolver) Memberships(ctx *azugo.Context, subjectKey string) ([]Members
 		return nil, err
 	}
 
+	var in any
+	if tenant != "" {
+		in = membershipsRequest{Tenant: tenant}
+	}
+
 	var res resolveResponse
-	if err := r.call(ctx, subjectKey, scopeResolve, doorMemberships, nil, &res); err != nil {
+	if err := r.call(ctx, subjectKey, scopeResolve, doorMemberships, in, &res); err != nil {
 		return nil, err
 	}
 

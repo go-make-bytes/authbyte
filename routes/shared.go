@@ -131,7 +131,7 @@ func (r *router) sharedWay(ctx *azugo.Context, req *authorizeRequest, sh *sessio
 	// A person the token issue would refuse for want of a membership is not
 	// answered silently: they get the page, and so a way to choose another.
 	if resolver := r.ScopeResolver(); resolver != nil && r.Registry().MembershipRequired(req.clientID, true) {
-		ms, err := resolver.Memberships(ctx, rolebyte.PersonKey(sh.Subject))
+		ms, err := resolver.Memberships(ctx, rolebyte.PersonKey(sh.Subject), "")
 		if err != nil {
 			return nil, refusedRegister
 		}

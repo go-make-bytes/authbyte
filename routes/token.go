@@ -80,7 +80,7 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 	// The register key of a person is their platform subject, typed — the
 	// session always has one, whatever login method produced it.
 	key := rolebyte.PersonKey(sess.Subject)
-	memberships, err := resolver.Memberships(ctx, key)
+	memberships, err := resolver.Memberships(ctx, key, registerCompany(tenantHint))
 	if err != nil {
 		return r.registerUnavailable(ctx, key, err)
 	}
@@ -103,7 +103,7 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 			return r.registerUnavailable(ctx, key, err)
 		}
 		if admitted {
-			if memberships, err = resolver.Memberships(ctx, key); err != nil {
+			if memberships, err = resolver.Memberships(ctx, key, registerCompany(tenantHint)); err != nil {
 				return r.registerUnavailable(ctx, key, err)
 			}
 		}
@@ -210,6 +210,19 @@ func (r *router) registerUnavailable(ctx *azugo.Context, asked string, err error
 		pkerrors.WithStatus(fasthttp.StatusBadGateway)))
 
 	return membershipOutcome{}, false
+}
+
+// registerCompany is the organisation the register is told a token is being
+// issued for: the name given when it has the shape of an organisation id, and
+// none otherwise. A name of any other shape matches no membership anyway, so the
+// register is asked as for no organisation (it would refuse the name) and
+// chooseMembership still compares the name as given.
+func registerCompany(named string) string {
+	if personIDPattern.MatchString(named) {
+		return named
+	}
+
+	return ""
 }
 
 // chooseMembership picks the membership a token is minted for: the named one
@@ -619,7 +632,7 @@ func (r *router) serviceAccountScopes(ctx *azugo.Context, clientID, tenant strin
 
 	// The register key of a service account is its own client id — the name
 	// it authenticated with and carries as its token subject.
-	memberships, err := resolver.Memberships(ctx, clientID)
+	memberships, err := resolver.Memberships(ctx, clientID, registerCompany(tenant))
 	if err != nil {
 		ctx.Log().Warn("membership resolve failed — refusing token issue: " + err.Error())
 		if errors.Is(err, rolebyte.ErrAnswerForAnotherSubject) {

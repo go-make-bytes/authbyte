@@ -118,7 +118,9 @@ ship separately, so this boundary is a published contract:
   its own process for that call alone: the subject being signed in as `sub`, this service's
   client id (`AUDIT_CLIENT_ID`) as the acting client (`act`), the door's one scope, bound to the
   outbound client's DPoP key. The register answers for the token's subject and nobody else. No
-  token endpoint and no registry grant are involved.
+  token endpoint and no registry grant are involved. The memberships call may carry
+  `{"tenant":"<id>"}`, the organisation the token is issued for, and carries no body when none
+  is named or the name is not an organisation id.
 - **The answer is checked:** it names the subject it is about, and an answer about anyone else
   mints nothing, fails the issue closed (`502`) and raises an `authz.denied` security event
   (`kind: sign-in`), which a healthy deployment never produces.

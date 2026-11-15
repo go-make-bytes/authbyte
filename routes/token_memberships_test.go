@@ -462,7 +462,7 @@ func TestAServiceAccountsAnswerListsNoOrganisations(t *testing.T) {
 // may ask it.
 type steadyRegister struct{ memberships []rolebyte.Membership }
 
-func (s steadyRegister) Memberships(*azugo.Context, string) ([]rolebyte.Membership, error) {
+func (s steadyRegister) Memberships(*azugo.Context, string, string) ([]rolebyte.Membership, error) {
 	return s.memberships, nil
 }
 
