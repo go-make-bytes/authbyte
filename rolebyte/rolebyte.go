@@ -78,9 +78,18 @@ type Minter func(subject, audience, scope, actor, thumbprint string) (string, er
 
 // Membership is one organisation a subject may act under, with the
 // group:level scopes its roles grant there.
+//
+// HighScopes are scopes that count only when the person signed in at the highest
+// assurance level; the caller decides, from the session's level, whether they
+// are added. An older register sends none, and the list is then empty.
+//
+// TenantName is the organisation's name as the register holds it. It is empty
+// when the register sends none, which an older register does not.
 type Membership struct {
-	TenantID string
-	Scopes   []string
+	TenantID   string
+	TenantName string
+	Scopes     []string
+	HighScopes []string
 }
 
 // Resolver answers membership questions from the register.
@@ -182,8 +191,21 @@ func (r *Resolver) Admit(ctx *azugo.Context, subjectKey string, login DirectoryL
 }
 
 type membership struct {
-	TenantID string   `json:"tenantId"`
-	Scopes   []string `json:"scopes"`
+	TenantID string `json:"tenantId"`
+	// TenantName is the organisation's name. Absent or empty decodes to an
+	// empty name: a register that does not send it changes nothing.
+	TenantName string   `json:"tenantName"`
+	Scopes     []string `json:"scopes"`
+	// HighScopes are the scopes that count only on a high-assurance sign-in.
+	// Absent, null or empty all decode to no scopes: a register that does not
+	// send the member changes nothing.
+	HighScopes []string `json:"highScopes"`
+}
+
+// membershipsRequest is the body of the lookup when the organisation the token
+// will be issued for is known.
+type membershipsRequest struct {
+	Tenant string `json:"tenant"`
 }
 
 type resolveResponse struct {
@@ -259,9 +281,12 @@ func (r *Resolver) Assistants(ctx *azugo.Context, subjectKey string) ([]Assistan
 // its active memberships — the organisations it may act under, each with the
 // scopes its roles grant there. An empty answer means the subject holds no
 // membership; which one to mint, when there are several, is the caller's
-// question. Any transport or service failure surfaces as an error — the caller
+// question. Tenant is the organisation the token will be issued for, when the
+// caller knows it: the register is told, so it dates the person's sign-in in
+// that organisation alone. Empty names none and sends the request exactly as
+// before. Any transport or service failure surfaces as an error — the caller
 // fails the token issue closed.
-func (r *Resolver) Memberships(ctx *azugo.Context, subjectKey string) ([]Membership, error) {
+func (r *Resolver) Memberships(ctx *azugo.Context, subjectKey, tenant string) ([]Membership, error) {
 	if strings.TrimSpace(subjectKey) == "" {
 		// Without a key there is nothing to look up — and every caller has one
 		// (a platform subject or a client id), so this is a wiring fault, not a
@@ -276,8 +301,13 @@ func (r *Resolver) Memberships(ctx *azugo.Context, subjectKey string) ([]Members
 		return nil, err
 	}
 
+	var in any
+	if tenant != "" {
+		in = membershipsRequest{Tenant: tenant}
+	}
+
 	var res resolveResponse
-	if err := r.call(ctx, subjectKey, scopeResolve, doorMemberships, nil, &res); err != nil {
+	if err := r.call(ctx, subjectKey, scopeResolve, doorMemberships, in, &res); err != nil {
 		return nil, err
 	}
 
@@ -287,7 +317,7 @@ func (r *Resolver) Memberships(ctx *azugo.Context, subjectKey string) ([]Members
 	// after it.
 	tenants := make([]string, 0, len(res.Memberships))
 	for _, m := range res.Memberships {
-		tenants = append(tenants, m.TenantID+"="+strings.Join(m.Scopes, ","))
+		tenants = append(tenants, m.TenantID+"="+strings.Join(m.Scopes, ",")+" high-only="+strings.Join(m.HighScopes, ","))
 	}
 	ctx.Log().Info("membership resolved",
 		zap.String("asked", subjectKey), zap.String("answered_for", res.SubjectKey), zap.Strings("memberships", tenants))

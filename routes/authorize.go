@@ -543,7 +543,7 @@ func (r *router) saveSignedIn(ctx *azugo.Context, client, sid string, sess *sess
 		return true
 	}
 
-	shared, until, err := r.joinShared(ctx, sess)
+	shared, _, err := r.joinShared(ctx, sess)
 	if err != nil {
 		ctx.Error(err)
 
@@ -551,12 +551,12 @@ func (r *router) saveSignedIn(ctx *azugo.Context, client, sid string, sess *sess
 	}
 	sess.Shared = shared
 
+	// The session is recorded under the shared one when its code is redeemed.
 	if err := r.Session().CreateSession(ctx, sid, sess, r.Config().SessionTTL); err != nil {
 		ctx.Error(err)
 
 		return false
 	}
-	r.addSharedApp(ctx, shared, until, client, sid)
 
 	return true
 }

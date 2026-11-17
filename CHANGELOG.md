@@ -3,6 +3,68 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.13.0
+
+### Changed
+
+- **The service runs on Go 1.27.4 and azugo v0.50.2.** Request bodies read through the framework (the token and
+  refresh forms, and the person-lines read) are held to its limit: a body over 4 MiB answers 413 in the problem
+  envelope, or the limit `SERVER_MAX_REQUEST_BODY_SIZE` sets. A malformed multipart body answers 400. No route
+  raises its own limit; every body these routes take is small.
+
+### Added
+
+- **The token answer of a person in several organisations lists them by name.** When the membership register
+  answers more than one membership for a person, the answer of the code exchange and of every refresh carries
+  `memberships`: one entry for each organisation, in the register's order, with `tenant` (its id) and `name`, whether
+  or not one was chosen. An organisation the register gives no name is listed with an empty `name`. This is additive:
+  a client that ignores unknown keys is unaffected, `tenants` is unchanged, and a person in one organisation gets the
+  answer they got before. A refused answer, a service account's token, an AI app's token and a client that needs no
+  membership never carry the list. The names come from the membership register, which must be on the release that
+  answers `tenantName`; with an older register every name is empty. Nothing about choosing an organisation changed,
+  and no log line, audit event or error gains a name.
+- **A person's token can carry scopes that count only on a high sign-in.** Each membership the register answers may now
+  list `highScopes` beside `scopes`. A person's token carries them, after the membership's own scopes and without
+  repeating one, only when the session's assurance level is `high` **and** the sign-in client the token is issued to
+  says `high_scopes: true`, a new setting that is off by default; at any other level, with the setting off, or when
+  the level is unknown, they are left out. They are decided again at every refresh from the register's current
+  answer and the level the session holds, so a scope the register stops answering leaves with the next refresh. A
+  service account's tenant token, an AI app's token and a client that needs no membership never carry them; a
+  sign-in client that needs no membership, or an AI app, that says `high_scopes` stops the start. The log line that
+  reports what the register answered now also lists each membership's high-only scopes. This needs nothing from the
+  register: an older register sends no such list and nothing changes.
+- **The scope group `deployment` is reserved to the register.** A client registry document that names a
+  `deployment:<level>` scope in a grant's `scopes`, in a grant's `assistant_levels` or in a sign-in client's
+  `baseline_scopes` stops the start, naming the client and the scope. A baseline scope must now be a box or a level,
+  as a grant's scope already had to be.
+- **A scope the register answers that is neither a box nor a level is left out of a token.** A token's scopes are one
+  string split on white space where it is read, so a scope holding white space, a no-break space included, would be
+  read as two. It is dropped, with one warning naming the tenant and the count, and the issue goes on with the
+  others; this holds a service account's tenant token too.
+
+**Deploy:** a deployment that wants its admin application's people to receive the scopes that count only on a high
+sign-in sets `high_scopes: true` on that sign-in client in the registry document. Nothing changes for a deployment that
+does not. A registry that names a `deployment:` scope, or a baseline scope of no shape, now stops the start.
+
+### Changed
+
+- **The register is told which organisation a token is being issued for.** The lookup of a person's memberships
+  carries `{"tenant": "<id>"}` when the sign-in names an organisation, when a refresh continues a session in one, and
+  when a service account asks for one, so the register can date the sign-in in that organisation alone. A name that is
+  not an organisation's id is not sent, and is answered as a name no membership matches. When none is named the
+  request is exactly as before. A register that ignores the body answers as it always did, and the tokens' scopes and
+  tenant are unchanged.
+- **Built and run on Go 1.27.4.**
+
+### Fixed
+
+- **An app's earlier session now ends when its new sign-in's code is redeemed, not when the code is issued.** Before,
+  a sign-in refused at the code exchange (for example `err:membership:notMember`, the person not being in the
+  organisation the sign-in named) had already ended the app's earlier session, so its next refresh was refused and
+  the person was signed out. Now the earlier session stays recorded under the browser's shared session and keeps
+  working, refresh included; the new session is ended on any refused redeem, and a redeem that finds the shared
+  session ended is refused.
+
 ## v0.12.0
 
 ### Added

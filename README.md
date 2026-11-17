@@ -95,6 +95,13 @@ organisation they do not belong to is refused `403 err:membership:notMember`) an
 organisation's token is minted. The choice is remembered by the session, so a refresh
 re-resolves the same organisation — and a revoked membership still dies at the next refresh.
 
+The token response of a person in several organisations also lists them in **`memberships`**: one
+entry for each, in the register's order, with the organisation's `tenant` (its id) and its `name`
+(empty when the register holds none), so a client can show the choice by name. It is answered at the
+code exchange and at every refresh, whether or not an organisation was chosen, from the register's
+answer of that moment. `tenants` is unchanged. A person in one organisation gets neither key, and
+a refused answer, a service account's token and an AI app's token never carry the list.
+
 ### The register boundary (`ScopeResolver` contract)
 
 The seam between this authorization server and the membership register is one interface,
@@ -111,13 +118,23 @@ ship separately, so this boundary is a published contract:
   its own process for that call alone: the subject being signed in as `sub`, this service's
   client id (`AUDIT_CLIENT_ID`) as the acting client (`act`), the door's one scope, bound to the
   outbound client's DPoP key. The register answers for the token's subject and nobody else. No
-  token endpoint and no registry grant are involved.
+  token endpoint and no registry grant are involved. The memberships call may carry
+  `{"tenant":"<id>"}`, the organisation the token is issued for, and carries no body when none
+  is named or the name is not an organisation id.
 - **The answer is checked:** it names the subject it is about, and an answer about anyone else
   mints nothing, fails the issue closed (`502`) and raises an `authz.denied` security event
   (`kind: sign-in`), which a healthy deployment never produces.
 - **Answer:** the subject's active memberships — each organisation with the `group:level`
   scopes the subject's roles grant there. The register attaches any pending invitation first,
-  so a subject's very first token already carries the invited roles.
+  so a subject's very first token already carries the invited roles. The register may also mark,
+  per membership, `highScopes`: scopes that are given only when the person signed in at the high
+  assurance level. They are added after the membership's own scopes, at the sign-in and re-read at
+  every refresh, only when the session's level is `high` **and** the client the token is issued to
+  says `high_scopes: true` (off by default); they never reach a service account's, an AI app's
+  or a baseline-scopes token, and a register that sends none changes nothing. Any scope the register
+  answers that is neither a box nor a level (one holding white space, say) is left out of the token
+  with one warning naming the tenant and the count, and the issue goes on; this holds a service
+  account's tenant token too.
 - **The admission door, for a login through an organisation's own directory.** Such a session
   carries the issuer it came through. When the person has just signed in and holds no membership,
   this service offers them to the register's admission door (`POST /api/v1/sign-in/directory-admissions`, the
@@ -155,7 +172,7 @@ Endpoints are registered in [`routes/router.go`](routes/router.go). The two opti
 | `GET /signin/{name}` | The page's stylesheet and typeface, and the operator's mark | anonymous |
 | `GET /callback` | Handle the identity-provider redirect: exchange the code, read claims, resolve the person, establish a session, mint a single-use app authorization code. A program passing several providers serves one such path per provider, each accepting only the answers to sign-ins sent to its own provider | state-verified (path configurable) |
 | `GET /logout` | The browser's leg of a sign-out (`client_id`, `redirect_uri`, optional `login_method`): send the browser to `redirect_uri`, which must be on the client's `post_logout_redirect_uris` (a sign-in return is not a sign-out landing). For a method listed as federated — the eParaksts profile's methods, or `OIDC_UPSTREAM_METHODS_FEDERATED` for a generic provider — it goes through the identity provider's logout first, so the session the provider keeps in the browser ends too; any other method signs out locally and leaves the provider's session alone. It takes no value naming a session: the client ends its own with `POST /revoke` first. The browser's single sign-on cookie, when it holds one, ends that shared session and every session signed in under it, and is cleared | anonymous (`redirect_uri` allowlisted) |
-| `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` (with the `client_id` the token was issued to) \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof. A confidential client proves itself at every grant with its secret, by HTTP Basic (`client_secret_basic`) or in the form (`client_secret_post`), never both in one request, and at the code exchange before the code is spent; a public client sends none | PKCE / client secret / refresh token + client + session key / subject token — all + DPoP |
+| `POST /token` | OAuth token endpoint — `authorization_code` \| `client_credentials` (optional `tenant=<id>`: a service account acting for the organisation it is a member of) \| `refresh_token` (with the `client_id` the token was issued to) \| `urn:ietf:params:oauth:grant-type:token-exchange`. Every hop requires a valid DPoP proof. A confidential client proves itself at every grant with its secret, by HTTP Basic (`client_secret_basic`) or in the form (`client_secret_post`), never both in one request, and at the code exchange before the code is spent; a public client sends none. A person in several organisations is answered `memberships` (each organisation's `tenant` id and `name`) at the code exchange and at every refresh, chosen or not, beside the unchanged `tenants`; a person in one organisation gets neither | PKCE / client secret / refresh token + client + session key / subject token — all + DPoP |
 | `POST /revoke` | End a session server to server ([RFC 7009]): `token` (the refresh token), `client_id`, optional `token_type_hint` (ignored). `200` when ended or when the token is unknown; `401` for another client's token, a proof of another key, or a confidential client without its secret; `503` when the store cannot be read | the session's own client (its secret, when confidential) + its DPoP key |
 | `GET /identity` | The internal identity plus `loa`, `login_method` and, to a token of a client whose row says `signing: true`, the signing flows that method permits. A token for any enabled sign-in client's audience is accepted | valid user token (DPoP) |
 | `POST /identity/persons` | Register a person before their first login: the identity code (any spelling; stored canonical) and the name create the person row with a stable subject and **no credential** — the subject an administrator then invites them to a membership register under. Idempotent on the code: `201` created, `200` already known (names filled only where the row has none); a code naming no country or an unknown identity type is `422 err:identity:invalid` (never echoed) | valid token carrying `identity:admin` (DPoP) |
@@ -223,7 +240,9 @@ the client.
 
 - **One person per browser.** Another person signing in in the same browser ends the earlier shared session and every
   session signed in under it; their refresh tokens are refused from then on. The same client signing in again in a
-  browser ends its own earlier session there.
+  browser replaces its own earlier session there when the new sign-in's code is redeemed; a sign-in refused at that
+  point (for example the person is not in the organisation it named) leaves the earlier session working, and a code
+  never redeemed changes nothing. A redeem that finds the shared session ended is refused.
 - **Signing out of one app signs out of every app.** `POST /revoke` of a session ends the shared session it was signed
   in under and, at once, every session signed in under that, of every client, single sign-on or not; `GET /logout`
   does the same for the shared session its cookie names and clears the cookie. Their refresh tokens are refused from
@@ -435,7 +454,7 @@ The shared cache (Valkey or Redis, `CACHE_*`) holds only short-lived auth-flow a
 | `refresh:{hash}` | the session id and the client a refresh token was issued to | the session's remaining lifetime | keyed by the SHA-256 of the token; the token itself is never stored. Deleted at `/revoke` |
 | `dpop-proofs:{jti}` | seen DPoP proof ids | proof max-age + leeway | `SET … NX`: one-time-use across every instance |
 | `shared:{id}` | a browser's shared session: the person (subject, names, identity code, directory), each way they signed in with (method, level, `auth_time`, `amr`, its end), the hash of the cookie's secret | until its last way ends (`SESSION_TTL` after that way's sign-in) | created with `SET … NX`; a sign-in by the same person rewrites it with `SET … XX`; no tenant is kept on it |
-| `shared-apps:{id}` | the sessions signed in under a shared session, by client | the shared session's end | written by one script that answers the client's earlier session, which is then ended; deleted with the shared session |
+| `shared-apps:{id}` | the sessions signed in under a shared session, by client | the shared session's end | written when a code is redeemed, by one script that answers the client's earlier session, which is then ended; deleted with the shared session |
 
 A cache span in a trace is named by its operation and instance (`GET sessions`) and never by its key, because every key here is a session id, a token hash, a code, a login state or a proof id. Sessions and flows held under the earlier key layout (`flow:`, `code:`, `sess:`) are not read: taking this version signs everyone out once.
 
@@ -562,7 +581,7 @@ can be stated alongside the country.
 | `OIDC_UPSTREAM_METHODS_FEDERATED` | — (none) | Comma-separated methods whose sign-out also goes through the provider's end-session endpoint, ending the session it keeps in the browser. Unset, signing out ends this service's session and leaves the provider's alone — a directory provider's session is the person's whole estate. The eParaksts profile lists its own methods regardless |
 | `OIDC_UPSTREAM_LOA_DEFAULT` | `low` | Assurance level when no `LOA_POLICY` token matches — raise deliberately for an IdP that enforces MFA |
 | `OIDC_UPSTREAM_DISPLAY_NAME` | — (⇒ "Your organisation's sign-in", in the page's language) | The generic provider's name on the sign-in page's button, e.g. `Microsoft Entra` |
-| `LOA_POLICY` | — (⇒ built-in: the eParaksts profile's level and method words; another provider's explicit `level:*` words only, then `OIDC_UPSTREAM_LOA_DEFAULT`) | Override the `acr`/`amr` → assurance-level vocabulary (`substr=loa,…`; longest token wins, equal lengths in alphabetical order) |
+| `LOA_POLICY` | — (⇒ built-in: the eParaksts profile's level and method words; another provider's explicit `level:*` words only, then `OIDC_UPSTREAM_LOA_DEFAULT`) | Override the `acr`/`amr` → assurance-level vocabulary (`substr=loa,…`; longest token wins, equal lengths in alphabetical order). A deployment that makes a sign-in way count as `high` here or through `OIDC_UPSTREAM_LOA_DEFAULT` also gives the people who sign in that way the scopes that count only on a high sign-in, where their client says `high_scopes: true` |
 
 | Env (eParaksts profile) | Default | Meaning |
 |---|---|---|
@@ -618,7 +637,7 @@ can be stated alongside the country.
 | `AUDIT_ISSUER_URL` | — (⇒ `AUTH_ISSUER_URL`) | Issuer base for the outbound token mint (set to an in-cluster URL when the public issuer is unreachable) |
 | `WEBEID_ENGINE_URL` | — (empty ⇒ `/webeid/*` not registered) | web-eid engine base; `/auth/validate` is called server-to-server with a service token |
 | `WEBEID_AUDIENCE` / `WEBEID_SCOPE` | `svc:web-eid` / `webeid:validate` | Audience/scope for the engine call |
-| `ROLEBYTE_URL` | — (empty ⇒ standalone: each client's baseline scopes, no service accounts) | Membership register base — setting it wires the register (see "Supported configurations"). When set, every token issue of a person whose client requires a membership (first issue and refresh) claims the person's pending invitations and mints their register-resolved `group:level` scopes and tenant instead of a baseline — no membership is **refused** (403 `err:membership:notMember`), several are the person's to choose from (the token response's `tenants`), and an unreachable register fails the issuance closed (502), never an empty-scope token; a client whose row says `membership_required: false` keeps its people on the baseline and never touches the register. Every tenant-named `client_credentials` issue is resolved here too. The address is the register's **sign-in listener** (`http://rolebyte:8081` in the stacks), not its main port. Each call carries a token this service mints for it, naming the person and `AUDIT_CLIENT_ID` as the acting client, which must be the register's `SIGN_IN_CLIENT`; no registry grant for `membership:claim` or `membership:resolve` is needed, and none may exist |
+| `ROLEBYTE_URL` | — (empty ⇒ standalone: each client's baseline scopes, no service accounts) | Membership register base — setting it wires the register (see "Supported configurations"). When set, every token issue of a person whose client requires a membership (first issue and refresh) claims the person's pending invitations and mints their register-resolved `group:level` scopes and tenant instead of a baseline — no membership is **refused** (403 `err:membership:notMember`), several are the person's to choose from (the token response's `tenants`, and `memberships` with each one's id and name), and an unreachable register fails the issuance closed (502), never an empty-scope token; a client whose row says `membership_required: false` keeps its people on the baseline and never touches the register. Every tenant-named `client_credentials` issue is resolved here too. The address is the register's **sign-in listener** (`http://rolebyte:8081` in the stacks), not its main port. Each call carries a token this service mints for it, naming the person and `AUDIT_CLIENT_ID` as the acting client, which must be the register's `SIGN_IN_CLIENT`; no registry grant for `membership:claim` or `membership:resolve` is needed, and none may exist |
 | `ROLEBYTE_AUDIENCE` | `svc:rolebyte` | Audience for the membership calls |
 | `DEMO_DIR` | — | Serve a static demo SPA under `/demo` — development |
 
@@ -629,7 +648,11 @@ proves itself with its secret and is minted tokens for the audiences and scopes 
 allow (`act_from` names the user audiences whose tokens it may exchange). A grant's scope is a box
 (`service/feature:act`) or a level (`group:level`), and anything else stops the start; a grant's
 `assistant_levels` names those of its levels that may ride a token made through a person's assistant
-(empty by default, each one a level of the grant). `sign_in_clients` sign
+(empty by default, each one a level of the grant). **The scope group `deployment` is reserved:** every
+`deployment:<level>` scope is given only by the membership register, as a scope that counts only on a high sign-in,
+so a grant's `scopes`, a grant's `assistant_levels` and a sign-in client's `baseline_scopes` that name one stop the
+start, the client and the scope named; a baseline scope, like a grant's, must also be a box or a level.
+`sign_in_clients` sign
 people in, and each row carries everything its product needs, so one deployment serves several
 products. The names follow the client metadata of [RFC 7591 §2] and the OpenID logout
 specifications where one exists:
@@ -643,6 +666,7 @@ sign_in_clients:
     audience: portal-api          # the aud of this client's user tokens
     membership_required: false    # see "Supported configurations"
     baseline_scopes: [envelopes:read, documents:read]   # only where no membership is asked
+    high_scopes: false            # true: its people's tokens may carry the register's high-only scopes (off by default; only where a membership is asked)
     claims: [name, given_name, family_name, serial_number]   # the personal claims its tokens carry
     methods: [eparakstsMobile, eidScan, webEid]               # the sign-in methods it allows
     signing: true                 # told the signing flows; its sign-ins capture signing identities

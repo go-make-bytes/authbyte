@@ -16,6 +16,7 @@ import (
 	"azugo.io/azugo"
 	corehttp "azugo.io/core/http"
 	"github.com/valyala/fasthttp"
+	"go.uber.org/zap"
 )
 
 // issueMoment is why a user token is being issued: a sign-in, where an
@@ -36,6 +37,24 @@ type membershipOutcome struct {
 	scopes  []string
 	tenant  string
 	choices []string
+	// listed is every membership the register answered, in its order, when it
+	// answered more than one; empty otherwise.
+	listed []rolebyte.Membership
+}
+
+// membershipList is the answer's `memberships`: the organisations of a person
+// in several, each with its name. Nil for anyone else.
+func (o membershipOutcome) membershipList() []response.Membership {
+	if len(o.listed) == 0 {
+		return nil
+	}
+
+	out := make([]response.Membership, 0, len(o.listed))
+	for _, m := range o.listed {
+		out = append(out, response.Membership{Tenant: m.TenantID, Name: m.TenantName})
+	}
+
+	return out
 }
 
 // userScopes answers what a user token should carry. The public client the
@@ -61,7 +80,7 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 	// The register key of a person is their platform subject, typed — the
 	// session always has one, whatever login method produced it.
 	key := rolebyte.PersonKey(sess.Subject)
-	memberships, err := resolver.Memberships(ctx, key)
+	memberships, err := resolver.Memberships(ctx, key, registerCompany(tenantHint))
 	if err != nil {
 		return r.registerUnavailable(ctx, key, err)
 	}
@@ -84,10 +103,15 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 			return r.registerUnavailable(ctx, key, err)
 		}
 		if admitted {
-			if memberships, err = resolver.Memberships(ctx, key); err != nil {
+			if memberships, err = resolver.Memberships(ctx, key, registerCompany(tenantHint)); err != nil {
 				return r.registerUnavailable(ctx, key, err)
 			}
 		}
+	}
+
+	var listed []rolebyte.Membership
+	if len(memberships) > 1 {
+		listed = memberships
 	}
 
 	chosen, choices := chooseMembership(memberships, tenantHint)
@@ -103,10 +127,72 @@ func (r *router) userScopes(ctx *azugo.Context, sess *session.Session, clientID,
 	case chosen == nil:
 		// Several organisations and none named: the choice is the person's.
 		// The token carries no tenant and no scopes until they make it.
-		return membershipOutcome{choices: choices}, true
+		return membershipOutcome{choices: choices, listed: listed}, true
 	}
 
-	return membershipOutcome{scopes: chosen.Scopes, tenant: chosen.TenantID}, true
+	// The scopes that count only on a high sign-in go to a client that is set to
+	// carry them, never to one that is not.
+	client, _ := r.Registry().SignInClient(clientID)
+	scopes, dropped := withHighScopes(chosen, sess.LoA, client.HighScopes)
+	warnDroppedScopes(ctx, chosen.TenantID, dropped)
+
+	return membershipOutcome{scopes: scopes, tenant: chosen.TenantID, listed: listed}, true
+}
+
+// withHighScopes answers the scopes a person's token carries from the chosen
+// membership: its scopes, and — only when the session's assurance level is
+// exactly high and the client the token is issued to is set to carry them
+// (highAllowed) — its high-only scopes after them, skipping any already present.
+// Any other level, including an empty or unknown one, adds nothing. The level is
+// the one the session holds at this issue, so every refresh decides again from
+// the register's current answer. Each scope is held to a shape first; dropped
+// counts those left out.
+func withHighScopes(m *rolebyte.Membership, loa string, highAllowed bool) (scopes []string, dropped int) {
+	scopes, dropped = shapedScopes(m.Scopes)
+	if loa != identity.LoAHigh || !highAllowed || len(m.HighScopes) == 0 {
+		return scopes, dropped
+	}
+
+	high, n := shapedScopes(m.HighScopes)
+	for _, s := range high {
+		if !slices.Contains(scopes, s) {
+			scopes = append(scopes, s)
+		}
+	}
+
+	return scopes, dropped + n
+}
+
+// shapedScopes keeps the scopes that are a box or a level and counts the rest.
+// A token's scopes are one string split on white space where it is read, so a
+// scope that held white space — a no-break space as well as an ASCII one — would
+// be read as two; the register's answer is held to the same shape as a registry
+// document before anything is minted from it.
+func shapedScopes(in []string) (kept []string, dropped int) {
+	if in != nil {
+		kept = make([]string, 0, len(in)) // an empty list stays empty, not absent
+	}
+	for _, s := range in {
+		if !registry.IsBox(s) && !registry.IsLevel(s) {
+			dropped++
+
+			continue
+		}
+		kept = append(kept, s)
+	}
+
+	return kept, dropped
+}
+
+// warnDroppedScopes logs, once, that the register answered scopes of no valid
+// shape for a tenant. It names the tenant and the count, never the scopes.
+func warnDroppedScopes(ctx *azugo.Context, tenant string, dropped int) {
+	if dropped == 0 {
+		return
+	}
+
+	ctx.Log().Warn("the register answered scopes that are neither a box nor a level; left out of the token",
+		zap.String("tenant", tenant), zap.Int("dropped", dropped))
 }
 
 // registerUnavailable fails a token issue closed when the register is
@@ -124,6 +210,19 @@ func (r *router) registerUnavailable(ctx *azugo.Context, asked string, err error
 		pkerrors.WithStatus(fasthttp.StatusBadGateway)))
 
 	return membershipOutcome{}, false
+}
+
+// registerCompany is the organisation the register is told a token is being
+// issued for: the name given when it has the shape of an organisation id, and
+// none otherwise. A name of any other shape matches no membership anyway, so the
+// register is asked as for no organisation (it would refuse the name) and
+// chooseMembership still compares the name as given.
+func registerCompany(named string) string {
+	if personIDPattern.MatchString(named) {
+		return named
+	}
+
+	return ""
 }
 
 // chooseMembership picks the membership a token is minted for: the named one
@@ -201,7 +300,14 @@ func (r *router) token(ctx *azugo.Context) {
 	// An AI app holds no proof-of-possession key: its code exchange and its
 	// refreshes are answered without one, and its tokens are bound to none.
 	if grant == "authorization_code" || grant == "refresh_token" {
-		if id := ctx.Form.StringOptional("client_id"); id != nil {
+		id, idErr := ctx.Form.StringOptional("client_id")
+		if idErr != nil {
+			ctx.Error(idErr)
+
+			return
+		}
+
+		if id != nil {
 			if app, ok := r.Registry().AIApp(*id); ok {
 				r.grantForApp(ctx, grant, app)
 
@@ -274,6 +380,15 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 
 		return
 	}
+
+	// The code is spent. A redeem refused from here on ends the session made for
+	// it, and leaves the app's earlier session recorded and working.
+	redeemedOK := false
+	defer func() {
+		if !redeemedOK {
+			r.endAppSession(ctx, appCode.SessionID)
+		}
+	}()
 
 	// Echo-check: client_id and redirect_uri must match what was registered at
 	// authorization time ([RFC 6749 §4.1.3]).
@@ -369,6 +484,16 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		}
 	}
 
+	// The session replaces the app's earlier one under the browser's shared
+	// session only now that its code is redeemed. A shared session a sign-out
+	// ended meanwhile, or one that cannot be written, refuses the redeem.
+	if sess.Shared != "" && !r.recordRedeemed(ctx, sess.Shared, clientID, appCode.SessionID) {
+		ctx.Error(corehttp.UnauthorizedError{})
+
+		return
+	}
+	redeemedOK = true
+
 	r.Audit().UserTokenIssued(ctx, sess.Subject, sess.LoA, sess.LoginMethod, signIn.Audience, outcome.scopes)
 
 	ctx.JSON(&response.Token{
@@ -378,6 +503,7 @@ func (r *router) grantAuthorizationCode(ctx *azugo.Context, thumbprint string) {
 		RefreshToken: refresh,
 		IDToken:      idToken,
 		Tenants:      outcome.choices,
+		Memberships:  outcome.membershipList(),
 		// The login-captured signing capabilities ride the code exchange (and
 		// only the code exchange — a refresh re-issues a token, it is not a
 		// new identification), so the caller can hold them for the session.
@@ -437,14 +563,28 @@ func (r *router) grantClientCredentials(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
+	scopeValue, err := ctx.Form.StringOptional("scope")
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	var requested []string
-	if s := ctx.Form.StringOptional("scope"); s != nil {
-		requested = registry.ParseScopeString(*s)
+	if scopeValue != nil {
+		requested = registry.ParseScopeString(*scopeValue)
+	}
+
+	tenantValue, err := ctx.Form.StringOptional("tenant")
+	if err != nil {
+		ctx.Error(err)
+
+		return
 	}
 
 	tenant := ""
-	if t := ctx.Form.StringOptional("tenant"); t != nil {
-		tenant = *t
+	if tenantValue != nil {
+		tenant = *tenantValue
 	}
 
 	if _, err := r.Registry().Authenticate(clientID, secret); err != nil {
@@ -513,7 +653,7 @@ func (r *router) serviceAccountScopes(ctx *azugo.Context, clientID, tenant strin
 
 	// The register key of a service account is its own client id — the name
 	// it authenticated with and carries as its token subject.
-	memberships, err := resolver.Memberships(ctx, clientID)
+	memberships, err := resolver.Memberships(ctx, clientID, registerCompany(tenant))
 	if err != nil {
 		ctx.Log().Warn("membership resolve failed — refusing token issue: " + err.Error())
 		if errors.Is(err, rolebyte.ErrAnswerForAnotherSubject) {
@@ -535,7 +675,10 @@ func (r *router) serviceAccountScopes(ctx *azugo.Context, clientID, tenant strin
 		return nil, err
 	}
 
-	scopes := intersectScopes(allowed, chosen.Scopes)
+	granted, dropped := shapedScopes(chosen.Scopes)
+	warnDroppedScopes(ctx, chosen.TenantID, dropped)
+
+	scopes := intersectScopes(allowed, granted)
 	if len(scopes) == 0 {
 		// A member, but with no role toward this audience: nothing to mint.
 		err := corehttp.ForbiddenError{}
@@ -611,6 +754,7 @@ func (r *router) grantRefreshToken(ctx *azugo.Context, thumbprint string) {
 		ExpiresIn:    exp,
 		RefreshToken: refresh,
 		Tenants:      outcome.choices,
+		Memberships:  outcome.membershipList(),
 	})
 }
 
@@ -664,15 +808,29 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 
 	// subject_token_type, when supplied, must name an access token — the only
 	// token type the platform exchanges.
-	if st := ctx.Form.StringOptional("subject_token_type"); st != nil && *st != tokenTypeAccessToken {
+	st, err := ctx.Form.StringOptional("subject_token_type")
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
+	if st != nil && *st != tokenTypeAccessToken {
 		ctx.Error(azugo.ParamInvalidError{Name: "subject_token_type", Tag: "eq=" + tokenTypeAccessToken})
 
 		return
 	}
 
+	scopeValue, err := ctx.Form.StringOptional("scope")
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	var requested []string
-	if s := ctx.Form.StringOptional("scope"); s != nil {
-		requested = registry.ParseScopeString(*s)
+	if scopeValue != nil {
+		requested = registry.ParseScopeString(*scopeValue)
 	}
 
 	// Authenticate the requesting (delegating) client.

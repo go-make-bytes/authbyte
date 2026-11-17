@@ -62,6 +62,14 @@ sign_in_clients:
     claims: [name, given_name, family_name]
     methods: [webEid]
     redirect_uris: [https://product.example/callback]
+  - client_id: admin-spa
+    type: public
+    audience: product-api
+    enabled: true
+    high_scopes: true
+    claims: [name, given_name, family_name]
+    methods: [webEid]
+    redirect_uris: [https://admin.example/callback]
 `
 
 // fakeResolver drives the membership seams without a live register.
@@ -69,6 +77,7 @@ type fakeResolver struct {
 	memberships []rolebyte.Membership
 	err         error
 	asked       string // the subject key the seam passed down ("" = never asked)
+	askedTenant string // the organisation the seam passed down ("" = none named)
 
 	// The admission door: what it answers, what it was asked, and what the
 	// register answers AFTER a successful admission.
@@ -92,8 +101,9 @@ func (f *fakeResolver) Assistants(_ *azugo.Context, subjectKey string) ([]roleby
 	return f.assistants[subjectKey], nil
 }
 
-func (f *fakeResolver) Memberships(_ *azugo.Context, subjectKey string) ([]rolebyte.Membership, error) {
+func (f *fakeResolver) Memberships(_ *azugo.Context, subjectKey, tenant string) ([]rolebyte.Membership, error) {
 	f.asked = subjectKey
+	f.askedTenant = tenant
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -151,6 +161,10 @@ func scopesApp(t *testing.T, resolver authbytecore.ScopeResolver, setup ...func(
 		}
 		if n := ctx.Query.StringOptional("name"); n != nil {
 			sess.Name = *n
+		}
+		// The assurance level the session holds at this moment.
+		if l := ctx.Query.StringOptional("loa"); l != nil {
+			sess.LoA = *l
 		}
 		client, tenant := "", ""
 		if c := ctx.Query.StringOptional("client"); c != nil {

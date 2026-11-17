@@ -640,17 +640,21 @@ func TestAnotherPersonEndsTheFirstPersonsApps(t *testing.T) {
 
 	// 35: the same app signs in twice, the same person; an app that is not single
 	// sign-on shows the page each time, as a repeat sign-in does.
-	first, _ := signInByCard(t, tc, "sso-off", offReturn, annasCard)
-	firstSID, _ := sessionOf(t, mem, codeAt(t, first, offReturn))
-	again, _ := signInByCard(t, tc, "sso-off", offReturn, annasCard)
-	againSID, _ := sessionOf(t, mem, codeAt(t, again, offReturn))
+	// The earlier session ends when the new sign-in's code is redeemed.
+	first := cardSignedIn(t, app, mem, tc, "sso-off", offReturn, annasCard)
+	again, againVerifier := signInByCard(t, tc, "sso-off", offReturn, annasCard)
+	againCode := codeAt(t, again, offReturn)
+	firstSID := first.sid
 	_, err := mem.LoadSession(context.Background(), firstSID)
+	qt.Check(t, qt.IsNil(err))
+	againApp := redeemed(t, app, mem, "sso-off", offReturn, againCode, againVerifier)
+	againSID := againApp.sid
+	_, err = mem.LoadSession(context.Background(), firstSID)
 	qt.Check(t, qt.ErrorIs(err, session.ErrNotFound))
 	_, err = mem.LoadSession(context.Background(), againSID)
 	qt.Check(t, qt.IsNil(err))
 
-	answered := authorizeIn(t, tc, "second-app", secondReturn, nil)
-	secondSID, _ := sessionOf(t, mem, codeAt(t, answered, secondReturn))
+	secondSID := answeredApp(t, app, mem, tc, "second-app", secondReturn).sid
 	annasShared, _ := sharedOf(t, mem, tc)
 
 	// 33: Jānis signs in in the same browser.

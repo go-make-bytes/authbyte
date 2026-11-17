@@ -26,7 +26,13 @@ func clientSecret(ctx *azugo.Context, clientID string) (secret string, presented
 		return "", false, false
 	}
 
-	form := ctx.Form.StringOptional("client_secret")
+	form, err := ctx.Form.StringOptional("client_secret")
+	if err != nil {
+		ctx.Error(err)
+
+		return "", false, false
+	}
+
 	if hasBasic && form != nil {
 		ctx.Error(azugo.ParamInvalidError{Name: "client_secret", Tag: "one-method"})
 

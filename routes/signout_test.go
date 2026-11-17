@@ -203,10 +203,10 @@ func TestTwoAppsSigningOutAtOnceEndEverythingOnce(t *testing.T) {
 	qt.Check(t, qt.Equals(ended[0].Attributes["sessions"], 3))
 }
 
-// racingStore is the session store with a sign-out that lands while an answer
-// from the shared session is being given: after the answer read the shared
-// session and wrote its new app session, just before it records the app under
-// the shared one. putFails makes recording the app fail instead.
+// racingStore is the session store with a sign-out that lands while a code is
+// being redeemed: after the redeem read its session and minted its tokens, just
+// before it records the app session under the shared one. putFails makes
+// recording the app fail instead.
 type racingStore struct {
 	*sessiontest.Memory
 
@@ -240,12 +240,25 @@ func (s *racingStore) lastRecorded() string {
 	return s.recorded[len(s.recorded)-1]
 }
 
-// C7 case 13: an answer from the shared session given while a sign-out ends it
-// does not outlive the sign-out: it finds the shared session gone once it has
-// recorded its app, ends the session it made and shows the page, with no code. An
-// answer whose app cannot be recorded under the shared session is not given
-// either, since no sign-out would reach it.
-func TestAnAnswerDuringASignOutDoesNotOutliveIt(t *testing.T) {
+// answeredCode is the code of client answered from tc's browser's shared session
+// with no page, not yet redeemed, and its verifier.
+func answeredCode(t *testing.T, tc *azugo.TestClient, client, redirectURI string) (code, verifier string) {
+	t.Helper()
+
+	verifier, challenge := pkce()
+	a := authorizeIn(t, tc, client, redirectURI, url.Values{"code_challenge": {challenge}})
+	code = codeAt(t, a, redirectURI)
+	qt.Assert(t, qt.Not(qt.Equals(code, "")), qt.Commentf("%s: %d %s %s", client, a.status, a.location, a.body))
+
+	return code, verifier
+}
+
+// A redeem that lands while a sign-out ends the shared session does not outlive
+// the sign-out: it finds the shared session gone once it has recorded its app,
+// ends the session it made and is refused, with no token. A redeem whose app
+// cannot be recorded under the shared session is refused too, since no sign-out
+// would reach it.
+func TestARedeemDuringASignOutDoesNotOutliveIt(t *testing.T) {
 	var racing *racingStore
 	app, mem, _ := sharedApp(t, nil, func(a *authbytecore.App) {
 		racing = &racingStore{Memory: a.Session().(*sessiontest.Memory)}
@@ -254,27 +267,29 @@ func TestAnAnswerDuringASignOutDoesNotOutliveIt(t *testing.T) {
 
 	tc := app.TestClient()
 	plain := cardSignedIn(t, app, mem, tc, "plain-card", plainReturn, annasCard)
+	code, verifier := answeredCode(t, tc, "second-app", secondReturn)
 	racing.mu.Lock()
 	racing.signOut = func() {
 		qt.Check(t, qt.Equals(plain.signsOut(), fasthttp.StatusOK))
 	}
 	racing.mu.Unlock()
 
-	a := authorizeIn(t, tc, "second-app", secondReturn, nil)
-	qt.Check(t, qt.Equals(codeAt(t, a, secondReturn), ""), qt.Commentf("%d %s", a.status, a.location))
-	qt.Check(t, qt.Equals(a.status, fasthttp.StatusOK))
+	status, body := newEdge(t, app).exchange(signIn{code: code, verifier: verifier}, "second-app", secondReturn)
+	qt.Check(t, qt.Equals(status, fasthttp.StatusUnauthorized), qt.Commentf("%s", body["_raw"]))
+	qt.Check(t, qt.IsNil(body["access_token"]))
 	_, err := mem.LoadSession(context.Background(), racing.lastRecorded())
 	qt.Check(t, qt.ErrorIs(err, session.ErrNotFound))
+	qt.Check(t, qt.IsFalse(holdsRefreshGrant(mem, racing.lastRecorded())), qt.Commentf("its refresh grant is gone"))
 	plain.ended(t, mem)
 
 	other := app.TestClient()
 	cardSignedIn(t, app, mem, other, "plain-card", plainReturn, annasCard)
+	code, verifier = answeredCode(t, other, "second-app", secondReturn)
 	racing.mu.Lock()
 	racing.putFails = true
 	racing.mu.Unlock()
-	a = authorizeIn(t, other, "second-app", secondReturn, nil)
-	qt.Check(t, qt.Equals(codeAt(t, a, secondReturn), ""), qt.Commentf("%d %s", a.status, a.location))
-	qt.Check(t, qt.Equals(a.status, fasthttp.StatusOK))
+	status, body = newEdge(t, app).exchange(signIn{code: code, verifier: verifier}, "second-app", secondReturn)
+	qt.Check(t, qt.Equals(status, fasthttp.StatusUnauthorized), qt.Commentf("%s", body["_raw"]))
 	_, err = mem.LoadSession(context.Background(), racing.lastRecorded())
 	qt.Check(t, qt.ErrorIs(err, session.ErrNotFound))
 }

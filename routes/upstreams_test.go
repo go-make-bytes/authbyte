@@ -324,6 +324,17 @@ func sentTo(t *testing.T, a answer) (*url.URL, string) {
 	return loc, loc.Query().Get("state")
 }
 
+// listUnderShared lists the app session sid under tc's browser's shared session
+// directly in the store, in place of the redeem of its code that would list it;
+// these tests complete sign-ins without redeeming.
+func listUnderShared(t *testing.T, mem *sessiontest.Memory, tc *azugo.TestClient, client, sid string) {
+	t.Helper()
+
+	id, sh := sharedOf(t, mem, tc)
+	_, err := mem.PutSharedApp(context.Background(), id, client, sid, sh.ExpiresAt)
+	qt.Assert(t, qt.IsNil(err))
+}
+
 // startDirect starts a sign-in for clientID asking for method by acr_values.
 func (d *twoLaneDeployment) startDirect(t *testing.T, tc *azugo.TestClient, clientID, redirectURI, method string, extra url.Values) (*url.URL, string) {
 	t.Helper()
@@ -665,6 +676,7 @@ func TestAnotherProviderWithoutACommonCodeIsAnotherPerson(t *testing.T) {
 	first := codeAt(t, d.signInByEntra(t, tc, "mobile-and-entra", meReturn, "oid-4"), meReturn)
 	qt.Assert(t, qt.Not(qt.Equals(first, "")))
 	firstSid, firstSess := sessionOf(t, d.mem, first)
+	listUnderShared(t, d.mem, tc, "mobile-and-entra", firstSid)
 
 	second := codeAt(t, d.signInByEParaksts(t, tc, "mobile-and-entra", meReturn), meReturn)
 	qt.Assert(t, qt.Not(qt.Equals(second, "")))
@@ -762,11 +774,13 @@ func TestASignOutEndsAppsOfEveryLane(t *testing.T) {
 	byMobile := codeAt(t, d.signInByEParaksts(t, tc, "mobile-and-entra", meReturn), meReturn)
 	qt.Assert(t, qt.Not(qt.Equals(byMobile, "")))
 	mobileSid, _ := sessionOf(t, d.mem, byMobile)
+	listUnderShared(t, d.mem, tc, "mobile-and-entra", mobileSid)
 
 	a, _ := signInByCard(t, tc, "card-sso", cardsReturn, annasCard)
 	byCard := codeAt(t, a, cardsReturn)
 	qt.Assert(t, qt.Not(qt.Equals(byCard, "")), qt.Commentf("%d %s", a.status, a.body))
 	cardSid, _ := sessionOf(t, d.mem, byCard)
+	listUnderShared(t, d.mem, tc, "card-sso", cardSid)
 
 	out := got(t)(tc.Get("/logout?client_id=mobile-and-entra&redirect_uri=" + url.QueryEscape("https://me.example/") +
 		"&login_method=" + identity.LoginEParakstsMobile))
