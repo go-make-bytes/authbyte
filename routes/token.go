@@ -300,7 +300,14 @@ func (r *router) token(ctx *azugo.Context) {
 	// An AI app holds no proof-of-possession key: its code exchange and its
 	// refreshes are answered without one, and its tokens are bound to none.
 	if grant == "authorization_code" || grant == "refresh_token" {
-		if id := ctx.Form.StringOptional("client_id"); id != nil {
+		id, idErr := ctx.Form.StringOptional("client_id")
+		if idErr != nil {
+			ctx.Error(idErr)
+
+			return
+		}
+
+		if id != nil {
 			if app, ok := r.Registry().AIApp(*id); ok {
 				r.grantForApp(ctx, grant, app)
 
@@ -556,14 +563,28 @@ func (r *router) grantClientCredentials(ctx *azugo.Context, thumbprint string) {
 		return
 	}
 
+	scopeValue, err := ctx.Form.StringOptional("scope")
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	var requested []string
-	if s := ctx.Form.StringOptional("scope"); s != nil {
-		requested = registry.ParseScopeString(*s)
+	if scopeValue != nil {
+		requested = registry.ParseScopeString(*scopeValue)
+	}
+
+	tenantValue, err := ctx.Form.StringOptional("tenant")
+	if err != nil {
+		ctx.Error(err)
+
+		return
 	}
 
 	tenant := ""
-	if t := ctx.Form.StringOptional("tenant"); t != nil {
-		tenant = *t
+	if tenantValue != nil {
+		tenant = *tenantValue
 	}
 
 	if _, err := r.Registry().Authenticate(clientID, secret); err != nil {
@@ -787,15 +808,29 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 
 	// subject_token_type, when supplied, must name an access token — the only
 	// token type the platform exchanges.
-	if st := ctx.Form.StringOptional("subject_token_type"); st != nil && *st != tokenTypeAccessToken {
+	st, err := ctx.Form.StringOptional("subject_token_type")
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
+	if st != nil && *st != tokenTypeAccessToken {
 		ctx.Error(azugo.ParamInvalidError{Name: "subject_token_type", Tag: "eq=" + tokenTypeAccessToken})
 
 		return
 	}
 
+	scopeValue, err := ctx.Form.StringOptional("scope")
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	var requested []string
-	if s := ctx.Form.StringOptional("scope"); s != nil {
-		requested = registry.ParseScopeString(*s)
+	if scopeValue != nil {
+		requested = registry.ParseScopeString(*scopeValue)
 	}
 
 	// Authenticate the requesting (delegating) client.

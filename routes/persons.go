@@ -143,7 +143,14 @@ func (r *router) personLines(ctx *azugo.Context) {
 	}
 
 	var req personLinesRequest
-	if err := json.Unmarshal(ctx.Body.Bytes(), &req); err != nil || len(req.Subjects) == 0 {
+	body, readErr := ctx.Body.Bytes()
+	if readErr != nil {
+		ctx.Error(readErr)
+
+		return
+	}
+
+	if err := json.Unmarshal(body, &req); err != nil || len(req.Subjects) == 0 {
 		invalidPersons(ctx, "subjects must be a non-empty list of person subjects")
 
 		return

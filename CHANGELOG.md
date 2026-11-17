@@ -5,6 +5,13 @@ runs the service or integrates against it.
 
 ## v0.13.0
 
+### Changed
+
+- **The service runs on Go 1.27.4 and azugo v0.50.2.** Request bodies read through the framework (the token and
+  refresh forms, and the person-lines read) are held to its limit: a body over 4 MiB answers 413 in the problem
+  envelope, or the limit `SERVER_MAX_REQUEST_BODY_SIZE` sets. A malformed multipart body answers 400. No route
+  raises its own limit; every body these routes take is small.
+
 ### Added
 
 - **The token answer of a person in several organisations lists them by name.** When the membership register
