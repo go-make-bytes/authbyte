@@ -671,8 +671,19 @@ func (r *router) answerAppToken(ctx *azugo.Context, app registry.SignInClient, s
 		TokenType:    tokenTypeBearer,
 		ExpiresIn:    exp,
 		RefreshToken: refresh,
-		Scope:        strings.Join(scopes, " "),
+		Scope:        nonEmptyScope(scopes),
 	})
+}
+
+// nonEmptyScope is an AI app's answered scope: its boxes joined, or absent
+// when it holds none, as that answer has always been.
+func nonEmptyScope(scopes []string) *string {
+	if len(scopes) == 0 {
+		return nil
+	}
+	s := strings.Join(scopes, " ")
+
+	return &s
 }
 
 // revokeApp ends an AI app's connection at its own request [RFC 7009]: the app

@@ -3,6 +3,7 @@ package routes
 import (
 	"errors"
 	"slices"
+	"strings"
 
 	"github.com/gmb-lib/go-authbyte/claims"
 	pkerrors "github.com/gmb-lib/go-platform-kit/errors"
@@ -182,6 +183,59 @@ func shapedScopes(in []string) (kept []string, dropped int) {
 	}
 
 	return kept, dropped
+}
+
+const leftOutScopesMessage = "a token exchange asked scopes outside the client's grant toward the audience; they are not issued"
+
+// namedLeftOutScopes bounds how many scopes left out of an exchange one warning
+// names, and maxNamedScopeLen how long a named one may be: the names come from
+// the client's request.
+const (
+	namedLeftOutScopes = 20
+	maxNamedScopeLen   = 200
+)
+
+// namable reports whether a scope the request named may be written into a log
+// line as it is: a box's or a level's shape, not over the length bound, and
+// only printable ASCII, so no control, invisible or direction-changing
+// character can make a log viewer show something other than what it holds.
+func namable(s string) bool {
+	if len(s) > maxNamedScopeLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return false
+		}
+	}
+
+	return registry.IsBox(s) || registry.IsLevel(s)
+}
+
+// warnLeftOutScopes logs, once per exchange, the scopes it asked that the
+// client's grant toward the audience lacks, so a deployment's missing registry
+// line can be found. It names the client, the audience and each scope of a
+// box's or a level's shape, up to a bound, and counts the rest; it never names
+// the person the exchange is for.
+func warnLeftOutScopes(ctx *azugo.Context, clientID, audience string, left []string) {
+	if len(left) == 0 {
+		return
+	}
+
+	named := make([]string, 0, min(len(left), namedLeftOutScopes))
+	unnamed := 0
+	for _, s := range left {
+		if len(named) < namedLeftOutScopes && namable(s) {
+			named = append(named, s)
+
+			continue
+		}
+		unnamed++
+	}
+
+	ctx.Log().Warn(leftOutScopesMessage,
+		zap.String("client", clientID), zap.String("audience", audience),
+		zap.Strings("scopes", named), zap.Int("unnamed", unnamed))
 }
 
 // warnDroppedScopes logs, once, that the register answered scopes of no valid
@@ -884,8 +938,12 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 	}
 
 	// The target audience + scopes are authorized against the same grant matrix
-	// that governs client-credentials.
-	scopes, err := r.Registry().AllowedScopes(clientID, audience, requested)
+	// that governs client-credentials, but a scope outside the grant is left out
+	// rather than refusing the whole exchange: a box the deployment has not
+	// granted yet then costs its holder that box, not every call. An exchange
+	// whose asked scopes are all outside the grant is still refused.
+	scopes, left, err := r.Registry().ExchangeScopes(clientID, audience, requested)
+	warnLeftOutScopes(ctx, clientID, audience, left)
 	if err != nil {
 		if errors.Is(err, registry.ErrGrantDenied) {
 			ctx.Error(corehttp.ForbiddenError{})
@@ -923,11 +981,16 @@ func (r *router) grantTokenExchange(ctx *azugo.Context, thumbprint string) {
 
 	r.Audit().DelegatedTokenIssued(ctx, clientID, subject.Subject, audience, scopes)
 
+	// The answer names the scope issued, an empty one included: a scope left
+	// out, or an assistant's narrowing, makes it differ from the one asked, and
+	// an answer without it would read as the one asked [RFC 8693 §2.2.1].
+	issued := strings.Join(scopes, " ")
 	ctx.JSON(&response.Token{
 		AccessToken:     tok,
 		TokenType:       tokenTypeDPoP,
 		ExpiresIn:       exp,
 		IssuedTokenType: tokenTypeAccessToken,
+		Scope:           &issued,
 	})
 }
 

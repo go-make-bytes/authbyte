@@ -109,6 +109,81 @@ func TestAllowedScopesDeniesUngrantedScope(t *testing.T) {
 	}
 }
 
+// A service's own sign-in still refuses a request with one scope outside its
+// grant, even beside one inside it: only an exchange for a person leaves a scope out.
+func TestAllowedScopesStillRefusesAMixedAsk(t *testing.T) {
+	r := load(t)
+
+	scopes, err := r.AllowedScopes("svc:notification", "svc:envelope", []string{"envelopes:read", "envelopes:transition"})
+	if !errors.Is(err, ErrGrantDenied) {
+		t.Fatalf("expected ErrGrantDenied for a mixed ask, got %v (%v)", err, scopes)
+	}
+}
+
+// An exchange for a person issues the asked scopes the grant holds, in the order
+// asked, and leaves out the one it lacks instead of refusing the whole.
+func TestExchangeScopesLeavesOutWhatTheGrantLacks(t *testing.T) {
+	r := load(t)
+
+	issued, left, err := r.ExchangeScopes("svc:signflow", "svc:envelope",
+		[]string{"envelopes:transition", "envelopes:delete", "envelopes:read"})
+	if err != nil {
+		t.Fatalf("ExchangeScopes: %v", err)
+	}
+	if !slices.Equal(issued, []string{"envelopes:transition", "envelopes:read"}) {
+		t.Fatalf("issued %v, want the two the grant holds in the order asked", issued)
+	}
+	if !slices.Equal(left, []string{"envelopes:delete"}) {
+		t.Fatalf("left %v, want the one the grant lacks", left)
+	}
+}
+
+// An exchange that asks only scopes the grant lacks is refused, and never
+// answered with the whole grant: that is only for an exchange that asks nothing.
+func TestExchangeScopesRefusesWhenNothingAskedIsGranted(t *testing.T) {
+	r := load(t)
+
+	issued, left, err := r.ExchangeScopes("svc:notification", "svc:envelope", []string{"envelopes:transition"})
+	if !errors.Is(err, ErrGrantDenied) {
+		t.Fatalf("expected ErrGrantDenied when nothing asked is granted, got %v", err)
+	}
+	if len(issued) != 0 {
+		t.Fatalf("issued %v on a refusal, want none", issued)
+	}
+	if !slices.Equal(left, []string{"envelopes:transition"}) {
+		t.Fatalf("left %v, want the scope asked, so it can be named", left)
+	}
+}
+
+// An exchange that asks nothing gets the whole grant, as before.
+func TestExchangeScopesDefaultsToFullGrant(t *testing.T) {
+	r := load(t)
+
+	issued, left, err := r.ExchangeScopes("svc:signflow", "svc:envelope", nil)
+	if err != nil {
+		t.Fatalf("ExchangeScopes: %v", err)
+	}
+	if !slices.Equal(issued, []string{"envelopes:read", "envelopes:transition"}) || len(left) != 0 {
+		t.Fatalf("issued %v left %v, want the whole grant and nothing left", issued, left)
+	}
+}
+
+// An exchange toward an audience the client is not granted, or by a client the
+// registry does not know or has disabled, is refused before any scope is weighed.
+func TestExchangeScopesRefusesAnUngrantedAudienceOrClient(t *testing.T) {
+	r := load(t)
+
+	if _, left, err := r.ExchangeScopes("svc:notification", "svc:document", []string{"documents:read"}); !errors.Is(err, ErrGrantDenied) || len(left) != 0 {
+		t.Fatalf("expected ErrGrantDenied and nothing named for an ungranted audience, got %v (%v)", err, left)
+	}
+	if _, _, err := r.ExchangeScopes("svc:disabled", "svc:envelope", []string{"envelopes:read"}); !errors.Is(err, ErrUnknownClient) {
+		t.Fatalf("expected ErrUnknownClient for a disabled client, got %v", err)
+	}
+	if _, _, err := r.ExchangeScopes("svc:unknown", "svc:envelope", []string{"envelopes:read"}); !errors.Is(err, ErrUnknownClient) {
+		t.Fatalf("expected ErrUnknownClient for an unknown client, got %v", err)
+	}
+}
+
 const docPublic = `
 service_clients: []
 sign_in_clients:

@@ -593,25 +593,29 @@ func (r *Registry) Authenticate(clientID, secret string) (Client, error) {
 	return c, nil
 }
 
-// AllowedScopes returns the scopes a client may receive toward an audience,
-// intersected with the requested scopes. It errors if the audience is not
-// granted or any requested scope is outside the grant.
-func (r *Registry) AllowedScopes(clientID, audience string, requested []string) ([]string, error) {
+// grantToward returns an enabled client's grant toward an audience.
+func (r *Registry) grantToward(clientID, audience string) (*Grant, error) {
 	c, ok := r.clients[clientID]
 	if !ok || !c.Enabled {
 		return nil, ErrUnknownClient
 	}
 
-	var grant *Grant
 	for i := range c.Grants {
 		if c.Grants[i].Audience == audience {
-			grant = &c.Grants[i]
-
-			break
+			return &c.Grants[i], nil
 		}
 	}
-	if grant == nil {
-		return nil, fmt.Errorf("%w: audience %q", ErrGrantDenied, audience)
+
+	return nil, fmt.Errorf("%w: audience %q", ErrGrantDenied, audience)
+}
+
+// AllowedScopes returns the scopes a client may receive toward an audience,
+// intersected with the requested scopes. It errors if the audience is not
+// granted or any requested scope is outside the grant.
+func (r *Registry) AllowedScopes(clientID, audience string, requested []string) ([]string, error) {
+	grant, err := r.grantToward(clientID, audience)
+	if err != nil {
+		return nil, err
 	}
 
 	allowed := make(map[string]struct{}, len(grant.Scopes))
@@ -634,6 +638,48 @@ func (r *Registry) AllowedScopes(clientID, audience string, requested []string) 
 	}
 
 	return out, nil
+}
+
+// ExchangeScopes returns the scopes a token exchange made on a person's behalf
+// issues toward an audience: the requested scopes the client's grant holds, in
+// the order asked, and apart the ones it leaves out. Unlike a client's own
+// sign-in (AllowedScopes), a scope outside the grant does not refuse the whole
+// request: it is left out, so a box the deployment has not granted yet costs
+// that box alone [RFC 8693 §2.2.1]. It errors when the client is unknown or
+// disabled, when the audience is not granted, and when scopes were asked and
+// none of them is in the grant: such a request is never answered with the
+// whole grant, which only a request that asks nothing gets.
+func (r *Registry) ExchangeScopes(clientID, audience string, requested []string) (issued, left []string, err error) {
+	grant, err := r.grantToward(clientID, audience)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(requested) == 0 {
+		return append([]string(nil), grant.Scopes...), nil, nil
+	}
+
+	allowed := make(map[string]struct{}, len(grant.Scopes))
+	for _, s := range grant.Scopes {
+		allowed[s] = struct{}{}
+	}
+
+	issued = make([]string, 0, len(requested))
+	for _, s := range requested {
+		if _, ok := allowed[s]; ok {
+			issued = append(issued, s)
+
+			continue
+		}
+
+		left = append(left, s)
+	}
+
+	if len(issued) == 0 {
+		return nil, left, fmt.Errorf("%w: no scope asked is granted toward audience %q", ErrGrantDenied, audience)
+	}
+
+	return issued, left, nil
 }
 
 // AssistantLevels returns the levels clientID's grant toward audience names for a

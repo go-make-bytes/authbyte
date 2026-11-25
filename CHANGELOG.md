@@ -3,6 +3,29 @@
 Notable changes to this service, newest first, per release. This file is written for whoever
 runs the service or integrates against it.
 
+## v0.14.0
+
+### Changed
+
+- **A token exchange leaves out an asked scope its client's grant lacks instead of refusing the whole exchange.**
+  Before, one asked scope outside the exchanging client's grant toward the audience answered 403 and issued
+  nothing, so a box a deployment had not yet granted to an edge stopped every call its holders made through that
+  edge. Now the token carries the asked scopes the grant holds, in the order asked, and the others are left out; each
+  one left out is logged as a warning naming it, the client and the audience (a scope of no box or level shape, or
+  holding anything but printable ASCII, is counted, not named; at most 20 are named; the person is never named). An exchange whose asked scopes are all outside the grant is still
+  refused with 403 and issues nothing; it is never answered with the whole grant, which only an exchange that asks
+  no scope gets, as before. A service's own sign-in (`client_credentials`) is unchanged: one scope outside its grant
+  still refuses the request. A client that relied on the 403 to learn that its registry line lacks a scope now sees
+  the token without it, and the warning in this service's log.
+
+### Fixed
+
+- **The token exchange's answer names the scope it issued** (`scope`), as RFC 8693 §2.2.1 requires when the issued
+  scope differs from the one asked. It was missing for every exchange, including one whose scopes an AI app's
+  assistant narrowed. When nothing is left after the narrowing the answer says `"scope": ""` rather than leaving
+  the field out, which would read as the scope asked for. The token's own `scope` claim, which every check reads, is
+  unchanged, and so is an AI app's own token answer.
+
 ## v0.13.0
 
 ### Changed
