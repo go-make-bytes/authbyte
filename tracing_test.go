@@ -12,6 +12,7 @@ import (
 	"azugo.io/azugo"
 	"azugo.io/core/cache"
 	"azugo.io/opentelemetry"
+	"github.com/gmb-lib/go-platform-kit/observability"
 	"github.com/go-quicktest/qt"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -60,7 +61,7 @@ func TestNoSessionStoreSpanCarriesAKey(t *testing.T) {
 	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
 
 	app := azugo.New()
-	_, err := opentelemetry.Use(app, &opentelemetry.Configuration{Endpoint: "http://127.0.0.1:1"},
+	err := observability.EnableTracing(app, &opentelemetry.Configuration{Endpoint: "http://127.0.0.1:1"},
 		append(cacheTracingOptions(), opentelemetry.TracerProvider(provider))...)
 	qt.Assert(t, qt.IsNil(err))
 
