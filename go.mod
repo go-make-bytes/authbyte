@@ -8,7 +8,7 @@ require (
 	azugo.io/opentelemetry v0.50.0
 	github.com/gmb-lib/go-authbyte v0.46.0
 	github.com/gmb-lib/go-gdpr-audit v1.2.0
-	github.com/gmb-lib/go-platform-kit v1.13.0
+	github.com/gmb-lib/go-platform-kit v1.14.0
 	github.com/gmb-lib/go-sec-events v1.3.0
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/go-quicktest/qt v1.102.0
